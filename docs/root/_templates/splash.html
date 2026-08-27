@@ -4,10 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Seizu — A star chart for your security graph</title>
-<meta name="description" content="Seizu (星図) is an open-source React + Python frontend for Neo4j graph data. Dashboards, an interactive Cypher console, scheduled reporting, and an MCP server for LLM agents — built for Cartography and security observability." />
-<meta name="keywords" content="seizu, neo4j, cartography, cncf cartography, security observability, graph database, cypher, MCP server, LLM agents, security posture, starbase, dashboard, open source" />
+<meta name="description" content="Seizu (星図) is an open-source React + Python frontend for Neo4j graph data. Dashboards and spaces, an interactive Cypher console, durable Temporal workflows, a built-in AI agent, and an MCP server for LLM agents — built for Cartography and security observability." />
+<meta name="keywords" content="seizu, neo4j, cartography, cncf cartography, security observability, graph database, cypher, MCP server, LLM agents, AI agent, agent plugins, agent skills, temporal workflows, cve remediation, scheduled chats, spaces, opentelemetry, security posture, starbase, dashboard, open source" />
 <meta property="og:title" content="Seizu — A star chart for your security graph" />
-<meta property="og:description" content="Open-source Neo4j frontend for Cartography and security observability. Dashboards, Cypher console, and MCP server for LLM agents." />
+<meta property="og:description" content="Open-source Neo4j frontend for Cartography and security observability. Dashboards and spaces, a Cypher console, durable workflows, a built-in AI agent, and an MCP server for LLM agents." />
 <meta property="og:type" content="website" />
 <link rel="icon" type="image/svg+xml" href="{{ pathto('_static/favicon.svg', 1) }}" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -322,6 +322,105 @@
   }
   .feature-cell:hover .accent-svg { opacity: 0.8; }
 
+  /* ---------- Agent ---------- */
+  .agent {
+    border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+    background:
+      radial-gradient(ellipse at 15% 0%, rgba(245,193,108,0.07), transparent 58%),
+      linear-gradient(to bottom, rgba(8,12,28,0.72), rgba(12,18,40,0.5));
+  }
+  .agent-grid { display: grid; grid-template-columns: 1fr 1.05fr; gap: 80px; align-items: start; }
+  .agent h2 {
+    font-family: var(--font-display); font-style: var(--display-style);
+    font-size: clamp(38px, 4.6vw, 60px); line-height: 1.05; letter-spacing: var(--display-tracking);
+    color: var(--text); margin: 0;
+  }
+  .agent h2 em { color: var(--accent-warm); }
+  .agent .lede { margin-top: 28px; font-size: 17px; line-height: 1.6; color: var(--text-muted); max-width: 560px; }
+  .agent-points { margin-top: 40px; display: grid; gap: 22px; }
+  .agent-point { display: grid; grid-template-columns: 92px 1fr; gap: 18px; align-items: start; }
+  .agent-point .k {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.15em;
+    color: var(--accent-warm); padding-top: 6px;
+  }
+  .agent-point .t strong {
+    display: block; font-family: var(--font-display); font-style: var(--display-style);
+    font-weight: 400; font-size: 21px; line-height: 1.25; color: var(--text); letter-spacing: -0.01em;
+  }
+  .agent-point .t span { display: block; margin-top: 6px; font-size: 14.5px; line-height: 1.55; color: var(--text-muted); }
+  .agent-point .t em { color: var(--text-dim); }
+
+  .trace {
+    border: 1px solid rgba(140,170,230,0.18); border-radius: 10px;
+    background: rgba(8,12,28,0.62);
+    padding: 26px 24px 20px;
+    font-family: var(--font-mono);
+    overflow-x: auto;
+  }
+  .trace-head, .trace-foot {
+    display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    font-size: 10px; color: var(--text-vfaint); letter-spacing: 0.18em;
+  }
+  .trace-head { margin-bottom: 20px; }
+  .trace-foot { margin-top: 20px; padding-top: 14px; border-top: 1px dashed rgba(140,170,230,0.14); }
+  .trace-row { display: grid; grid-template-columns: minmax(0, 152px) 1fr; gap: 14px; align-items: center; padding: 5px 0; }
+  .trace-row .name {
+    font-size: 10.5px; color: var(--text-faint); letter-spacing: 0.04em;
+    white-space: pre; overflow: hidden; text-overflow: ellipsis;
+  }
+  .trace-row .name.muted { color: var(--text-vfaint); }
+  .trace-row .name.root { color: var(--accent-warm); }
+  .trace-bar { position: relative; height: 8px; border-radius: 999px; background: rgba(140,170,230,0.07); }
+  .trace-bar i { position: absolute; top: 0; bottom: 0; border-radius: 999px; background: rgba(143,180,255,0.5); }
+  .trace-bar i.warm { background: rgba(245,193,108,0.55); }
+
+  /* ---------- Workflows ---------- */
+  .wf-grid { display: grid; grid-template-columns: 1fr 1.05fr; gap: 80px; align-items: start; }
+  .workflows h2 {
+    font-family: var(--font-display); font-style: var(--display-style);
+    font-size: clamp(38px, 4.6vw, 60px); line-height: 1.05; letter-spacing: var(--display-tracking);
+    color: var(--text); margin: 0;
+  }
+  .workflows h2 em { color: var(--accent); }
+  .workflows .lede { margin-top: 28px; font-size: 17px; line-height: 1.6; color: var(--text-muted); }
+  .wf-stages {
+    border: 1px solid rgba(140,170,230,0.18); border-radius: 10px;
+    background: rgba(8,12,28,0.6); padding: 26px 24px 20px;
+    font-family: var(--font-mono);
+  }
+  .wf-head, .wf-foot {
+    display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    font-size: 10px; color: var(--text-vfaint); letter-spacing: 0.18em;
+  }
+  .wf-head { margin-bottom: 22px; }
+  .wf-foot { margin-top: 24px; padding-top: 14px; border-top: 1px dashed rgba(140,170,230,0.14); }
+  .wf-stage .st { font-size: 10px; color: var(--text-vfaint); letter-spacing: 0.2em; }
+  .wf-acts { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .wf-act {
+    flex: 1 1 150px; padding: 12px 14px; border-radius: 6px;
+    border: 1px solid rgba(140,170,230,0.16); background: rgba(140,170,230,0.04);
+  }
+  .wf-act .n { font-size: 12px; color: var(--text-dim); word-break: break-word; }
+  .wf-act .d { font-size: 10px; color: var(--text-vfaint); margin-top: 5px; letter-spacing: 0.06em; }
+  .wf-act.warm { border-color: rgba(245,193,108,0.28); background: rgba(245,193,108,0.06); }
+  .wf-act.warm .n { color: var(--accent-warm); }
+  .wf-arrow { text-align: center; color: #5a7dbd; font-size: 13px; margin: 14px 0 4px; }
+  .wf-modules { margin-top: 36px; display: grid; gap: 12px; }
+  .wf-module {
+    padding: 16px 18px; border-radius: 8px;
+    background: rgba(16, 22, 44, 0.7);
+    border: 1px solid rgba(140,170,230,0.15);
+  }
+  .wf-module .n { font-family: var(--font-mono); font-size: 11px; color: var(--accent); letter-spacing: 0.08em; }
+  .wf-module p { margin: 9px 0 0; font-size: 14px; line-height: 1.55; color: var(--text-muted); }
+  .wf-module code {
+    font-family: var(--font-mono); font-size: 0.88em;
+    padding: 1px 6px; border-radius: 4px;
+    background: rgba(143,180,255,0.1); color: var(--accent);
+  }
+  .wf-note { margin-top: 24px; font-size: 14.5px; line-height: 1.6; color: var(--text-muted); }
+  .wf-note strong { color: var(--text-dim); font-weight: 600; }
+
   /* ---------- Product carousel ---------- */
   .showcase {
     border-top: 1px solid var(--rule);
@@ -518,6 +617,18 @@
   .mcp-example code {
     font-family: var(--font-mono); font-size: 11px; color: var(--accent); white-space: nowrap;
   }
+  .mcp-groups { margin-top: 28px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .mcp-groups .label {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--text-vfaint); letter-spacing: 0.2em; margin-right: 8px;
+  }
+  .mcp-groups span {
+    padding: 6px 12px; border-radius: 4px;
+    border: 1px solid rgba(140,170,230,0.2); background: rgba(140,170,230,0.04);
+    font-family: var(--font-mono); font-size: 11px; color: var(--text-dim);
+  }
+  .mcp-note { margin-top: 24px; font-size: 14.5px; line-height: 1.6; color: var(--text-muted); }
+  .mcp-note em { color: var(--text-dim); }
   .transmission {
     position: relative; aspect-ratio: 1 / 1.1;
     border: 1px solid rgba(140,170,230,0.18); border-radius: 10px;
@@ -535,7 +646,7 @@
   }
   .usecase {
     padding: 40px 36px; background: rgba(8,12,28,0.8);
-    min-height: 220px;
+    min-height: 200px;
   }
   .usecase .label {
     font-family: var(--font-mono); font-size: 11px;
@@ -581,7 +692,7 @@
   }
   .footer-grid {
     max-width: 1200px; margin: 0 auto;
-    display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr; gap: 40px;
+    display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr 1fr; gap: 40px;
   }
   .footer-grid .blurb { margin-top: 14px; font-size: 13px; color: var(--text-vfaint); max-width: 280px; line-height: 1.6; }
   .footer-grid h4 {
@@ -601,10 +712,10 @@
 
   /* ---------- Responsive ---------- */
   @media (max-width: 1100px) {
-    .whatis-grid, .cartography .grid, .mcp-grid { grid-template-columns: 1fr; gap: 60px; }
+    .whatis-grid, .cartography .grid, .mcp-grid,
+    .agent-grid, .wf-grid { grid-template-columns: 1fr; gap: 60px; }
     .feature-grid { grid-template-columns: repeat(2, 1fr); }
-    .footer-grid { grid-template-columns: 1.2fr 1fr 1fr; }
-    .footer-grid > div:nth-child(4) { grid-column: 2 / span 2; }
+    .footer-grid { grid-template-columns: 1.2fr 1fr 1fr; row-gap: 44px; }
   }
   @media (max-width: 900px) {
     .nav { padding: 14px 20px; }
@@ -615,8 +726,11 @@
     .section, .section-feature, .final-inner { padding-left: 20px; padding-right: 20px; }
     .feature-grid { grid-template-columns: 1fr; }
     .usecases-grid { grid-template-columns: 1fr; }
+    .agent-point { grid-template-columns: 1fr; gap: 6px; }
+    .agent-point .k { padding-top: 0; }
+    .trace-row { grid-template-columns: minmax(0, 118px) 1fr; gap: 10px; }
+    .trace-row .name { font-size: 9.5px; }
     .footer-grid { grid-template-columns: 1fr 1fr; }
-    .footer-grid > div:nth-child(4) { grid-column: auto; }
     .integration-strip { gap: 16px; }
     .integration-strip .brand { font-size: 18px; }
     .carousel-caption { align-items: flex-start; flex-direction: column; gap: 6px; }
@@ -673,6 +787,8 @@
   </a>
   <div class="nav-links">
     <a href="{{ pathto('install/backend') }}">Docs</a>
+    <a href="{{ pathto('install/chat') }}">Agent</a>
+    <a href="{{ pathto('install/workflows') }}">Workflows</a>
     <a href="{{ pathto('install/mcp-toolsets') }}">MCP</a>
     <a href="https://github.com/mappedsky/seizu">GitHub</a>
     <a class="nav-cta" href="{{ pathto('install/quickstart') }}">Quickstart →</a>
@@ -685,7 +801,7 @@
   <div class="hero-vignette"></div>
 
   <div class="corner tl"><div>N 35° 40′</div><div class="dim">TOKYO · 東京</div></div>
-  <div class="corner tr"><div>E 139° 45′</div><div class="dim">SEIZU · v1.0</div></div>
+  <div class="corner tr"><div>E 139° 45′</div><div class="dim">SEIZU · v5.0</div></div>
   <div class="corner bl"><div id="dateLabel">2026.04.20</div><div class="dim">OBSERVATORY OPEN</div></div>
   <div class="corner br"><div class="dim">SCROLL ↓</div></div>
 
@@ -701,7 +817,8 @@
       </h1>
       <p class="hero-sub">
         Seizu turns your Neo4j graph — cloud inventory, identities, vulnerabilities, relationships —
-        into dashboards, ad-hoc Cypher, and an MCP endpoint for the agents investigating alongside you.
+        into dashboards, ad-hoc Cypher and durable workflows, with an AI agent that investigates
+        alongside you and an MCP endpoint for the agents you already run.
       </p>
       <div class="hero-ctas">
         <a class="btn-primary" href="{{ pathto('install/quickstart') }}">Quickstart in 10 min →</a>
@@ -719,6 +836,7 @@
         <div class="brand">Starbase</div>
         <div class="brand">Cypher</div>
         <div class="brand">MCP</div>
+        <div class="brand">Temporal</div>
       </div>
     </div>
   </div>
@@ -742,8 +860,9 @@
       </p>
       <p>
         Point it at a <a href="https://github.com/cartography-cncf/cartography">Cartography</a> graph
-        and you get dashboards, ad-hoc Cypher, scheduled reporting, and an MCP endpoint
-        your agents can query — all from one configuration.
+        and you get dashboards and spaces, ad-hoc Cypher, durable workflows, and an MCP endpoint
+        your agents can query — plus an agent of its own, planning and investigating
+        with exactly the tools your roles allow.
       </p>
     </div>
 
@@ -806,7 +925,7 @@
     <span class="kanji">機能</span>
     <span class="text">CAPABILITIES</span>
   </div>
-  <h2 class="h2-display">Six instruments, one observatory.</h2>
+  <h2 class="h2-display">Twelve instruments, one observatory.</h2>
   <div class="feature-frame">
     <div class="gridlines">
       <div class="v" style="left: 25%"></div>
@@ -818,10 +937,10 @@
     </div>
     <div class="feature-grid">
       <div class="feature-cell">
-        <div class="head"><div class="greek">α</div><div class="ord">01 / 06</div></div>
+        <div class="head"><div class="greek">α</div><div class="ord">01 / 12</div></div>
         <h3>Dashboards</h3>
         <div class="sub">Built in the browser</div>
-        <p>Assemble dashboards and reports visually, the way you would in Grafana — rows, panels, charts, tables, graphs. Config can still be imported and exported as code.</p>
+        <p>Assemble reports visually, the way you would in Grafana — rows, panels, charts, tables, graph views. Every save is a version, and the whole config still imports and exports as code.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -833,7 +952,22 @@
         </svg>
       </div>
       <div class="feature-cell">
-        <div class="head"><div class="greek">β</div><div class="ord">02 / 06</div></div>
+        <div class="head"><div class="greek">β</div><div class="ord">02 / 12</div></div>
+        <h3>Spaces</h3>
+        <div class="sub">Group your reports</div>
+        <p>Gather related reports into named spaces and sub-spaces, and pin one as the space's landing page. Filing a report publishes it — a rule the store enforces, not just the UI.</p>
+        <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
+          <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="45" y2="8" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <circle cx="10" cy="35" r="1.5" fill="#8fb4ff" />
+          <circle cx="30" cy="20" r="2.2" fill="#8fb4ff" />
+          <circle cx="55" cy="30" r="1.5" fill="#8fb4ff" />
+          <circle cx="45" cy="8" r="1.2" fill="#8fb4ff" />
+        </svg>
+      </div>
+      <div class="feature-cell">
+        <div class="head"><div class="greek">γ</div><div class="ord">03 / 12</div></div>
         <h3>Query Console</h3>
         <div class="sub">Ad-hoc Cypher</div>
         <p>Interactive Cypher with graph, table, and raw result views. A collapsible schema browser shows every node label, relationship, and property key.</p>
@@ -848,10 +982,10 @@
         </svg>
       </div>
       <div class="feature-cell featured">
-        <div class="head"><div class="greek">γ</div><div class="ord">03 / 06</div></div>
-        <h3>MCP Server</h3>
-        <div class="sub">For LLM agents</div>
-        <p>Expose user-defined Cypher-backed tools at /api/v1/mcp. Claude and other agents investigate your graph the way your analysts do.</p>
+        <div class="head"><div class="greek">δ</div><div class="ord">04 / 12</div></div>
+        <h3>AI Agent</h3>
+        <div class="sub">Ask your graph anything</div>
+        <p>A chat assistant that routes, plans, investigates and verifies using the same governed tools your analysts hold. Turns run as Temporal workflows, so a reload never loses one.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#f5c16c" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#f5c16c" stroke-width="0.5" opacity="0.6" />
@@ -863,10 +997,10 @@
         </svg>
       </div>
       <div class="feature-cell">
-        <div class="head"><div class="greek">δ</div><div class="ord">04 / 06</div></div>
-        <h3>Scheduled Queries</h3>
-        <div class="sub">On a cron or a graph event</div>
-        <p>Run queries on a schedule or trigger them from graph changes. Route results to Slack, SQS, or any action plugin.</p>
+        <div class="head"><div class="greek">ε</div><div class="ord">05 / 12</div></div>
+        <h3>Agent Plugins</h3>
+        <div class="sub">Skills as packages</div>
+        <p>Package skills, references, scripts and assets into versioned plugins. Storage is immutable revisions over content-addressed blobs; publishing is staged in the browser and atomic.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -878,10 +1012,10 @@
         </svg>
       </div>
       <div class="feature-cell">
-        <div class="head"><div class="greek">ε</div><div class="ord">05 / 06</div></div>
-        <h3>Graph Events</h3>
-        <div class="sub">Triggers on change</div>
-        <p>Watch for interesting changes in the graph — a new admin policy, a fresh CVE on a production host — and fan out to downstream action plugins.</p>
+        <div class="head"><div class="greek">ζ</div><div class="ord">06 / 12</div></div>
+        <h3>Sandbox</h3>
+        <div class="sub">Isolated execution</div>
+        <p>Delegate code and file work to an ephemeral sandbox holding none of Seizu's credentials and no route to its data stores. It survives between turns and is reaped when the thread goes cold.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -893,10 +1027,85 @@
         </svg>
       </div>
       <div class="feature-cell">
-        <div class="head"><div class="greek">ζ</div><div class="ord">06 / 06</div></div>
-        <h3>SSO via JWT</h3>
-        <div class="sub">Connect your IDP</div>
-        <p>Native JWT authentication — point Seizu at your identity provider and inherit SSO for Neo4j itself. No proxy required.</p>
+        <div class="head"><div class="greek">η</div><div class="ord">07 / 12</div></div>
+        <h3>MCP Server</h3>
+        <div class="sub">Revision 2026-07-28</div>
+        <p>Serve Cypher-backed tools and built-in graph, report, space and plugin groups at /api/v1/mcp — current protocol revision and every earlier one, from one endpoint.</p>
+        <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
+          <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="45" y2="8" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <circle cx="10" cy="35" r="1.5" fill="#8fb4ff" />
+          <circle cx="30" cy="20" r="2.2" fill="#8fb4ff" />
+          <circle cx="55" cy="30" r="1.5" fill="#8fb4ff" />
+          <circle cx="45" cy="8" r="1.2" fill="#8fb4ff" />
+        </svg>
+      </div>
+      <div class="feature-cell">
+        <div class="head"><div class="greek">θ</div><div class="ord">08 / 12</div></div>
+        <h3>External MCP</h3>
+        <div class="sub">Third-party servers</div>
+        <p>Reach other MCP servers through operator-run proxies. Tools are discovered per user, namespaced ext__proxy__tool, confirmation-decided per tool, and never re-exported from Seizu.</p>
+        <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
+          <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="45" y2="8" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <circle cx="10" cy="35" r="1.5" fill="#8fb4ff" />
+          <circle cx="30" cy="20" r="2.2" fill="#8fb4ff" />
+          <circle cx="55" cy="30" r="1.5" fill="#8fb4ff" />
+          <circle cx="45" cy="8" r="1.2" fill="#8fb4ff" />
+        </svg>
+      </div>
+      <div class="feature-cell">
+        <div class="head"><div class="greek">ι</div><div class="ord">09 / 12</div></div>
+        <h3>Model Profiles</h3>
+        <div class="sub">Choose the model</div>
+        <p>Admins name a primary model, an economy fallback, per-stage overrides and a cost cap in the database. Users pick a profile and a reasoning level right in the composer.</p>
+        <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
+          <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="45" y2="8" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <circle cx="10" cy="35" r="1.5" fill="#8fb4ff" />
+          <circle cx="30" cy="20" r="2.2" fill="#8fb4ff" />
+          <circle cx="55" cy="30" r="1.5" fill="#8fb4ff" />
+          <circle cx="45" cy="8" r="1.2" fill="#8fb4ff" />
+        </svg>
+      </div>
+      <div class="feature-cell">
+        <div class="head"><div class="greek">κ</div><div class="ord">10 / 12</div></div>
+        <h3>Workflows</h3>
+        <div class="sub">Durable automation</div>
+        <p>Ordered stages of parallel activities with named outputs, on a clock or on a graph change. Temporal owns the history, so a tick missed during downtime is caught up, not lost.</p>
+        <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
+          <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="45" y2="8" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <circle cx="10" cy="35" r="1.5" fill="#8fb4ff" />
+          <circle cx="30" cy="20" r="2.2" fill="#8fb4ff" />
+          <circle cx="55" cy="30" r="1.5" fill="#8fb4ff" />
+          <circle cx="45" cy="8" r="1.2" fill="#8fb4ff" />
+        </svg>
+      </div>
+      <div class="feature-cell">
+        <div class="head"><div class="greek">λ</div><div class="ord">11 / 12</div></div>
+        <h3>Scheduled Chats</h3>
+        <div class="sub">Agents on a cron</div>
+        <p>A prompt and a trigger. The run happens headlessly as its creator, with the creator's permissions and nothing more, and lands in chat history as a conversation you can read.</p>
+        <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
+          <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <line x1="30" y1="20" x2="45" y2="8" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
+          <circle cx="10" cy="35" r="1.5" fill="#8fb4ff" />
+          <circle cx="30" cy="20" r="2.2" fill="#8fb4ff" />
+          <circle cx="55" cy="30" r="1.5" fill="#8fb4ff" />
+          <circle cx="45" cy="8" r="1.2" fill="#8fb4ff" />
+        </svg>
+      </div>
+      <div class="feature-cell">
+        <div class="head"><div class="greek">μ</div><div class="ord">12 / 12</div></div>
+        <h3>SSO &amp; RBAC</h3>
+        <div class="sub">Your IDP, your roles</div>
+        <p>OIDC with PKCE, refresh tokens sealed in an encrypted HttpOnly cookie, and hierarchical roles you can extend — enforced identically across REST, the CLI, MCP and chat.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -911,11 +1120,239 @@
   </div>
 </section>
 
+<!-- ============== AGENT ============== -->
+<section class="agent">
+  <div class="section">
+    <div class="section-label">
+      <span class="num">03</span>
+      <span class="rule"></span>
+      <span class="kanji">知能</span>
+      <span class="text">AGENT · IN · RESIDENCE</span>
+    </div>
+    <div class="agent-grid">
+      <div>
+        <h2>An agent that <em>investigates</em>,<br />not just answers.</h2>
+        <p class="lede">
+          Seizu's chat assistant works the graph the way an analyst does: it routes the question,
+          writes a plan, runs the plan's independent steps in parallel, verifies each one, and
+          synthesizes an answer with its working shown. It holds your permissions and no others,
+          and writes stop for confirmation before they land.
+        </p>
+        <div class="agent-points">
+          <div class="agent-point">
+            <div class="k">DURABLE</div>
+            <div class="t">
+              <strong>A turn is admitted, not requested.</strong>
+              <span>Each turn runs as a Temporal workflow and streams from an append-only log.
+              Close the tab, lose the connection, restart the web tier — the reader reattaches
+              from its cursor and the work continues.</span>
+            </div>
+          </div>
+          <div class="agent-point">
+            <div class="k">PARALLEL</div>
+            <div class="t">
+              <strong>A plan is a validated DAG.</strong>
+              <span>Independent steps are distributed one activity each across the worker fleet,
+              so they succeed, time out and fail on their own — and a step can fan out over
+              items an <em>earlier</em> step discovered.</span>
+            </div>
+          </div>
+          <div class="agent-point">
+            <div class="k">BUDGETED</div>
+            <div class="t">
+              <strong>Priced in dollars, not guesses.</strong>
+              <span>A run carries a cost ceiling, and each call reserves what its phase has
+              actually been observed to spend — derived from the model rather than from a
+              constant that is wrong on every model but one.</span>
+            </div>
+          </div>
+          <div class="agent-point">
+            <div class="k">TRACEABLE</div>
+            <div class="t">
+              <strong>Every span, over OTLP.</strong>
+              <span>The turn, each batch, step, expansion, model call and tool call — carrying
+              tokens, cost, cache reads, reasoning effort and outcome. Any collector works,
+              and prompt content stays out unless you ask for it.</span>
+            </div>
+          </div>
+          <div class="agent-point">
+            <div class="k">EXTENSIBLE</div>
+            <div class="t">
+              <strong>Skills it loads only when it needs them.</strong>
+              <span>Agent Plugins package skills, references and scripts; a skill's declared
+              tools are a dependency, not a grant, so a skill your role cannot satisfy simply
+              is not there.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="trace" role="img" aria-label="Trace waterfall of one agent turn: route, plan, a first batch of three parallel steps, a second batch fanned out over three discovered CVEs, then verify and synthesize.">
+        <div class="trace-head">
+          <span>TRACE · TURN 7f3a91</span>
+          <span>41.2s</span>
+        </div>
+        <div class="trace-row">
+          <div class="name root">chat turn</div>
+          <div class="trace-bar"><i class="warm" style="left: 0%; width: 100%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">├ route</div>
+          <div class="trace-bar"><i style="left: 0%; width: 6%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">├ plan</div>
+          <div class="trace-bar"><i style="left: 6%; width: 10%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name muted">├ batch 1</div>
+          <div class="trace-bar"><i style="left: 16%; width: 32%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">│ ├ s1 inventory</div>
+          <div class="trace-bar"><i style="left: 17%; width: 25%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">│ ├ s2 open cves</div>
+          <div class="trace-bar"><i style="left: 17%; width: 30%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">│ └ s3 identities</div>
+          <div class="trace-bar"><i style="left: 17%; width: 19%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name muted">├ batch 2 · map ×3</div>
+          <div class="trace-bar"><i style="left: 48%; width: 34%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">│ ├ CVE-2026-1123</div>
+          <div class="trace-bar"><i style="left: 49%; width: 25%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">│ ├ CVE-2026-0907</div>
+          <div class="trace-bar"><i style="left: 49%; width: 21%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">│ └ CVE-2026-0455</div>
+          <div class="trace-bar"><i style="left: 49%; width: 32%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">├ verify</div>
+          <div class="trace-bar"><i style="left: 82%; width: 6%;"></i></div>
+        </div>
+        <div class="trace-row">
+          <div class="name">└ synthesize</div>
+          <div class="trace-bar"><i class="warm" style="left: 88%; width: 12%;"></i></div>
+        </div>
+        <div class="trace-foot">
+          <span>$0.38 / $2.00</span>
+          <span>184K TOKENS</span>
+          <span>62% CACHED</span>
+          <span>14 TOOL CALLS</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== WORKFLOWS ============== -->
+<section class="section workflows">
+  <div class="section-label">
+    <span class="num">04</span>
+    <span class="rule"></span>
+    <span class="kanji">工程</span>
+    <span class="text">WORKFLOWS · AUTOMATION</span>
+  </div>
+  <div class="wf-grid">
+    <div class="wf-stages">
+      <div class="wf-head">
+        <span>PIPELINE · cve-triage</span>
+        <span>TEMPORAL</span>
+      </div>
+      <div class="wf-stage">
+        <div class="st">STAGE 01 · PARALLEL</div>
+        <div class="wf-acts">
+          <div class="wf-act"><div class="n">cartography_sync</div><div class="d">github · aws</div></div>
+          <div class="wf-act"><div class="n">query</div><div class="d">→ new_cves</div></div>
+        </div>
+      </div>
+      <div class="wf-arrow">↓</div>
+      <div class="wf-stage">
+        <div class="st">STAGE 02 · PARALLEL</div>
+        <div class="wf-acts">
+          <div class="wf-act warm"><div class="n">agent_chat</div><div class="d">input: new_cves</div></div>
+          <div class="wf-act"><div class="n">query</div><div class="d">→ owners</div></div>
+        </div>
+      </div>
+      <div class="wf-arrow">↓</div>
+      <div class="wf-stage">
+        <div class="st">STAGE 03</div>
+        <div class="wf-acts">
+          <div class="wf-act warm"><div class="n">cve_dependency_remediation</div><div class="d">opens the pull requests</div></div>
+        </div>
+      </div>
+      <div class="wf-arrow">↓</div>
+      <div class="wf-stage">
+        <div class="st">STAGE 04</div>
+        <div class="wf-acts">
+          <div class="wf-act"><div class="n">slack</div><div class="d">#sec-alerts</div></div>
+        </div>
+      </div>
+      <div class="wf-foot">
+        <span>TRIGGER · DAILY 07:00 UTC</span>
+        <span>OR ON GRAPH CHANGE</span>
+      </div>
+    </div>
+
+    <div>
+      <h2>Durable pipelines.<br /><em>Stages, not scripts.</em></h2>
+      <p class="lede">
+        A workflow is an ordered list of stages. Activities in one stage start together;
+        the next stage waits for every one of them, and each publishes a named output that
+        later stages consume. Temporal owns the schedule and the execution history, so a tick
+        missed during downtime is caught up rather than quietly dropped.
+      </p>
+      <div class="wf-modules">
+        <div class="wf-module">
+          <div class="n">cartography_sync</div>
+          <p>Run cartography's own ingest modules on a schedule — each in its own child workflow
+          with a per-module mutex, on a dedicated worker that holds intel credentials and nothing
+          from Seizu's store. Flags are a typed allowlist, never a shell string.</p>
+        </div>
+        <div class="wf-module">
+          <div class="n">cve_dependency_remediation</div>
+          <p>Where a report assesses, this one fixes: a headless coding agent in a sandbox
+          upgrades the vulnerable dependency across every affected manifest, then pushes a
+          version-keyed branch and opens the pull request. Two sandboxes, so the GitHub token
+          never shares a machine with untrusted code.</p>
+        </div>
+        <div class="wf-module">
+          <div class="n">agent_chat</div>
+          <p>The general-purpose AI activity. You write the prompt; it runs a headless agent
+          session as the workflow's creator and publishes the summary as a named output.
+          Referenced rows arrive as untrusted evidence, never as instructions.</p>
+        </div>
+        <div class="wf-module">
+          <div class="n">query · slack · sqs · statsd · log</div>
+          <p>Cypher in any stage, with an earlier output bound to <code>$input</code>, and results
+          routed wherever you already watch. Add your own activity module and it shows up in the
+          editor with a form of its own.</p>
+        </div>
+      </div>
+      <p class="wf-note">
+        <strong>Scheduled chats</strong> are the same idea without the pipeline — a prompt, a
+        trigger, and a headless run that lands in chat history as an ordinary conversation you
+        can read back.
+      </p>
+    </div>
+  </div>
+</section>
+
 <!-- ============== PRODUCT TOUR ============== -->
 <section class="showcase">
   <div class="section">
     <div class="section-label">
-      <span class="num">03</span>
+      <span class="num">05</span>
       <span class="rule"></span>
       <span class="kanji">画面</span>
       <span class="text">PRODUCT · TOUR</span>
@@ -948,8 +1385,8 @@
           <figure class="carousel-slide">
             <img src="{{ pathto('_static/seizu-toolsets-skillsets-walkthrough.gif', 1) }}" alt="Seizu MCP tools and skillsets screen" loading="lazy" />
             <figcaption class="carousel-caption">
-              <strong>Tools and Skills</strong>
-              <span>Publish graph-backed tools for MCP clients and agents</span>
+              <strong>Tools and Plugins</strong>
+              <span>Publish graph-backed tools and packaged agent skills</span>
             </figcaption>
           </figure>
           <figure class="carousel-slide">
@@ -975,7 +1412,7 @@
         <button class="carousel-dot" type="button" aria-label="Show Reports" aria-current="true"></button>
         <button class="carousel-dot" type="button" aria-label="Show Report Editing" aria-current="false"></button>
         <button class="carousel-dot" type="button" aria-label="Show Query Console" aria-current="false"></button>
-        <button class="carousel-dot" type="button" aria-label="Show Tools and Skills" aria-current="false"></button>
+        <button class="carousel-dot" type="button" aria-label="Show Tools and Plugins" aria-current="false"></button>
         <button class="carousel-dot" type="button" aria-label="Show Agents Using MCP" aria-current="false"></button>
       </div>
     </div>
@@ -986,7 +1423,7 @@
 <section class="cartography">
   <div class="section">
     <div class="section-label">
-      <span class="num">04</span>
+      <span class="num">06</span>
       <span class="rule"></span>
       <span class="kanji">地図</span>
       <span class="text">INTEGRATION · CARTOGRAPHY</span>
@@ -1045,7 +1482,7 @@ RETURN u.arn, g.name, p.name</pre>
 <!-- ============== MCP ============== -->
 <section class="section mcp">
   <div class="section-label">
-    <span class="num">05</span>
+    <span class="num">07</span>
     <span class="rule"></span>
     <span class="kanji">信号</span>
     <span class="text">SIGNAL · MCP · LLM</span>
@@ -1062,7 +1499,7 @@ RETURN u.arn, g.name, p.name</pre>
         </g>
         <g font-family="JetBrains Mono, monospace" font-size="10" fill="#6a7a9c" letter-spacing="1.5">
           <text x="12" y="24">MCP /api/v1/mcp</text>
-          <text x="12" y="420">TX · 2.4GHz</text>
+          <text x="12" y="420">REV · 2026-07-28</text>
           <text x="320" y="24">ONLINE</text>
           <text x="290" y="420">COHERENT</text>
         </g>
@@ -1073,10 +1510,17 @@ RETURN u.arn, g.name, p.name</pre>
     <div>
       <h2>Your graph, <em>legible to agents</em>.</h2>
       <p class="lede">
-        Seizu ships an MCP server at <code>/api/v1/mcp</code>. Define Cypher-backed
-        tools in YAML, and Claude, Cursor, or any MCP-aware agent can investigate your graph the way a
-        security engineer would — but at machine scale.
+        Seizu ships an MCP server at <code>/api/v1/mcp</code>, speaking protocol revision
+        <code>2026-07-28</code> and every earlier one from a single endpoint. Define Cypher-backed
+        tools from the UI or in YAML, and Claude, Cursor, or any MCP-aware agent investigates your
+        graph the way a security engineer would — bounded by the same roles your people are, and by
+        result limits sized for a client rather than a context window.
       </p>
+      <div class="mcp-groups">
+        <div class="label">BUILT · IN · GROUPS</div>
+        <span>graph</span><span>reports</span><span>spaces</span><span>toolsets</span>
+        <span>plugins</span><span>scheduled queries</span><span>roles</span>
+      </div>
       <div class="mcp-examples">
         <div class="mcp-example">
           <div class="q">&ldquo;Which EC2 instances have unpatched critical CVEs?&rdquo;</div>
@@ -1091,6 +1535,12 @@ RETURN u.arn, g.name, p.name</pre>
           <code>trace_blast_radius()</code>
         </div>
       </div>
+      <p class="mcp-note">
+        This is the endpoint your <em>own</em> agents connect to. Seizu's built-in assistant speaks
+        the same inventory from the inside, and can reach third-party MCP servers through
+        operator-run proxies — discovered per user, because a tool listing is itself
+        privileged information.
+      </p>
     </div>
   </div>
 </section>
@@ -1098,7 +1548,7 @@ RETURN u.arn, g.name, p.name</pre>
 <!-- ============== USE CASES ============== -->
 <section class="section section-feature">
   <div class="section-label">
-    <span class="num">06</span>
+    <span class="num">08</span>
     <span class="rule"></span>
     <span class="kanji">用途</span>
     <span class="text">USE · CASES</span>
@@ -1121,6 +1571,14 @@ RETURN u.arn, g.name, p.name</pre>
       <div class="label">04 · Supply-chain risk</div>
       <p>&ldquo;If this GitHub token leaks, what production resources are reachable?&rdquo;</p>
     </div>
+    <div class="usecase">
+      <div class="label">05 · Autonomous remediation</div>
+      <p>&ldquo;Every repo pinned to a vulnerable version — open the upgrade PRs before standup.&rdquo;</p>
+    </div>
+    <div class="usecase">
+      <div class="label">06 · The overnight watch</div>
+      <p>&ldquo;Tell me what moved while I was asleep, and whether any of it deserves my morning.&rdquo;</p>
+    </div>
   </div>
 </section>
 
@@ -1131,7 +1589,8 @@ RETURN u.arn, g.name, p.name</pre>
     <h2>Chart your own sky.</h2>
     <p>
       Spin up Seizu with docker-compose in under ten minutes, point it at your Neo4j instance,
-      and start seeing your infrastructure the way it actually connects.
+      and start seeing your infrastructure the way it actually connects — with an agent
+      already reading the same sky.
     </p>
     <div class="final-ctas">
       <a class="btn-primary" href="{{ pathto('install/quickstart') }}">Quickstart →</a>
@@ -1186,9 +1645,21 @@ RETURN u.arn, g.name, p.name</pre>
         <li><a href="{{ pathto('install/quickstart') }}">Quickstart</a></li>
         <li><a href="{{ pathto('install/backend') }}">Backend setup</a></li>
         <li><a href="{{ pathto('install/dashboard') }}">Dashboard</a></li>
+        <li><a href="{{ pathto('install/spaces') }}">Spaces</a></li>
         <li><a href="{{ pathto('install/query-console') }}">Query console</a></li>
+        <li><a href="{{ pathto('install/workflows') }}">Workflows</a></li>
+        <li><a href="{{ pathto('install/cartography-sync') }}">Cartography sync</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4>Agent</h4>
+      <ul>
+        <li><a href="{{ pathto('install/chat') }}">Chat assistant</a></li>
+        <li><a href="{{ pathto('install/agent-plugins') }}">Agent plugins</a></li>
+        <li><a href="{{ pathto('install/chat-schedules') }}">Scheduled chats</a></li>
+        <li><a href="{{ pathto('install/sandbox') }}">Sandbox</a></li>
         <li><a href="{{ pathto('install/mcp-toolsets') }}">MCP toolsets</a></li>
-        <li><a href="{{ pathto('install/scheduled-queries') }}">Scheduled queries</a></li>
+        <li><a href="{{ pathto('install/external-mcp') }}">External MCP</a></li>
       </ul>
     </div>
     <div>
@@ -1196,6 +1667,7 @@ RETURN u.arn, g.name, p.name</pre>
       <ul>
         <li><a href="{{ pathto('dev/dependencies') }}">Dependencies</a></li>
         <li><a href="{{ pathto('dev/test') }}">Tests</a></li>
+        <li><a href="{{ pathto('dev/decisions/index') }}">Decision log</a></li>
         <li><a href="{{ pathto('dev/contributing') }}">Contributing</a></li>
       </ul>
     </div>
