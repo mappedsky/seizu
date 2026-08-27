@@ -4,23 +4,59 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [5.0.0] - 2026-08-27
 
-### ⚠️ Breaking changes
+The headline of this release is that **the chat agent becomes durable
+infrastructure**. A turn is no longer an HTTP request: it is admitted, executed
+by a Temporal workflow, and streamed from an append-only event log, so a reload,
+a dropped connection or a web restart no longer destroys minutes of work. An
+orchestrated turn's independent plan steps are distributed across the worker
+fleet; a step may fan out over items an earlier step *discovered* rather than
+only over items the request named; and what a run may spend is budgeted in
+**dollars**, with what each call may spend derived from the model rather than
+from a constant. Every turn, batch, step, model call and tool call can be traced
+over OTLP.
+
+Around that: **Agent Plugins 1.0** becomes the canonical skill surface,
+**Spaces** group reports, **external MCP proxies** give the agent identity-aware
+access to third-party MCP servers, **model profiles** move model and reasoning
+choice into the database and into the composer, and **PostgreSQL is the only
+supported store**.
+
+This release has hard deployment edges — chat now requires Temporal, the chat
+streaming API is replaced, the DynamoDB backends are gone, and several budget
+settings changed meaning. Read [Breaking changes](#breaking-changes-500) and
+[Upgrade notes](#upgrade-notes-500) before deploying.
+
+### ⚠️ Breaking changes {#breaking-changes-500}
 
 - **PostgreSQL is now required for application storage and LangGraph chat
-  checkpoints** (#269). The DynamoDB report store, DynamoDB checkpoint saver,
-  checkpoint S3/MinIO offload, backend selectors, and local DynamoDB/MinIO
-  services are removed. PostgreSQL and the independently named checkpoint
-  database now start in the default Compose stack. Remove
+  checkpoints** (#269, #270). The DynamoDB report store, DynamoDB checkpoint
+  saver, checkpoint S3/MinIO offload, backend selectors, and local
+  DynamoDB/MinIO services are removed. PostgreSQL and the independently named
+  checkpoint database now start in the default Compose stack. Remove
   `REPORT_STORE_BACKEND`, `CHAT_CHECKPOINT_BACKEND`, `DYNAMODB_*`, and removed
   checkpoint table/offload settings; startup rejects them before touching the
   target databases. Existing PostgreSQL application databases continue through
   Alembic. Operators migrating from DynamoDB must export and back up before the
   cutover; DynamoDB checkpoint history is not migrated. The deployment order,
   data limitations, backup, and rollback boundary are documented under
-  [Migrating from DynamoDB to PostgreSQL](install/upgrading.md#migrating-from-dynamodb-to-postgresql).
-  Rationale: [STO-005](dev/decisions/report-store.md).
+  [Migrating from DynamoDB to PostgreSQL](docs/root/install/upgrading.md#migrating-from-dynamodb-to-postgresql).
+  Rationale: [STO-005](docs/root/dev/decisions/report-store.md).
+
+- **Interactive chat now requires a reachable Temporal server, and the chat
+  streaming API is replaced** (#254, #267). `POST /api/v1/chat/stream` and
+  `GET /api/v1/chat/stream/{thread_id}` are gone. Sending is now admit-then-
+  attach: `POST /api/v1/chat/threads/{thread_id}/turns` reserves the thread and
+  returns a turn id under a required idempotency key,
+  `GET /api/v1/chat/turns/{turn_id}/stream` tails that turn's event log, and
+  `POST /api/v1/chat/turns/{turn_id}/cancel` stops it.
+  `GET /api/v1/chat/threads/{thread_id}/turns/active` resolves a thread to its
+  running turn after a reload. Any client speaking the old endpoint must be
+  updated. `CHAT_ENABLED` therefore now implies Temporal, reversing what the
+  docs previously said, and the web service and the Temporal worker must both
+  receive the chat configuration. Rationale:
+  [AGT-008](docs/root/dev/decisions/chat-agent.md).
 
 - **Scheduled chats now require Temporal.** The `seizu-scheduled-chats` worker
   (`python -m reporting.scheduled_chats`), its Compose service, and its
@@ -34,7 +70,178 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tune; reconciliation cadence is `WORKFLOW_RECONCILE_SECONDS` and watch-scan
   polling is `WORKFLOW_WATCH_POLL_SECONDS`, both shared with workflows.
 
+- **Chat context is budgeted in tokens, so `CHAT_LLM_CONTEXT_MAX_CHARS` is
+  replaced by `CHAT_LLM_CONTEXT_MAX_TOKENS`** (default 40,000). A character cap
+  is the wrong unit for the job — structured tool output tokenizes about a third
+  worse than prose — and nothing read the model's own window. The old variable is
+  no longer read; set the new one. Rationale:
+  [CTX-002](docs/root/dev/decisions/chat-context.md).
+
+- **Run and per-call limits are derived by default, and a run is now bounded in
+  cost.** `CHAT_RUN_COST_BUDGET_USD` defaults to **$2.00** (was `0`, unlimited)
+  and is the runaway guard an operator tunes. `CHAT_LLM_MAX_TOKENS` (was 4096),
+  `CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS`, `CHAT_RUN_TOKEN_BUDGET` (was 120,000)
+  and `CHAT_RUN_MAX_LLM_CALLS` (was 64) all default to `0` = derive. A fixed
+  number was wrong in both directions on every one of them: models report output
+  ceilings from 16,384 to 393,216, a token backstop calibrated for a cheap model
+  is five times too loose on a frontier one, and a fixed call count bounds plan
+  size rather than spend. Pin any of them explicitly if you were relying on the
+  old value. Rationale: [AGT-019](docs/root/dev/decisions/chat-agent.md),
+  [AGT-022](docs/root/dev/decisions/chat-agent.md),
+  [AGT-024](docs/root/dev/decisions/chat-agent.md).
+
+- **MCP tool results are now bounded, and a truncated result changes shape**
+  (#247). `MCP_TOOL_RESULT_MAX_ROWS` (50,000) and `MCP_TOOL_RESULT_MAX_BYTES`
+  (25 MB) apply to every built-in and user-defined tool, sized far above what a
+  chat turn permits — an external client is not a model context. A result that
+  fits is returned exactly as before; one that is cut gains a truncation
+  envelope naming `returned`, the bounds that shaped it, and
+  `total_rows_at_least` where the total is unknown. A user-defined tool that
+  returned a bare list returns an object in that case. Previously nothing
+  bounded these calls at all, and a broad query could exhaust worker memory.
+
+- **`SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS` is removed in favour of
+  `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE`** (#256). A requirement
+  string beside a lock file is a second source of truth that can disagree with
+  it, and did. Everything the credential proxy installs is now hash-pinned by
+  construction; the setting chooses *which* lock. Deployments using
+  `SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE` must re-run
+  `make build_proxy_template` — a template is now used **as built** and a run
+  installs nothing over it. Rationale:
+  [WF-008](docs/root/dev/decisions/workflows.md).
+
+- **The plugin permission aliases are one-directional** (#285). `plugins:read`
+  / `plugins:write` / `plugins:delete` imply the legacy `skillsets:X` +
+  `skills:X`, but the reverse now requires **both** legacy permissions — a
+  user-defined role scoped to writing skills was silently expanding to
+  `plugins:write`, which grants package installation. Re-check any user-defined
+  role that grants one legacy permission and not the other.
+
 ### Added
+
+- **Agent Plugins 1.0** (#285) — Agent Plugins packages are the canonical skill
+  surface; skillsets and skills remain compatibility aliases for one release. A
+  package is `plugin.json` (with Seizu's settings under the
+  `com.mappedsky.seizu` extension), optional `mcp.json`, and
+  `skills/<name>/SKILL.md` plus `references/`, `scripts/` and `assets/`. Storage
+  is immutable revisions over content-addressed blobs, so an unchanged file is
+  carried by digest rather than re-uploaded. Editing is staged in the browser
+  and published atomically through `POST /api/v1/plugins/{id}/publish`, where a
+  required `base_revision` makes a stale publish a `409` rather than a silent
+  revert. `resources/list` catalogues one resource per enabled skill with its
+  resolved dependencies, and `prompts/get` returns the packaged SKILL.md body
+  verbatim followed by a rendered Inputs block, so a package is portable to a
+  consumer without Seizu's parameter extension. A skill's `allowed-tools` is a
+  **dependency declaration, not a grant**: an entry Seizu recognizes must exist
+  in the caller's RBAC-filtered inventory or the skill is unavailable. Skills
+  that ship `scripts/` run them only through `sandbox__run_script`. Permissions
+  `plugins:read` (Viewer) / `plugins:write` / `plugins:delete` (Admin), a
+  `plugins` MCP builtin group, `/app/plugins` with a staged editor and version
+  history, and migration `0009_agent_plugins`. Docs:
+  `docs/root/install/agent-plugins.md`. Rationale:
+  [STO-006](docs/root/dev/decisions/report-store.md),
+  [STO-010](docs/root/dev/decisions/report-store.md),
+  [AGT-036](docs/root/dev/decisions/chat-agent.md),
+  [AGT-037](docs/root/dev/decisions/chat-agent.md),
+  [SBX-017](docs/root/dev/decisions/sandbox.md),
+  [SBX-018](docs/root/dev/decisions/sandbox.md).
+
+- **Model profiles** (#290) — admins manage chat model configuration in the
+  database instead of only in the environment, from **Model Profiles** in the
+  sidebar. A profile names a primary model and default reasoning level, an
+  economy fallback, optional per-stage model and reasoning overrides, the
+  reasoning levels users may pick from, and a per-run USD cost cap; each save is
+  a version. Users with `chat:use` choose a profile and a reasoning level in the
+  chat composer. The first admitted turn locks the conversation to that profile
+  while the level stays changeable between turns, and the fully resolved choice
+  is captured at admission, so editing a profile never alters a running turn. A
+  profile's cost cap is bounded by `CHAT_RUN_COST_BUDGET_USD` — the lower value
+  applies, and the page warns when a profile asks for more. Until an admin
+  creates one, chat uses the `CHAT_LLM_*` settings exactly as before; the router
+  and verifier always use their environment-configured models. New permissions
+  `model_profiles:read` / `:write` / `:delete` (Admin), routes under
+  `/api/v1/model-profiles` plus `/api/v1/chat/model-profiles`, and migrations
+  `0010_model_profiles`, `0011_model_profile_reasoning`.
+
+- **Durable, resumable chat turns** (#254, #267) — a turn is admitted, run by
+  the `seizu_chat_turn` workflow, and delivered from an append-only log of
+  already-rendered stream parts, so live delivery and replay are byte-identical.
+  Closing the tab, reloading, losing the connection or restarting the web
+  process no longer ends a turn: a reader reattaches from its cursor, or replays
+  the whole turn if it has nothing to resume into. One running turn per thread is
+  enforced by the store, `maximum_attempts=1` keeps an expensive non-idempotent
+  turn from being billed twice, and identity is rebuilt worker-side and
+  intersected with the permission cap stored at admission. Settings:
+  `CHAT_TURN_TIMEOUT_SECONDS`, `CHAT_TURN_RETENTION_SECONDS`,
+  `CHAT_TURN_STREAM_LATENCY_MS`; migrations `0007_chat_turn_events`,
+  `0008_chat_turn_payloads`. Rationale:
+  [AGT-008](docs/root/dev/decisions/chat-agent.md).
+
+- **Distributed plan steps** (#277) — an orchestrated interactive turn hands
+  each batch of independent steps to a `seizu_chat_step_fanout` workflow that
+  schedules one activity per step, so steps are placed across the fleet and time
+  out, fail, and are cancelled independently. Routing, planning, verification and
+  synthesis stay sequential in one activity. Each step gets a pre-allocated,
+  disjoint budget grant; oversized step results spill to `chat_turn_payloads`
+  rather than travelling through Temporal history; workers attach to the
+  conversation's sandbox without owning it. Headless runs are never distributed.
+  Settings: `CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED`,
+  `CHAT_ORCHESTRATOR_DISTRIBUTED_MIN_STEPS`,
+  `CHAT_ORCHESTRATOR_DISTRIBUTED_STEP_TIMEOUT_SECONDS`,
+  `CHAT_ORCHESTRATOR_DISTRIBUTED_INLINE_MAX_BYTES`,
+  `TEMPORAL_MAX_CONCURRENT_ACTIVITIES`. Rationale:
+  [AGT-018](docs/root/dev/decisions/chat-agent.md),
+  [SBX-015](docs/root/dev/decisions/sandbox.md).
+
+- **A step can fan out over what an earlier step discovered** (#280, #282). A
+  plan is written before anything runs, so the planner could previously only
+  parallelise over items the request itself enumerated: "find the four
+  highest-severity CVEs, then investigate each" correctly planned one step, which
+  then looped internally where nothing could parallelise it. A planned step may
+  now set `map_over` to a dependency; when that dependency passes, the dispatcher
+  extracts its items and replaces the step with one child per item. Children are
+  ordinary steps, so the ready set, the fan-out, budgets and retries carry them
+  unchanged, and a `map_over` whose source is itself expanded chains 1:1 so the
+  second stage pipelines against the first. Bounded by
+  `CHAT_ORCHESTRATOR_MAX_EXPANSION` (8), with the cut reported in `run_errors`.
+  Rationale: [AGT-023](docs/root/dev/decisions/chat-agent.md).
+
+- **OpenTelemetry tracing** (#283, #284) — spans for the turn, each dispatch
+  batch, each plan step, each expansion, every model call (including the sandbox
+  sub-agent's) and every tool call, carrying the tokens, cost, cache reads,
+  reasoning tokens, applied reasoning effort, stop reason and an `outcome` of
+  `ok`/`error`/block-reason the run already computes. A turn spans three
+  processes, so the Temporal interceptor on client and worker is what makes the
+  spans one tree. Off unless `TELEMETRY_OTLP_ENDPOINT` is set; any collector
+  works and LangSmith is one of them. Content — prompts, results, tool output and
+  exception messages — is excluded unless `TELEMETRY_RECORD_CONTENT` is set.
+  A `tracing` Compose profile writes spans to `.compose/otel/spans.jsonl` for
+  local analysis. Settings: `TELEMETRY_ENABLED`, `TELEMETRY_OTLP_ENDPOINT`,
+  `TELEMETRY_OTLP_HEADERS`, `TELEMETRY_SERVICE_NAME`,
+  `TELEMETRY_RECORD_CONTENT`. Rationale:
+  [AGT-026](docs/root/dev/decisions/chat-agent.md),
+  [AGT-028](docs/root/dev/decisions/chat-agent.md),
+  [AGT-029](docs/root/dev/decisions/chat-agent.md).
+
+- **External MCP proxies** (#273, #284) — the chat agent can reach third-party
+  MCP servers through operator-run proxies. Tools are discovered dynamically,
+  namespaced `ext__<proxy>__<tool>`, and deliberately not re-exported from
+  Seizu's own MCP endpoint. Each discovery or call builds a transport whose
+  headers are derived for exactly one user, and discovery is memoized per turn
+  and optionally cached across turns (`MCP_EXTERNAL_DISCOVERY_TTL_SECONDS`),
+  keyed on the user because a listing is what that delegated identity may see.
+  Confirmation is decided per tool: the local
+  `MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS` list, then MCP tool annotations,
+  then the proxy's `require_confirmation` fallback. A rate-limited refusal is
+  retried after the delay the refusal itself names, bounded by
+  `MCP_EXTERNAL_RATE_LIMIT_*`. `/app/toolsets` shows configured proxies and
+  per-user discovery results as read-only synthetic toolsets. The dev stack ships
+  an `external-mcp` profile (a GitHub PAT adapter and a deps.dev
+  package-metadata server) and a separate `external-mcp-oauth` profile for
+  exercising the RFC 9728 challenge path deliberately. Docs:
+  `docs/root/install/external-mcp.md`.
+  Rationale: [AGT-010](docs/root/dev/decisions/chat-agent.md),
+  [AGT-038](docs/root/dev/decisions/chat-agent.md).
 
 - **Session reaping** — chat sessions nobody has come back to can be retired
   automatically, and the suspended sandbox each one holds goes with it. **Off by
@@ -56,7 +263,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Settings: `CHAT_SESSION_REAP_ENABLED`, `CHAT_SESSION_REAP_IDLE_SECONDS`,
   `CHAT_SESSION_REAP_INTERVAL_SECONDS`, `SANDBOX_REAP_UNTAGGED`,
   `SEIZU_DEPLOYMENT_ID` (migration `0006_chat_session_retirement`). Rationale:
-  [SBX-011](dev/decisions/sandbox.md).
+  [SBX-011](docs/root/dev/decisions/sandbox.md).
 
 - **Spaces** — group reports into named spaces, with optional sub-spaces for
   organizing within a space. A **Spaces** entry in the sidebar lists them; the
@@ -73,14 +280,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Spaces are unversioned and globally visible; report-level visibility still
   governs what appears inside one. Deleting a space is blocked while it holds
   reports; its sub-spaces are deleted with it and no report ever is.
-  Permissions:
-  `spaces:read` (Viewer), `spaces:write` / `spaces:delete` (Editor). New
-  endpoints under `/api/v1/spaces`, plus
+  Permissions: `spaces:read` (Viewer), `spaces:write` / `spaces:delete`
+  (Editor). New endpoints under `/api/v1/spaces`, plus
   `PUT /api/v1/reports/<id>/space`; new `seizu spaces list` / `seizu spaces show`
   CLI commands; migration `0005_spaces`. Docs: `docs/root/install/spaces.md`.
+  Rationale: [SPC](docs/root/dev/decisions/spaces.md).
+- **A `spaces` MCP builtin group** (#244) mirroring the routes one-for-one — no
+  `*_versions` tools, since spaces are flat — calling the same shared helpers as
+  REST so the two cannot diverge. Every mutating tool in the group is
+  confirmation-gated with no exception. Filing a report is
+  `spaces__set_report_space`, in the `spaces` group but keeping the route's
+  `reports:write` permission.
+- **Spaces round-trip through YAML seed/export** (#244): a top-level `spaces:`
+  section plus `Report.space` / `Report.subspace`. Spaces and sub-spaces are
+  matched by name, the three cross-references are validated at load so a typo
+  fails before any write, and membership is applied after the version save and
+  stripped from the stored config — restoring a version never relocates a report.
+  An omitted `space` never unfiles a report, and seeding deletes nothing.
+  `seizu export` emits all of it. Built-in toolsets are skipped on export.
 - `ReportListItem` and `ReportVersion` now carry `space_id` and `subspace_id`.
-  MCP consumers of `reports__list` and `reports__get` see these
-  fields automatically. There is no `spaces` MCP builtin group yet.
+  MCP consumers of `reports__list` and `reports__get` see these fields
+  automatically.
 - **`agent_chat` workflow activity** — the general-purpose AI activity. You
   supply the prompt; it runs a headless agent session as the workflow's creator
   and publishes the session summary as a named output later stages can consume.
@@ -91,11 +311,89 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Scheduled chats expose `schedule_sync_status`, `schedule_sync_error`, and
   `schedule_synced_at`, mirroring workflows (migration
   `0004_chat_schedule_sync_fields`).
+- **Cross-turn sandbox and session memory** (#247, #252) — the conversation's
+  sandbox is suspended rather than destroyed and resumed by id on the next turn
+  (`SANDBOX_SESSION_PERSIST`, on by default; filesystem only, so untrusted
+  processes do not outlive the turn), and a `SessionLedger` in the thread
+  checkpoint carries what earlier turns established plus receipts for the files
+  they left behind. Receipts render only for the sandbox they were written in, so
+  a replacement sandbox stops advertising files that no longer exist. Settings:
+  `CHAT_SESSION_MEMORY_*`, `CHAT_EPISODIC_*`, `SANDBOX_SESSION_TIMEOUT_SECONDS`.
+  Rationale: [SBX-005](docs/root/dev/decisions/sandbox.md) – [SBX-008](docs/root/dev/decisions/sandbox.md).
+- **Direct sandbox tools for the chat agent** (#284) — `sandbox__write_file`,
+  `read_file`, `list_files` and `run_python` without spawning a sub-agent, for
+  the one-round-trip case where a delegation would pay for a whole agent loop.
+  They share `sandbox:delegate` and its confirmation reasoning, since delegate
+  can already run arbitrary code in the same sandbox. A written file records a
+  receipt, so data the outer agent primes is advertised to delegations that do
+  not exist yet. `SANDBOX_DIRECT_TOOLS_ENABLED` turns them off without disabling
+  delegation. Rationale: [SBX-016](docs/root/dev/decisions/sandbox.md).
+- **Prompt caching** (#252) — volatile content is ordered last so the cached
+  prefix is stable, and Anthropic's explicit `cache_control` breakpoints are
+  emitted on the system prompt, the message before the session digest and the
+  last message, for the outer loop and the sandbox sub-agent alike. Budgeting is
+  cache-aware on commit but reserves the uncached price, because a cache hit is
+  never guaranteed. `CHAT_LLM_PROMPT_CACHE_ENABLED`,
+  `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS`, and `CHAT_LLM_CACHE_DIAGNOSTICS` — which
+  names the earliest divergence between one call and the previous call of the
+  same kind, and the tokens behind it, on any provider. Rationale:
+  [CTX-004](docs/root/dev/decisions/chat-context.md) – [CTX-007](docs/root/dev/decisions/chat-context.md).
+- **Cross-turn history is compacted rather than truncated** (#252) — the oldest
+  turns are condensed into one fenced block, deterministically and with no
+  summarizing model call, cut back well past its trigger so it stays
+  byte-identical for the many turns it takes to refill. `CHAT_LLM_HISTORY_COMPACTION`,
+  `CHAT_LLM_HISTORY_COMPACTION_TARGET`, `CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS`.
+  Rationale: [CTX-003](docs/root/dev/decisions/chat-context.md).
+- **Chat turns are timestamped** (#248, #264). Turns are stamped when persisted,
+  surfaced as `metadata.created_at` on `/chat/history` and in the UI: your own
+  message reveals its time on hover, assistant turns show theirs beside the copy
+  button, and sidebar sessions and scheduled-run transcripts show theirs too.
+  Messages persisted before this change stay untimed rather than being back-dated.
+- **Thinking streams into the details pane** (#289) — reasoning is emitted as a
+  `detail` as it arrives and filed under the plan step that produced it, on a
+  second channel so a stage that must not ship prose can still show its
+  thinking. The pane keys step sections by `step_id`, since parallel steps
+  interleave. Rationale: [AGT-044](docs/root/dev/decisions/chat-agent.md).
+- **`/app/chat` is now a landing that asks for a question** (#289) instead of
+  restoring the last conversation or minting an empty one, so the sidebar lists
+  only conversations someone actually started. The bypass-confirmations toggle
+  moves into the composer, where the message it applies to is.
+- **The OIDC issuer fork is detected at startup** (#258, #265).
+  `verify_issuer_consistency()` compares the discovery documents of
+  `OIDC_AUTHORITY` and `OIDC_INTERNAL_AUTHORITY` and logs a mismatch at ERROR;
+  `OIDC_REQUIRE_CONSISTENT_ISSUER` makes it a startup failure. When an IdP
+  derives `iss` from the request host and is reached under two hostnames, one
+  person becomes two user records and every owner-scoped surface diverges
+  silently. `iss` is never normalized on the way to `get_or_create_user`.
+  The install docs name the two deployment shapes that keep one issuer.
+  Rationale: [AUTH-001](docs/root/dev/decisions/authentication.md),
+  [AUTH-002](docs/root/dev/decisions/authentication.md).
+- **A hash-locked credential proxy, optionally prebuilt** (#250, #256). The
+  proxy sandbox's whole dependency tree ships resolved and hash-locked in
+  `reporting/services/sandbox_proxy_requirements.txt`
+  (`make lock_proxy_requirements`, which probes a real sandbox for the python
+  and architecture to target), installed with `pip --require-hashes`. A lock
+  records the runtime it was resolved for and the install refuses a sandbox that
+  does not match. `make build_proxy_template` bakes the same plan into an E2B
+  template, which is then used as built. Remediation failures now name the phase
+  they happened in, and a command timeout reports the bound that actually
+  elapsed. Rationale: [WF-008](docs/root/dev/decisions/workflows.md).
+- Per-area **decision logs** under `docs/root/dev/decisions/`, one per product
+  area with a stable id per decision, so code and `AGENTS.MD` cite rather than
+  restate. `AGENTS.MD` and the install docs shed the reasoning that had
+  accumulated in them.
+- Measurement tooling: `scripts/chat_harness.py` (multi-sample A/B over chat
+  settings, `make chat_harness`), `scripts/plan_probe.py`,
+  `scripts/budget_probe.py`, `scripts/reasoning_sweep.py`, and a network guard
+  in the unit suite that fails any test opening a socket.
+- New skills: `dependency_provenance` (what pulls a package in, by what
+  constraint), and the CVE exploitability skill split into findings and
+  reachability.
 
 ### Changed
 
-- **The MCP server speaks the 2026-07-28 protocol revision** (#246). Seizu now
-  builds on the `mcp` 2.x SDK, which serves 2026-07-28 and every earlier
+- **The MCP server speaks the 2026-07-28 protocol revision** (#246, #259). Seizu
+  now builds on the `mcp` 2.x SDK, which serves 2026-07-28 and every earlier
   revision from the same endpoint — clients negotiate the revision themselves,
   so existing MCP clients keep working unchanged and no configuration moves.
   The newer revision drops the initialize handshake and makes every request
@@ -121,9 +419,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in practice it caps tool *arguments* — a very large Cypher query sent to
   `graph__query`, say. Responses are unaffected and stay governed by
   `MCP_TOOL_RESULT_MAX_BYTES`.
-- `seizu export` warns when exported reports belong to a space: YAML has no
-  `spaces:` section, so space membership does not round-trip through
-  seed/export.
+- `MCP_ENABLED_BUILTINS` gains `plugins` and `spaces` in its default set.
 - Scheduled chats run as durable **Temporal Schedules** instead of a 20-second
   polling loop that executed every schedule serially. Disabling a schedule now
   pauses its Schedule; a run that overruns its next firing causes that firing to
@@ -131,9 +427,284 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `POST /api/v1/chat/schedules/<id>/run` starts the run immediately instead of
   waiting for the next poll. The route, its permissions, and its response are
   unchanged.
+- **What each LLM call may spend is derived from the model, not from a constant**
+  (#276). A `ModelSpec` — model id, output ceiling, reasoning effort — is
+  resolved once per call, with the ceiling taken as
+  `min(CHAT_LLM_MAX_OUTPUT_TOKENS_CAP, the model's own maximum)` read from
+  litellm. Reasoning effort is the one portable knob and is now **rendered per
+  provider** (`reasoning_effort` for OpenAI and Gemini,
+  `thinking.budget_tokens` for Anthropic, `extra_body` for DeepSeek), because
+  LiteLLM's own mapping collapses every level to one value on the latter two.
+  Effort keys on stage, not only on role, and is configurable per stage
+  (`CHAT_LLM_*_REASONING_EFFORT`); the router defaults to `none` and the planner
+  and synthesizer are graded `low`. Temperature is omitted where a model refuses
+  it. Rationale: [AGT-019](docs/root/dev/decisions/chat-agent.md),
+  [AGT-033](docs/root/dev/decisions/chat-agent.md).
+- **A reservation is an authorization, not a prediction** (#281). A call's
+  reserved output is sized from what its phase family has been observed to emit
+  rather than from the model's ceiling, and in-flight overrun now *waits* for
+  capacity instead of finalizing the run — contention throttles concurrency
+  rather than ending the turn. Settings:
+  `CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS`, `CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY`,
+  `CHAT_BUDGET_CONTENTION_WAIT_SECONDS`. Rationale:
+  [AGT-021](docs/root/dev/decisions/chat-agent.md).
+- **Only the dimension that bounds a run is fair-shared between steps** (#282,
+  #284). When cost is the budget, tokens keep only the batch-width bound and
+  calls come out of the soft-limit calculation entirely: slicing a token
+  backstop by schedule depth turned a 2M-token ceiling into 66k per step on a
+  17-step expanded plan, and a run crossing the soft limit on call count alone
+  was degraded to the economy model with 17.6% of its cost spent. A step that
+  used its own share now reports `partial` rather than `budget_exhausted`.
+  Rationale: [AGT-025](docs/root/dev/decisions/chat-agent.md),
+  [AGT-030](docs/root/dev/decisions/chat-agent.md).
+- **The plan is a validated DAG** (#279, #281). `depends_on` is the edge set, and
+  the contract is stated in the planner's schema as well as its prompt: unique
+  ids, no self-edges, no references outside the plan, no cycles, nothing left
+  waiting on one. An invalid graph is replanned once, shown its own edges and the
+  problems, and only then repaired. A step that can never run is failed with the
+  dependency that stopped short instead of vanishing. Diagnostics reach
+  `run_errors` and the plan detail. Rationale:
+  [AGT-020](docs/root/dev/decisions/chat-agent.md).
+- **The planner fans out only where the work diverges** (#284). It is told that
+  the same call with a different argument is one step that fetches in bulk, and
+  that `map_over` is for per-item investigation — paired with `map_reason`, which
+  names what differs. A plan's terminal answer step is dropped, since the turn's
+  answer is already written from every step's output. The planner's capability
+  listing carries each skill's required tool names, which is what tells it
+  whether a step can get what its success criteria demand. Rationale:
+  [AGT-027](docs/root/dev/decisions/chat-agent.md),
+  [AGT-034](docs/root/dev/decisions/chat-agent.md),
+  [AGT-035](docs/root/dev/decisions/chat-agent.md).
+- **A long agent run is allowed to finish, and never reports nothing when work
+  was done** (#274). The per-step budget share becomes a convergence signal
+  rather than a termination condition; useless work is detected as itself (a
+  window of tool calls with nothing new in it, a rejection the step has already
+  been given, a run of already-answered calls); a stopped step hands back what it
+  established and a retry continues from it; and each of budget finalization, a
+  retry, an empty summary pass and an empty synthesis now reports its state
+  deterministically instead of replacing a step's result with a blank stub. A
+  user-initiated stop is recorded as cancelled rather than failed. Rationale:
+  [AGT-011](docs/root/dev/decisions/chat-agent.md) – [AGT-017](docs/root/dev/decisions/chat-agent.md),
+  [SBX-012](docs/root/dev/decisions/sandbox.md) – [SBX-014](docs/root/dev/decisions/sandbox.md).
+- **The sandbox sub-agent is bound a narrow tool set, and its discovery follows
+  progressive disclosure** (#252). It gets the read-only graph core
+  (`SANDBOX_CORE_TOOLS`, configurable and intersected with RBAC), plus what the
+  conversation disclosed, plus what the delegating call named — instead of every
+  chat-safe tool in the deployment, which was ~3,800 tokens of schema re-sent on
+  every inner call. With disclosure on it reaches the rest through
+  `find_seizu_skills` / `load_seizu_skill` and a `call_seizu_tool` limited to
+  what a loaded skill declared. The tools a plan's skills declare are disclosed
+  up front, bounded by `CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS`, so the tool
+  list stops churning mid-turn and invalidating the cached prefix behind it.
+  Rationale: [SBX-003](docs/root/dev/decisions/sandbox.md),
+  [SBX-004](docs/root/dev/decisions/sandbox.md), [AGT-002](docs/root/dev/decisions/chat-agent.md).
+- **One sandbox per conversation, shared by a turn's parallel steps** (#247,
+  #252), where each delegation previously opened and destroyed its own — so the
+  files an oversized result was written to did not survive the call that made
+  them. Oversized tool results are written to a file under `/home/user` and
+  replaced by a receipt carrying path, bytes, row count, columns and two sample
+  rows; `preview_file` returns small files whole and shape only above
+  `SANDBOX_PREVIEW_MAX_BYTES`. A delegation's answer is itself saved with a
+  receipt, so a worker no longer re-runs the delegation to recover it.
+- **The graph schema is fetched once** — memoized process-wide for
+  `GRAPH_SCHEMA_CACHE_TTL_SECONDS` and single-flighted, and seeded to the shared
+  sandbox before a distributed batch, since the steps of a batch start together
+  and a receipt written by one reaches a sibling only after the batch returns.
+  Rationale: [AGT-027](docs/root/dev/decisions/chat-agent.md).
+- Chat context is fitted as a whole request — window minus system prompt, tool
+  schemas, reply and a safety margin — rather than bounding only the
+  conversation, and a provider overflow is retried once with the conversation
+  halved instead of failing the turn. What is shed is condensed into a digest.
+  Rationale: [CTX-002](docs/root/dev/decisions/chat-context.md).
+- Context-feeding bounds are token budgets derived as a share of what a call can
+  carry, rather than the character literals that dated to the first chat commit;
+  the parallel ones share one budget so a single large result cannot crowd its
+  siblings out of view (#288). The remaining character bounds are display bounds
+  and are named as such.
+- `CHAT_ORCHESTRATOR_MAX_PARALLEL` is 8 rather than 3, matching
+  `CHAT_ORCHESTRATOR_MAX_EXPANSION`: a batch of four children ran as two
+  sequential batches for no reason but the setting, and the reasoning for 3 was
+  tied to a token budget that is no longer fair-shared by width.
+- Seeding continues past a report whose owner is someone else. A refused
+  visibility change is a skip with a reason, not a reason to abandon a run that
+  deletes nothing — one such report used to stop toolsets, plugins, workflows and
+  scheduled queries from being seeded at all.
+- The dev stack reaches Authentik as `localhost:9000` from every side, through an
+  in-process loopback forwarder started beside gunicorn, so one login produces
+  one user record. `OIDC_INTERNAL_AUTHORITY` is gone from the dev compose file,
+  and every IdP-specific value is overridable from `.env`.
+- gunicorn's worker timeout is bound to `API_REQUEST_TIMEOUT` rather than left at
+  gunicorn's unset 30-second default, and a turn's stream path is exempt from the
+  request-timeout middleware while admitting and cancelling stay ordinary short
+  requests.
 - Internal: trigger semantics are shared by workflows and scheduled chats via
-  `reporting/services/schedule_reconciler.py`, and both headless agent surfaces
-  now go through `reporting/services/agent_run.py:run_agent_session()`.
+  `reporting/services/schedule_reconciler.py`; both headless agent surfaces go
+  through `reporting/services/agent_run.py:run_agent_session()`; and a dependency
+  change now requires `make build` rather than a `uv sync` that a
+  `docker compose run --rm` container discards.
+
+### Fixed
+
+- **The planner silently produced a one-step plan** (#276). On a reasoning model
+  thinking and the answer share one allowance, so the 4,096-token output cap did
+  not shorten the planner's output, it removed it: every call returned
+  `chars=0, finish_reason=length` and the node fell back to a single step
+  carrying the user's whole request — identical in the stream, the checkpoint and
+  the harness, and disabling the orchestrator's parallelism entirely. Measured
+  0/3 usable plans before and 3/3 after.
+- **Reasoning effort never reached the wire** (#276, #286). It was passed as a
+  `ChatLiteLLM` constructor argument, which the class does not declare, so it was
+  silently swallowed — including for the sandbox sub-agent, which built its model
+  directly and made 87% of a delegating turn's calls on provider defaults by
+  construction. Resolving the sub-agent through the shared model layer took it
+  from 955 reasoning tokens and 11.2s per call to 422 and 7.4s.
+- **Prompt-cache hits were billed at the uncached rate** (#252) — a measured
+  DeepSeek call re-sending a 4,016-token prefix reported 3,968 of those tokens as
+  cache reads and was charged 21.7x its real cost. Cache reads are now priced,
+  recorded per phase, and reported on the outer loop's spans as well as the
+  sub-agent's.
+- **Sandbox sub-agent spend never reached the run budget** (#247). Its calls run
+  outside the outer tool loop, so a turn reporting 37,535 tokens had made 2,001
+  inner LLM-driven calls; every budget figure involving delegation understated
+  the truth. Metering now happens at the single funnel every inner call passes,
+  billed to its own phase.
+- **`CHAT_TOOL_RESULT_MAX_ROWS` never applied to graph queries** (#247), which
+  return `{"results": [...]}` rather than a top-level list — so the tools most
+  likely to return thousands of rows were unbounded, predating this branch.
+  Results are also streamed and bounded as they arrive rather than materialized
+  in full first, which closes an authenticated worker-memory path.
+- **The synthesizer lost each step's conclusion** (#284). Step output was cut at
+  4,000 characters *from the front*, and a step's verdict is at its end. Both ends
+  are kept now and the middle is dropped, weighted to the tail.
+- **The step verifier could not see what the step was told or what it called**
+  (#286): a skill's rendered inputs and each call's arguments are captured at the
+  call and read back, so a step that ignored `max_cves: 8` and returned 17
+  findings is no longer indistinguishable from one that honoured it. A rejection
+  restated in different words is now recognised as the same rejection.
+- **A sub-agent's array parameters were declared as strings** (#284), so a model
+  told a parameter is a string passed a string and the call failed at the far
+  end — 12 of one turn's 12 tool errors. Array and object types are now mapped
+  properly.
+- A non-zero shell exit (grep matching nothing) and a command outrunning the
+  sandbox deadline no longer end a whole delegation; both are reported as output.
+- A budget stop inside a delegation is reported as a stop, with the one sensible
+  response available to the caller, rather than as "Sandbox task failed".
+- A turn that resumed a sandbox no longer destroys it on failure, and a killed
+  sandbox's id is cleared from the thread instead of being retried and advertised
+  for the rest of the conversation.
+- The transitive-dependency rule in the CVE reachability skill (#287): every
+  transitively-installed package used to come back "not reachable" because the
+  repository does not import it — urllib3 among them, which botocore calls on
+  every request. "No direct import" is now the precondition for the question, not
+  its answer, and settling it requires evidence about the intermediate.
+- Package-dependency questions are answered from deps.dev through an external MCP
+  proxy instead of from the model's memory of version history (#284). The graph
+  records installed versions, not declared requirements, and the sandbox has no
+  egress.
+- ID-token and introspection issuers are compared exactly against the advertised
+  discovery issuer, per OIDC Core 3.1.3.7. A trailing-slash difference was
+  treated as one issuer while `get_or_create_user` stores `iss` verbatim and
+  makes it two users (#265).
+- `seizu export` no longer warns that space membership cannot round-trip — it
+  now does (#244).
+- Four auth route tests reached a real OIDC discovery endpoint, so they passed or
+  failed according to the developer's `.env` rather than the code (#260).
+
+### Security
+
+- **Untrusted evidence is fenced everywhere it crosses into a prompt** (#247,
+  #252): raw tool output, episodic recall, resumed partial results, dependency
+  output passed to a dependent worker, verifier input and its retry guidance,
+  step summaries in the synthesis context, recalled conversation, and the
+  compacted history block — which flattens assistant turns into a *user* message
+  and so put provider-controlled text in the role the model treats as
+  instructions. Fitting a fenced block to a budget is measured rather than
+  calculated, since escaping expands exactly the characters the fence
+  neutralizes.
+- Plugin permission aliases are one-directional, so a role scoped to writing
+  skills cannot acquire package installation by renaming (#285). Rendering a
+  skill never provisions a sandbox: package files are materialized only for a
+  skill that ships scripts, only for a caller holding `sandbox:delegate`, and
+  only into a sandbox the conversation already opened
+  ([SBX-018](docs/root/dev/decisions/sandbox.md)). MCP endpoint aliases a remote server
+  advertises are bounded and ignored entirely under the default
+  `MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE=none`, so an upstream cannot steer which
+  proxy a plugin dependency binds to.
+- Telemetry excludes content — prompts, results, tool output and exception
+  messages — unless `TELEMETRY_RECORD_CONTENT` is set (#283).
+- The credential proxy's dependency tree is fully hash-pinned, and moving it to
+  LiteLLM 1.96.0 cleared 23 open Dependabot alerts across six packages in the
+  sandbox that holds the real provider key (#261, #256).
+- Four locked dependencies bumped for six open alerts: aiohttp 3.14.3
+  (CVE-2026-69244, CVE-2026-69243, CVE-2026-59881), cryptography 50.0.0
+  (CVE-2026-69247), h2 4.4.1 (CVE-2026-71554) and langgraph-checkpoint-postgres
+  3.1.2 (CVE-2026-71433) (#262).
+- Reservation leaks on cancellation, an orphaned sandbox on a close race, and an
+  unsynchronized lazy sandbox open are fixed (#247, #252).
+
+### Upgrade notes {#upgrade-notes-500}
+
+1. **Stand up Temporal before upgrading if you run chat at all.** Interactive
+   turns, scheduled chats and the session reaper all execute there, and
+   `seizu-temporal-worker` needs the same chat, model, sandbox and external-MCP
+   configuration the web service has.
+2. **Update any client of the chat streaming API** to admit-then-attach; the old
+   `/api/v1/chat/stream` routes are gone.
+3. **Migrate off DynamoDB** following
+   [Migrating from DynamoDB to PostgreSQL](docs/root/install/upgrading.md#migrating-from-dynamodb-to-postgresql).
+   Startup refuses the removed settings, so an incomplete cutover fails before
+   any write.
+4. **Rename `CHAT_LLM_CONTEXT_MAX_CHARS` to `CHAT_LLM_CONTEXT_MAX_TOKENS`**, and
+   review `CHAT_RUN_COST_BUDGET_USD` (now $2.00 by default),
+   `CHAT_LLM_MAX_TOKENS`, `CHAT_RUN_TOKEN_BUDGET` and `CHAT_RUN_MAX_LLM_CALLS`
+   (all now `0` = derive) against what your deployment was relying on.
+5. **Re-lock and rebuild the credential proxy template** if you set
+   `SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE`; a template is now used as built and
+   nothing is installed over it.
+6. Migrations `0004` through `0011` apply at startup under an advisory lock.
+   Verify against both a fresh volume and an upgraded database.
+7. Review user-defined roles that grant `skillsets:*` or `skills:*` without the
+   other, and decide who should hold `plugins:write` and the new
+   `model_profiles:*` permissions.
+
+## [4.2.0] - 2026-07-25
+
+### Fixed
+
+- **Domain-level activity failures no longer show as completed in Temporal Runs**
+  (#238). `DependencyRemediationResult`, `RepoChatResult` and
+  `CartographyModuleResult` deliberately catch their own errors and return
+  `status="failed"` rather than raising, so one bad item does not fail or retry a
+  whole activity or duplicate side effects such as PRs — but Temporal then sees a
+  normal return, and `_collect_activities` marked those rows "completed" even when
+  the payload recorded a real failure (a git push 403 during dependency
+  remediation, say). Only the workflow-level rollup showed
+  `completed_with_errors`. Completed activity and child-workflow results are now
+  decoded, and `status="failed"` with the domain error and output tail is
+  reflected on that activity's own row.
+
+## [4.1.0] - 2026-07-24
+
+### Fixed
+
+- **Workflow mutation was gated by ownership as well as by RBAC** (#235), so an
+  admin holding `workflows:write` could not edit, run or delete a workflow
+  created by someone else, and neither could they retarget a trigger workflow.
+  Mutation is permission-only now, matching the intent.
+- **A code-defined workflow's partial failure was masked as success** (#235). A
+  `cve_dependency_remediation`, `cve_repo_report` or `cartography_sync` activity
+  can finish without raising while its own result records a failure it
+  deliberately did not retry — a failed remediation, a PR whose CI never went
+  green, a failed cartography module. `normalize_code_workflow_output` and
+  `ConfiguredWorkflow` hardcoded "completed"/"success" there, hiding it from
+  `last_run_status` and the workflow list and detail views. `WorkflowSpec` gains a
+  `summarize_output` hook so each workflow's real outcome surfaces as
+  `completed_with_errors` / `success_with_errors`, gated by a `workflow.patched()`
+  marker so existing histories keep replaying deterministically.
+- **`seizu whoami` crashed with a `KeyError`** (#235): it read `/api/v1/me`'s
+  fields at the top level instead of under the response's `user` key, which moved
+  when RBAC permissions were introduced. It now also prints the resolved role and
+  permissions, for auth debugging.
 
 ## [4.0.0] - 2026-07-23
 
@@ -691,6 +1262,11 @@ frontend, storage, auth, and integrations.
 Initial release of the original reporting tool that Seizu was built from —
 Dockerized build, GitHub Container Registry publishing, and quickstart docs.
 
+[5.0.0]: https://github.com/mappedsky/seizu/compare/v4.2.0...v5.0.0
+[4.2.0]: https://github.com/mappedsky/seizu/compare/v4.1.0...v4.2.0
+[4.1.0]: https://github.com/mappedsky/seizu/compare/v4.0.0...v4.1.0
+[4.0.0]: https://github.com/mappedsky/seizu/compare/v3.1.0...v4.0.0
+[3.1.0]: https://github.com/mappedsky/seizu/compare/v3.0.1...v3.1.0
 [3.0.0]: https://github.com/mappedsky/seizu/compare/v2.3.0...v3.0.0
 [2.3.0]: https://github.com/mappedsky/seizu/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/mappedsky/seizu/compare/v2.1.0...v2.2.0
