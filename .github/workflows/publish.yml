@@ -79,7 +79,7 @@ jobs:
           uv version "${{ steps.version.outputs.version }}"
           uv build --package seizu --wheel
       - name: Publish server package to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
   publish-cli-package:
     if: >-
@@ -138,7 +138,7 @@ jobs:
           uv version --project packages/seizu-cli "${{ steps.version.outputs.version }}"
           uv build --package seizu-cli --wheel
       - name: Publish CLI package to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
   build-and-publish-to-ghcr:
     if: >-
