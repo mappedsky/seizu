@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Seizu — A star chart for your security graph</title>
-<meta name="description" content="Seizu (星図) is an open-source React + Python frontend for Neo4j graph data. Dashboards and spaces, an interactive Cypher console, durable Temporal workflows, a built-in AI agent, and an MCP server for LLM agents — built for Cartography and security observability." />
+<meta name="description" content="Seizu (星図) is an open-source React + Python frontend for Neo4j graph data. Dashboards and spaces, an interactive Cypher console, durable Temporal workflows, a built-in AI agent, and an MCP server for LLM agents, built for Cartography and security observability." />
 <meta name="keywords" content="seizu, neo4j, cartography, cncf cartography, security observability, graph database, cypher, MCP server, LLM agents, AI agent, agent plugins, agent skills, temporal workflows, cve remediation, scheduled chats, spaces, opentelemetry, security posture, starbase, dashboard, open source" />
 <meta property="og:title" content="Seizu — A star chart for your security graph" />
 <meta property="og:description" content="Open-source Neo4j frontend for Cartography and security observability. Dashboards and spaces, a Cypher console, durable workflows, a built-in AI agent, and an MCP server for LLM agents." />
@@ -816,9 +816,9 @@
         graph like an <span class="gold">astronomer</span>.
       </h1>
       <p class="hero-sub">
-        Seizu turns your Neo4j graph — cloud inventory, identities, vulnerabilities, relationships —
-        into dashboards, ad-hoc Cypher and durable workflows, with an AI agent that investigates
-        alongside you and an MCP endpoint for the agents you already run.
+        Seizu turns your Neo4j graph of cloud inventory, identities, vulnerabilities and
+        relationships into dashboards, ad-hoc Cypher and durable workflows, with an AI agent
+        that investigates alongside you and an MCP endpoint for the agents you already run.
       </p>
       <div class="hero-ctas">
         <a class="btn-primary" href="{{ pathto('install/quickstart') }}">Quickstart in 10 min →</a>
@@ -855,13 +855,13 @@
       <h2>A <em>star chart</em> for your<br />security infrastructure.</h2>
       <p>
         Seizu (<span class="ja-inline">星図</span>) is the Japanese word for <em>star chart</em>.
-        It's also a React + Python frontend for Neo4j graph databases — built for humans who need to
+        It's also a React + Python frontend for Neo4j graph databases, built for humans who need to
         navigate sprawling infrastructure graphs, and for the LLM agents that investigate them alongside you.
       </p>
       <p>
         Point it at a <a href="https://github.com/cartography-cncf/cartography">Cartography</a> graph
         and you get dashboards and spaces, ad-hoc Cypher, durable workflows, and an MCP endpoint
-        your agents can query — plus an agent of its own, planning and investigating
+        your agents can query, plus an agent of its own, planning and investigating
         with exactly the tools your roles allow.
       </p>
     </div>
@@ -940,7 +940,7 @@
         <div class="head"><div class="greek">α</div><div class="ord">01 / 12</div></div>
         <h3>Dashboards</h3>
         <div class="sub">Built in the browser</div>
-        <p>Assemble reports visually, the way you would in Grafana — rows, panels, charts, tables, graph views. Every save is a version, and the whole config still imports and exports as code.</p>
+        <p>Assemble reports visually, the way you would in Grafana: rows, panels, charts, tables, graph views. Every save is a version, and the whole config still imports and exports as code.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -955,7 +955,7 @@
         <div class="head"><div class="greek">β</div><div class="ord">02 / 12</div></div>
         <h3>Spaces</h3>
         <div class="sub">Group your reports</div>
-        <p>Gather related reports into named spaces and sub-spaces, and pin one as the space's landing page. Filing a report publishes it — a rule the store enforces, not just the UI.</p>
+        <p>Gather related reports into named spaces and sub-spaces, and pin one as the space's landing page. Filing a draft into a space publishes it, so everything in a space is something your team can actually open.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -985,7 +985,7 @@
         <div class="head"><div class="greek">δ</div><div class="ord">04 / 12</div></div>
         <h3>AI Agent</h3>
         <div class="sub">Ask your graph anything</div>
-        <p>A chat assistant that routes, plans, investigates and verifies using the same governed tools your analysts hold. Turns run as Temporal workflows, so a reload never loses one.</p>
+        <p>A chat assistant that routes, plans, investigates and verifies, holding exactly the permissions and tools you already have. The same agent runs in chat, in workflows and on a schedule, and keeps working in the background.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#f5c16c" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#f5c16c" stroke-width="0.5" opacity="0.6" />
@@ -1000,7 +1000,7 @@
         <div class="head"><div class="greek">ε</div><div class="ord">05 / 12</div></div>
         <h3>Agent Plugins</h3>
         <div class="sub">Skills as packages</div>
-        <p>Package skills, references, scripts and assets into versioned plugins. Storage is immutable revisions over content-addressed blobs; publishing is staged in the browser and atomic.</p>
+        <p>Package skills, references, scripts and assets as Agent Plugins 1.0, the open format Claude Code and other harnesses already read, so a plugin written here is not stuck here. Author, version and publish them in the built-in editor.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -1030,7 +1030,7 @@
         <div class="head"><div class="greek">η</div><div class="ord">07 / 12</div></div>
         <h3>MCP Server</h3>
         <div class="sub">Revision 2026-07-28</div>
-        <p>Serve Cypher-backed tools and built-in graph, report, space and plugin groups at /api/v1/mcp — current protocol revision and every earlier one, from one endpoint.</p>
+        <p>Serve Cypher-backed tools and built-in graph, report, space and plugin groups at /api/v1/mcp, speaking the current protocol revision and every earlier one from a single endpoint.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -1060,7 +1060,7 @@
         <div class="head"><div class="greek">ι</div><div class="ord">09 / 12</div></div>
         <h3>Model Profiles</h3>
         <div class="sub">Choose the model</div>
-        <p>Admins name a primary model, an economy fallback, per-stage overrides and a cost cap in the database. Users pick a profile and a reasoning level right in the composer.</p>
+        <p>Admins name a primary model, an economy fallback, per-stage overrides and a cost cap in the database. Users pick a profile and a reasoning level as they chat.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -1075,7 +1075,7 @@
         <div class="head"><div class="greek">κ</div><div class="ord">10 / 12</div></div>
         <h3>Workflows</h3>
         <div class="sub">Durable automation</div>
-        <p>Ordered stages of parallel activities with named outputs, on a clock or on a graph change. Temporal owns the history, so a tick missed during downtime is caught up, not lost.</p>
+        <p>Ordered stages of parallel activities with named outputs, run on a schedule, on a graph change, or from another workflow. Temporal owns the history, so a tick missed during downtime is caught up, not lost.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -1090,7 +1090,7 @@
         <div class="head"><div class="greek">λ</div><div class="ord">11 / 12</div></div>
         <h3>Scheduled Chats</h3>
         <div class="sub">Agents on a cron</div>
-        <p>A prompt and a trigger. The run happens headlessly as its creator, with the creator's permissions and nothing more, and lands in chat history as a conversation you can read.</p>
+        <p>A prompt and a trigger. The run happens headlessly with its creator's permissions, and every run is kept on the schedule's own history page as a transcript you can read back.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -1105,7 +1105,7 @@
         <div class="head"><div class="greek">μ</div><div class="ord">12 / 12</div></div>
         <h3>SSO &amp; RBAC</h3>
         <div class="sub">Your IDP, your roles</div>
-        <p>OIDC with PKCE, refresh tokens sealed in an encrypted HttpOnly cookie, and hierarchical roles you can extend — enforced identically across REST, the CLI, MCP and chat.</p>
+        <p>OIDC with PKCE, refresh tokens sealed in an encrypted HttpOnly cookie, and hierarchical roles you can extend, enforced identically across REST, the CLI, MCP and chat.</p>
         <svg class="accent-svg" width="70" height="50" viewBox="0 0 70 50" aria-hidden="true">
           <line x1="10" y1="35" x2="30" y2="20" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
           <line x1="30" y1="20" x2="55" y2="30" stroke="#8fb4ff" stroke-width="0.5" opacity="0.6" />
@@ -1131,30 +1131,31 @@
     </div>
     <div class="agent-grid">
       <div>
-        <h2>An agent that <em>investigates</em>,<br />not just answers.</h2>
+        <h2>An agent that <em>investigates</em><br />your graph with you.</h2>
         <p class="lede">
           Seizu's chat assistant works the graph the way an analyst does: it routes the question,
           writes a plan, runs the plan's independent steps in parallel, verifies each one, and
-          synthesizes an answer with its working shown. It holds your permissions and no others,
-          and writes stop for confirmation before they land.
+          synthesizes an answer with its working shown. It holds your permissions, and it stops
+          for your approval before it changes anything.
         </p>
         <div class="agent-points">
           <div class="agent-point">
             <div class="k">DURABLE</div>
             <div class="t">
-              <strong>A turn is admitted, not requested.</strong>
-              <span>Each turn runs as a Temporal workflow and streams from an append-only log.
-              Close the tab, lose the connection, restart the web tier — the reader reattaches
-              from its cursor and the work continues.</span>
+              <strong>It keeps working when you stop watching.</strong>
+              <span>Every turn runs as a Temporal workflow, writing to a log the browser reads
+              from. Close the tab, lose the connection, or restart the web tier, and the answer
+              is still being written when you come back to it.</span>
             </div>
           </div>
           <div class="agent-point">
             <div class="k">PARALLEL</div>
             <div class="t">
               <strong>A plan is a validated DAG.</strong>
-              <span>Independent steps are distributed one activity each across the worker fleet,
-              so they succeed, time out and fail on their own — and a step can fan out over
-              items an <em>earlier</em> step discovered.</span>
+              <span>Independent steps run at the same time across the worker fleet, each with
+              its own timeout and its own retries, so one slow or failed step never takes the
+              whole plan down with it. A step can also fan out over the items an
+              <em>earlier</em> step discovered.</span>
             </div>
           </div>
           <div class="agent-point">
@@ -1162,26 +1163,27 @@
             <div class="t">
               <strong>Priced in dollars, not guesses.</strong>
               <span>A run carries a cost ceiling, and each call reserves what its phase has
-              actually been observed to spend — derived from the model rather than from a
-              constant that is wrong on every model but one.</span>
+              actually been observed to spend. The limits are read from whichever model you
+              point it at, so one setting holds up across all of them.</span>
             </div>
           </div>
           <div class="agent-point">
             <div class="k">TRACEABLE</div>
             <div class="t">
-              <strong>Every span, over OTLP.</strong>
-              <span>The turn, each batch, step, expansion, model call and tool call — carrying
-              tokens, cost, cache reads, reasoning effort and outcome. Any collector works,
-              and prompt content stays out unless you ask for it.</span>
+              <strong>Every step, in the tracing tool you already run.</strong>
+              <span>The turn, each batch, step, expansion, model call and tool call, carrying
+              tokens, cost, cache reads, reasoning effort and outcome. It speaks OpenTelemetry,
+              so any collector will take it, and prompt content stays out unless you ask
+              for it.</span>
             </div>
           </div>
           <div class="agent-point">
             <div class="k">EXTENSIBLE</div>
             <div class="t">
               <strong>Skills it loads only when it needs them.</strong>
-              <span>Agent Plugins package skills, references and scripts; a skill's declared
-              tools are a dependency, not a grant, so a skill your role cannot satisfy simply
-              is not there.</span>
+              <span>Agent Plugins package skills, references and scripts. Each skill declares
+              the tools it needs, and the agent is only ever offered the skills your role can
+              actually run.</span>
             </div>
           </div>
         </div>
@@ -1309,22 +1311,23 @@
       <p class="lede">
         A workflow is an ordered list of stages. Activities in one stage start together;
         the next stage waits for every one of them, and each publishes a named output that
-        later stages consume. Temporal owns the schedule and the execution history, so a tick
-        missed during downtime is caught up rather than quietly dropped.
+        later stages consume. Run one on a schedule, on a change in the graph, or from another
+        workflow; Temporal owns the schedule and the execution history, so a tick missed during
+        downtime is caught up rather than quietly dropped.
       </p>
       <div class="wf-modules">
         <div class="wf-module">
           <div class="n">cartography_sync</div>
-          <p>Run cartography's own ingest modules on a schedule — each in its own child workflow
+          <p>Run cartography's own ingest modules on a schedule, each in its own child workflow
           with a per-module mutex, on a dedicated worker that holds intel credentials and nothing
-          from Seizu's store. Flags are a typed allowlist, never a shell string.</p>
+          from Seizu's store.</p>
         </div>
         <div class="wf-module">
           <div class="n">cve_dependency_remediation</div>
           <p>Where a report assesses, this one fixes: a headless coding agent in a sandbox
           upgrades the vulnerable dependency across every affected manifest, then pushes a
-          version-keyed branch and opens the pull request. Two sandboxes, so the GitHub token
-          never shares a machine with untrusted code.</p>
+          version-keyed branch and opens the pull request. The agent writing that code never has
+          access to the credentials used to push it.</p>
         </div>
         <div class="wf-module">
           <div class="n">agent_chat</div>
@@ -1340,8 +1343,8 @@
         </div>
       </div>
       <p class="wf-note">
-        <strong>Scheduled chats</strong> are the same idea without the pipeline — a prompt, a
-        trigger, and a headless run that lands in chat history as an ordinary conversation you
+        <strong>Scheduled chats</strong> are the same idea without the pipeline: a prompt, a
+        trigger, and a headless run kept on the schedule's own history page as a transcript you
         can read back.
       </p>
     </div>
@@ -1435,7 +1438,7 @@
           Seizu pairs naturally with
           <a href="https://github.com/cartography-cncf/cartography">cartography (CNCF)</a> and
           <a href="https://github.com/JupiterOne/starbase">Starbase</a>. Cartography ingests your
-          cloud, identity, and SaaS inventory into Neo4j — Seizu is the lens that makes it legible.
+          cloud, identity, and SaaS inventory into Neo4j; Seizu is the lens that makes it legible.
         </p>
         <div class="tags">
           <span>AWS</span><span>GCP</span><span>Azure</span><span>GitHub</span>
@@ -1513,8 +1516,8 @@ RETURN u.arn, g.name, p.name</pre>
         Seizu ships an MCP server at <code>/api/v1/mcp</code>, speaking protocol revision
         <code>2026-07-28</code> and every earlier one from a single endpoint. Define Cypher-backed
         tools from the UI or in YAML, and Claude, Cursor, or any MCP-aware agent investigates your
-        graph the way a security engineer would — bounded by the same roles your people are, and by
-        result limits sized for a client rather than a context window.
+        graph the way a security engineer would, bounded by the same roles your people are and by
+        result limits sized for a client instead of a context window.
       </p>
       <div class="mcp-groups">
         <div class="label">BUILT · IN · GROUPS</div>
@@ -1538,7 +1541,7 @@ RETURN u.arn, g.name, p.name</pre>
       <p class="mcp-note">
         This is the endpoint your <em>own</em> agents connect to. Seizu's built-in assistant speaks
         the same inventory from the inside, and can reach third-party MCP servers through
-        operator-run proxies — discovered per user, because a tool listing is itself
+        operator-run proxies, discovered per user, because a tool listing is itself
         privileged information.
       </p>
     </div>
@@ -1573,7 +1576,7 @@ RETURN u.arn, g.name, p.name</pre>
     </div>
     <div class="usecase">
       <div class="label">05 · Autonomous remediation</div>
-      <p>&ldquo;Every repo pinned to a vulnerable version — open the upgrade PRs before standup.&rdquo;</p>
+      <p>&ldquo;Find every repo pinned to a vulnerable version and open the upgrade PRs before standup.&rdquo;</p>
     </div>
     <div class="usecase">
       <div class="label">06 · The overnight watch</div>
@@ -1589,7 +1592,7 @@ RETURN u.arn, g.name, p.name</pre>
     <h2>Chart your own sky.</h2>
     <p>
       Spin up Seizu with docker-compose in under ten minutes, point it at your Neo4j instance,
-      and start seeing your infrastructure the way it actually connects — with an agent
+      and start seeing your infrastructure the way it actually connects, with an agent
       already reading the same sky.
     </p>
     <div class="final-ctas">
