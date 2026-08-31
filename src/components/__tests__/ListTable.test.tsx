@@ -217,4 +217,58 @@ describe('ListTable', () => {
     expect(screen.getByText('Row 1')).toBeInTheDocument();
     expect(screen.getByText('Row 2')).toBeInTheDocument();
   });
+  // Chrome ignores min-width on cells under `table-layout: fixed`, so a table
+  // that cannot fit its columns squeezes the width-less ones to a few pixels
+  // instead of scrolling. The table's own minimum is what prevents that.
+  it('reserves a minimum width for columns that declare no width', () => {
+    render(
+      <ListTable
+        rows={rows}
+        columns={[
+          { key: 'name', label: 'Name', render: (row) => row.name },
+          { key: 'status', label: 'Status', render: (row) => row.status },
+          {
+            key: 'sized',
+            label: 'Sized',
+            cellSx: { width: 200 },
+            render: () => 'sized',
+          },
+        ]}
+        getRowKey={(row) => row.id}
+        emptyMessage="No rows."
+      />,
+    );
+
+    // Two flexible columns at the 120px floor, plus the 200px sized column.
+    expect(screen.getByRole('table')).toHaveStyle({ minWidth: '440px' });
+  });
+
+  it('solves for percentage columns when reserving the minimum width', () => {
+    render(
+      <ListTable
+        rows={rows}
+        columns={[
+          { key: 'name', label: 'Name', render: (row) => row.name },
+          {
+            key: 'wide',
+            label: 'Wide',
+            cellSx: { width: '50%' },
+            render: () => 'wide',
+          },
+          {
+            key: 'sized',
+            label: 'Sized',
+            cellSx: { width: 180 },
+            render: () => 'sized',
+          },
+        ]}
+        getRowKey={(row) => row.id}
+        emptyMessage="No rows."
+      />,
+    );
+
+    // The 50% column takes half of whatever the table becomes, so the 120px
+    // flexible column and the 180px sized one have to fit in the other half.
+    expect(screen.getByRole('table')).toHaveStyle({ minWidth: '600px' });
+  });
 });

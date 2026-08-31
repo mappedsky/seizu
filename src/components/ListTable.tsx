@@ -125,6 +125,30 @@ function extractWidthSx(
     : undefined;
 }
 
+const COLUMN_MIN_WIDTH = 48;
+
+// A column with no declared width shares whatever the sized columns leave over.
+// Under `table-layout: fixed` that share can fall to a few pixels, so give it a
+// floor wide enough to still read as text and let the container scroll instead.
+const FLEXIBLE_COLUMN_MIN_WIDTH = 120;
+
+const BREAKPOINT_ORDER = ['xs', 'sm', 'md', 'lg', 'xl'] as const;
+
+function isVisibleAt(
+  hideBelow: ListTableColumn<unknown>['hideBelow'],
+  breakpoint: Breakpoint,
+): boolean {
+  if (!hideBelow) return true;
+  return (
+    BREAKPOINT_ORDER.indexOf(breakpoint) >= BREAKPOINT_ORDER.indexOf(hideBelow)
+  );
+}
+
+function isPixelWidth(width: ColumnWidth | undefined): boolean {
+  if (typeof width === 'number') return true;
+  return typeof width === 'string' && width.trim().endsWith('px');
+}
+
 function widthToCss(width: ColumnWidth): string {
   return typeof width === 'number' ? `${width}px` : width;
 }
@@ -426,8 +450,23 @@ export default function ListTable<T>({
   const clearSelection = () => onSelectionChange?.([]);
   const selectionActive = selectable && selectedKeySet.size > 0;
 
-  const getColumnMinWidth = (column: ListTableColumn<T>): number =>
-    Math.max(48, column.minWidth ?? 48);
+  const getDeclaredWidth = (
+    column: ListTableColumn<T>,
+  ): ColumnWidth | undefined =>
+    column.width ??
+    extractWidthSx(column.cellSx) ??
+    extractWidthSx(column.headerSx);
+
+  const getColumnMinWidth = (column: ListTableColumn<T>): number => {
+    if (column.minWidth !== undefined)
+      return Math.max(COLUMN_MIN_WIDTH, column.minWidth);
+    // A pixel width is a column asking for a size and keeping it. A percentage
+    // still flexes with the container, so it needs the flexible floor.
+    const declared = getDeclaredWidth(column);
+    if (typeof declared === 'number' || isPixelWidth(declared))
+      return COLUMN_MIN_WIDTH;
+    return FLEXIBLE_COLUMN_MIN_WIDTH;
+  };
 
   const getColumnWidth = (column: ListTableColumn<T>): number => {
     const explicitWidth = columnWidths[column.key];
@@ -448,6 +487,52 @@ export default function ListTable<T>({
 
     return 0;
   };
+
+  // Chrome ignores `min-width` on cells under `table-layout: fixed`, so a
+  // shortfall comes out of the width-less columns until they are unreadable.
+  // Give the table itself a minimum instead and let the container scroll.
+  //
+  // Percentage widths make that a solve rather than a sum: a column asking for
+  // 24% takes 24% of whatever the table ends up being, so the pixel columns
+  // have to fit in what is left over.
+  const getBreakpointMinWidth = (breakpoint: Breakpoint): number => {
+    let pixelTotal = selectable ? COLUMN_MIN_WIDTH : 0;
+    let percentSum = 0;
+    let percentMinTotal = 0;
+
+    for (const column of columns) {
+      if (!isVisibleAt(column.hideBelow, breakpoint)) continue;
+      const minWidth = getColumnMinWidth(column);
+      const assigned = columnWidths[column.key] ?? getDeclaredWidth(column);
+
+      if (typeof assigned === 'number') {
+        pixelTotal += Math.max(assigned, minWidth);
+      } else if (isPixelWidth(assigned)) {
+        pixelTotal += Math.max(Number.parseFloat(assigned as string), minWidth);
+      } else if (
+        typeof assigned === 'string' &&
+        assigned.trim().endsWith('%')
+      ) {
+        percentSum += Number.parseFloat(assigned) / 100;
+        percentMinTotal += minWidth;
+      } else {
+        pixelTotal += minWidth;
+      }
+    }
+
+    // Whichever binds: the percentage columns taking their share, or those
+    // columns bottoming out at their own floor.
+    const withPercentShare =
+      percentSum > 0 && percentSum < 1 ? pixelTotal / (1 - percentSum) : 0;
+    return Math.ceil(Math.max(pixelTotal + percentMinTotal, withPercentShare));
+  };
+
+  const tableMinWidth = BREAKPOINT_ORDER.reduce<
+    Partial<Record<Breakpoint, number>>
+  >((acc, breakpoint) => {
+    acc[breakpoint] = getBreakpointMinWidth(breakpoint);
+    return acc;
+  }, {});
 
   const snapshotColumnWidths = () =>
     columns.reduce<Record<string, number>>((acc, column) => {
@@ -578,15 +663,12 @@ export default function ListTable<T>({
   };
 
   const getWidthStyle = (column: ListTableColumn<T>): SxProps<Theme> => {
-    const width =
-      columnWidths[column.key] ??
-      column.width ??
-      extractWidthSx(column.cellSx) ??
-      extractWidthSx(column.headerSx);
-    if (width === undefined) return {};
+    const width = columnWidths[column.key] ?? getDeclaredWidth(column);
+    const minWidth = widthToCss(getColumnMinWidth(column));
+    if (width === undefined) return { minWidth };
     return {
       width: widthToCss(width),
-      minWidth: widthToCss(getColumnMinWidth(column)),
+      minWidth,
     };
   };
 
@@ -819,7 +901,9 @@ export default function ListTable<T>({
         </Stack>
       </Box>
       <TableContainer sx={{ overflowX: 'auto' }}>
-        <Table sx={{ tableLayout: 'fixed', width: '100%' }}>
+        <Table
+          sx={{ tableLayout: 'fixed', width: '100%', minWidth: tableMinWidth }}
+        >
           <TableHead>
             <TableRow>
               {selectable && (
