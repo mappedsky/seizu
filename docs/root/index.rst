@@ -35,7 +35,7 @@ Documentation
 * `Chat assistant documentation <https://mappedsky.github.io/seizu/install/chat.html>`_
 * `Workflow documentation <https://mappedsky.github.io/seizu/install/workflows.html>`_
 * `Scheduled chat documentation <https://mappedsky.github.io/seizu/install/chat-schedules.html>`_
-* `Temporal workflow documentation <https://mappedsky.github.io/seizu/install/temporal-workflows.html>`_
+* `Built-in workflow documentation <https://mappedsky.github.io/seizu/install/built-in-workflows.html>`_
 * `Scheduled cartography sync documentation <https://mappedsky.github.io/seizu/install/cartography-sync.html>`_
 * `Sandbox delegation documentation <https://mappedsky.github.io/seizu/install/sandbox.html>`_
 * `MCP Toolsets documentation <https://mappedsky.github.io/seizu/install/mcp-toolsets.html>`_
@@ -58,14 +58,13 @@ Documentation
     install/query-console
     install/chat
     install/workflows
-    install/scheduled-queries
     install/chat-schedules
-    install/temporal-workflows
+    install/built-in-workflows
+    install/cve-remediation
     install/cartography-sync
     install/sandbox
     install/mcp-toolsets
     install/agent-plugins
-    install/mcp-skillsets
     install/external-mcp
 
 .. toctree::

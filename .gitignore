@@ -180,3 +180,6 @@ chat-harness-arm.yml
 *.swp
 *.swo
 .*.sw?
+
+# Scratch frames from scripts/walkthroughs (only the .gif in images/ is kept)
+.walkthroughs/

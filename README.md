@@ -7,15 +7,20 @@
 
 ## What is Seizu?
 
-[Seizu (星図)](https://mappedsky.github.io/seizu/) is a star chart for your security graph — a React + Python frontend for Neo4j data, built for [Cartography](https://github.com/cartography-cncf/cartography) and [Starbase](https://github.com/JupiterOne/starbase).
+[Seizu (星図)](https://mappedsky.github.io/seizu/) is a star chart for your security graph: a React + Python frontend for Neo4j data, built to visualize, analyze, and automate security graphs built from tooling like [Cartography](https://github.com/cartography-cncf/cartography), [Starbase](https://github.com/JupiterOne/starbase), etc.
 
 Seizu includes:
 
-* A browser-editable dashboard with a row/panel layout and multiple panel types for visualizing Cypher query results
+* Reports, browser-editable dashboards and markdown, with a row/panel layout and multiple panel types for visualizing Cypher query results
+* Spaces, a grouping of reports
 * An interactive Cypher query console with schema browsing and per-user history
-* A built-in MCP server that exposes user-defined toolsets so LLM agents can query the graph alongside you
-* A scheduled-query worker — runs Cypher on a schedule or on graph events, with action plugins (Slack, SQS, log)
-* Native OIDC / JWT auth — connect Seizu directly to your IDP; no proxy required
+* A built-in MCP server that exposes user-defined tools and skills so LLM agents can analyze the graph alongside you; skills are based on [Agent Plugins](https://agent-plugins.org/), and are reusable across seizu, claude and other agents that support agent plugins
+* An AI agent, based on langgraph, backed by temporal, with sandbox support (with a persistent filesystem); orchestrated or one-shot. Has per-turn budgeting, and admin-configured, and user selectable provider selection (model/reasoning level); external MCP support, via connection to an MCP proxy
+* An AI assistant, powered by the AI agent, which can help users do analysis, update reports, etc without leaving seizu
+* Workflows, which can run module on a schedule, or triggered by graph updates or other worflows. Workflows are based on temporal, and can run complex chains of seqeuential stages, with activities that run in parallel per stage. All activities have named outputs, and can use data from named inputs (include graph queries, or output from AI agent module runs).
+* Scheduled AI assistant chats, based on the AI agent and temporal, which can allow users to run analysis, build/update reports, and more on a schedule they define (permissioned separately than workflows)
+* Native OIDC / JWT auth
+* Fine-grained RBAC, for tight control over which users can use which features
 
 ## Getting started
 

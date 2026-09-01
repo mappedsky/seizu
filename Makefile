@@ -316,3 +316,13 @@ sync_cve:
 .PHONY: sync_cve_metadata
 sync_cve_metadata:
 	docker compose run cartography --neo4j-uri=bolt://neo4j:7687 --selected-modules=create-indexes,cve_metadata,analysis --cve-metadata-nist-api-key-env-var=CARTOGRAPHY_NIST_NVD_TOKEN
+
+.PHONY: walkthroughs
+walkthroughs:
+	@# Re-record the splash-carousel GIFs into images/. Needs a Chrome with
+	@# --remote-debugging-port reachable at CDP_HOST, its window visible on an
+	@# awake display, and the dev stack up. Pass CLIPS to record a subset.
+	@# See docs/walkthrough-recording-steps.md.
+	CDP_HOST=$(or $(CDP_HOST),127.0.0.1:9222) \
+	SEIZU_URL=$(or $(SEIZU_URL),http://localhost:3000) \
+	node scripts/walkthroughs/record-all.mjs $(CLIPS)

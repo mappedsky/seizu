@@ -113,17 +113,28 @@ user or a broader process identity.
 
 ## Lightweight local development
 
-The optional Compose profile runs
+The optional Compose profile runs two upstream MCP servers, so a development
+stack has real tools to discover rather than a stub:
+
+- [`github/github-mcp-server`](https://github.com/github/github-mcp-server) in
+  Streamable HTTP mode, behind a network-internal Caddy adapter. It gives the
+  profile a real, annotation-bearing MCP implementation without requiring
+  developers to launch a separate upstream.
+- [`mappedsky/depsdevmcp`](https://github.com/mappedsky/depsdevmcp), a deps.dev
+  package-metadata server. It answers what a package version *declares* it
+  requires and what its resolved graph pulls in — neither of which the security
+  graph records, and neither of which the sandbox can fetch, since it has no
+  egress. Read-only and unauthenticated; only a package name and version leave
+  the network.
+
+The profile also runs
 [`obot-platform/mcp-oauth-proxy`](https://github.com/obot-platform/mcp-oauth-proxy)
-on `http://localhost:8081`, the
-[`github/github-mcp-server`](https://github.com/github/github-mcp-server) in
-Streamable HTTP mode, and a network-internal Caddy adapter between them. The
-GitHub server gives the profile a real, annotation-bearing MCP implementation
-without requiring developers to launch a separate upstream.
+on `http://localhost:8081`, used only when
+[exercising the OAuth challenge path](#exercising-the-oauth-challenge-path).
 
 **By default Seizu talks to the Caddy adapter directly**, and every GitHub call
 is the development PAT's identity, read-only via `GITHUB_READ_ONLY=1`. There is
-no per-user token to obtain and nothing that expires. Be clear-eyed about what
+no per-user token to obtain and nothing that expires. Be aware about what
 that is: a service account shared by every Seizu user, scoped by whatever the
 PAT can reach. Grant it only the repositories and permissions needed for
 testing.
@@ -134,9 +145,18 @@ DEV_GITHUB_MCP_READ_ONLY=1
 DEV_GITHUB_MCP_TOOLSETS=default
 
 MCP_EXTERNAL_ENABLED=true
-MCP_EXTERNAL_PROXIES=[{"name":"github","url":"http://external-mcp-github-auth:8080/mcp","transport":"streamable_http","auth_mode":"header_delegation"}]
+MCP_EXTERNAL_PROXIES=[{"name":"github","url":"http://external-mcp-github-auth:8080/mcp","upstream_urls":["https://mcp.github.test/mcp"],"transport":"streamable_http","auth_mode":"header_delegation"},{"name":"deps","url":"http://external-mcp-deps:8080/mcp","upstream_urls":["https://mcp.deps.test/mcp"],"transport":"streamable_http","auth_mode":"header_delegation","require_confirmation":false}]
 MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS=
 ```
+
+Configure **both** proxies. Three of the bundled development skills declare the
+deps.dev tools as dependencies — `github_security_investigations/repo_cve_reachability`,
+`cve_response/dependency_provenance`, and
+`portable_security_review/review_source_dependencies`. A skill whose declared
+tools are missing from a user's inventory drops out of that user's listing
+entirely rather than failing at call time, so omitting `deps` makes those three
+quietly disappear rather than error. The `upstream_urls` aliases match the
+logical endpoints the bundled `portable-security-review` plugin declares.
 
 ```bash
 make external_mcp_enable
@@ -185,16 +205,13 @@ to `.env` without displaying it. Authentik issues an access token valid for one
 hour and a refresh token valid for thirty days, so the script stores **both**
 (plus the registered client id) and renews silently on later runs — a browser
 round trip is needed roughly monthly, not hourly. Pass `--force` to authorize
-from scratch. Storing only the access token is what made an earlier setup
-"expire unexpectedly" an hour in, with tool discovery degrading to
-`ext__github__seizu_authenticate` mid-investigation.
+from scratch.
 
 A Temporal turn holds no browser token and cannot renew one itself
 (AGT-010), so a deployment that needs per-user GitHub authority should give
 the proxy GitHub as its OAuth provider, forward the user's token instead of
 injecting a PAT, and address users with `m2m_jwt` plus `X-Target-User-ID` — the
 shape of the enterprise gateway example below.
-
 
 The make target enables local Authentik and persists
 `MCP_EXTERNAL_ENABLED=true` in `.env`; `make up` then selects both Compose

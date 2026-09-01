@@ -1,142 +1,138 @@
-# Walkthrough GIF Recording Steps
+# Walkthrough GIF Recording
 
-These steps describe how to regenerate each animated GIF walkthrough for Seizu.
-All recordings use the `mcp__claude-in-chrome__*` browser automation tools.
+The animated GIFs in the splash-page carousel
+(`docs/root/_templates/splash.html`) are recorded by driving a real Chrome over
+the DevTools Protocol. The harness lives in `scripts/walkthroughs/`; the clips
+themselves are the six files in `scripts/walkthroughs/clips/`.
 
-## General notes
+```bash
+make walkthroughs                                  # all clips
+make walkthroughs CLIPS="chat workflows"           # a subset
+make walkthroughs CDP_HOST=192.168.5.2:9222        # a browser on another host
+```
 
-- Use `tabs_create_mcp` to open a fresh tab before each recording.
-- Do **not** navigate directly to `/app/reports/<id>` — it redirects to the dashboard.
-  Instead, navigate to `/` first (or the dashboard), then click the report name in the sidebar.
-- Use `javascript_tool` (JS `window.scrollBy`) for large scrolls to avoid consuming GIF frames.
-  Only `computer` and `navigate` tool calls count toward the 50-frame cap.
-- Export settings: `quality: 6`, `showClickIndicators: true`, all other overlays `false`.
-- The browser viewport renders at 1920×890 with a ~1.224 DPR.
-  DOM coordinates × (1/1.224) ≈ screenshot coordinates.
+Output goes straight to `images/*.gif`, which Sphinx exposes under `_static/`
+(`html_static_path = ["images", "_static"]` in `docs/conf.py`). Frames are
+scratch and land in `.walkthroughs/`, which is gitignored.
 
----
+## What has to be true first
 
-## GIF 1: Query Console (`seizu-query-console-walkthrough.gif`)
+- **Chrome running with `--remote-debugging-port=9222`**, reachable at
+  `CDP_HOST` (default `127.0.0.1:9222`). Confirm with
+  `curl -s http://$CDP_HOST/json/version`.
+- **The browser window visible on an awake display.** This is the one that
+  bites. Chrome does not composite a hidden tab, and `Page.startScreencast`
+  then emits *nothing* — not a single frame — whether the tab is behind another
+  window, on another Space, or on a sleeping display. Neither
+  `Page.bringToFront` nor `Target.activateTarget` overrides it. The harness
+  detects this, warns, and falls back to `Page.captureScreenshot` polling, but
+  polling costs a round trip per frame (~2 fps at this size against ~17 fps for
+  the screencast) and the result looks like a slideshow. If a run logs
+  `recording (polling)`, stop and fix the window before keeping the output.
+- **The dev stack up** at `SEIZU_URL` (default `http://localhost:3000`) with
+  seeded data — `make seed_dashboard`. The clips reference the seeded `Panel
+  Examples` report, the `GitHub Security` toolset, the
+  `github-security-investigations` plugin, and the seeded workflows.
+- **Docker**, for ffmpeg. There is no ffmpeg on the host; encoding runs in
+  `linuxserver/ffmpeg`.
+- **Node 22+** for the built-in `WebSocket`. The harness has no dependencies —
+  nothing to install.
 
-**Starting URL:** `http://localhost:8080/app/query-console`
-(Navigate to dashboard first, then click "Query Console" in the sidebar.)
+Two clips write to the dev stack rather than only reading it:
 
-1. Start recording. Take an initial screenshot.
-2. Wait for the schema panel on the left to finish loading.
-3. Scroll the schema panel down to **CVEMetadata** and click it to expand it.
-4. Hover over the **GitHubDependabotAlert** node entry for ~2 s to show its tooltip.
-5. Click **GitHubDependabotAlert** — this runs a discovery query and populates the graph.
-6. Scroll the node detail panel on the right to show its properties.
-7. Click the **Table** tab above the graph.
-8. Click the **Raw** tab.
-9. Open the query history panel.
-10. Click the history entry:
-    `MATCH path = (n:\`Dependency\`)-[r]-(m) RETURN path LIMIT 25`
-    to load it into the editor.
-11. Take a final screenshot. Stop recording.
-12. Export as `seizu-query-console-walkthrough.gif`.
+- **`clips/chat.mjs` makes a real model call** against whatever `CHAT_LLM_MODEL`
+  is configured, so it costs money and takes as long as the model takes — on the
+  reference stack, about two minutes. It follows the turn through to its answer
+  (`waitForGone('is working')`) and holds there.
+- **`clips/workflows.mjs` builds a workflow and saves it.** It deletes any
+  earlier `Critical CVE alerting` first, so re-recording does not stack up
+  duplicates, and leaves the new one behind.
 
----
+## How the harness works
 
-## GIF 2: Report Viewing (`seizu-report-walkthrough.gif`)
+- `cdp.mjs` — one browser-level WebSocket driving every tab through flat
+  sessions.
+- `record.mjs` — captures frames and encodes them. Both capture modes write the
+  same `frames/*.jpg` plus a concat list carrying **real durations**, so a pause
+  in the UI stays a pause in the GIF rather than being resampled away.
+- `harness.mjs` — the `clip()` runner and the step API.
 
-**Starting URL:** `http://localhost:8080/app/reports/7458123696264187904?panel_examples_search=CVE-2024`
-(Navigate to dashboard, click "Panel Examples" in the sidebar.)
+Three details worth knowing before writing a clip:
 
-1. Start recording. Take an initial screenshot showing the report with CVE-2024 pre-filled.
-2. Click the chevron on the **"About this report"** panel to collapse it.
-3. Scroll down to the pie charts section.
-4. Hover over the **HIGH** arc label on the severity pie chart for ~2 s.
-5. Scroll down to the graph panel. Click a severity node to highlight its connections.
-6. Scroll back to the top. Change the **CVE ID Search** input to `CVE-2026` and wait for data to refresh.
-7. Open the **Base Severity** autocomplete and select **CRITICAL**. Wait for refresh.
-8. Scroll to the bottom of the report.
-9. Take a final screenshot. Stop recording.
-10. Export as `seizu-report-walkthrough.gif`.
+- **Clicks are real input events.** `Runtime.evaluate` with `.click()` does not
+  work: it finds the wrapper `<li>` and React Router never fires. Steps dispatch
+  `Input.dispatchMouseEvent` at the element's measured centre.
+- **Coordinates are viewport coordinates**, so `hover` scrolls a target into
+  view before clicking — otherwise the click lands on whatever happens to be at
+  those coordinates. It checks `elementFromPoint` rather than only the viewport
+  bounds, because a scrollable dialog is shorter than the window: a control at
+  the bottom of the New Workflow dialog is inside the viewport and still behind
+  the backdrop, and clicking it closes the dialog.
+- **A panel can swallow the wheel.** A graph panel zooms itself on wheel events,
+  so a wheel aimed into one scrolls nothing. `scrollBy` wheels clear of the
+  panels, checks the page actually moved, and finishes with a smooth
+  `window.scrollBy` if it did not. Prefer `wheelToElement`, which locates a
+  section by its heading — filtering a report changes its height, so absolute
+  offsets do not survive.
+- **The cursor is synthetic.** The screencast does not capture the OS pointer,
+  so the harness injects an SVG arrow and a click ripple, re-injected on every
+  navigation.
 
----
+Selector gotchas, all of which have already cost a re-record:
 
-## GIF 4: MCP Toolsets & Skillsets (`seizu-toolsets-skillsets-walkthrough.gif`)
+- `text=` matching is **case-insensitive**: MUI uppercases buttons and tabs in
+  CSS, so the DOM text is `Run` where the screen reads `RUN`.
+- Scope dialog buttons with `within: '[role="dialog"]'`. The report edit toolbar
+  has its own **Cancel**, and clicking that leaves edit mode instead of closing
+  the dialog.
+- Report filter inputs are addressed by `id` (`#panel_examples_search`), not
+  `name` or `aria-label`.
+- Use `label=` for form fields: a MUI Select has no `htmlFor` on its label, so
+  nothing else links the two. Use `has=<selector>::<substring>` for rows whose
+  text carries more than the part worth addressing, like a query-history entry
+  that ends in a timestamp.
+- Scope dropdown options with `within: '[role="listbox"]'`. Options render in a
+  portal, and an element of the same name elsewhere on the page will otherwise
+  win and then fail the hit test.
+- Detail dialogs close with an icon button, not a text one — send `Escape`.
+- The user-defined toolsets sort after the built-ins and fall on page 2, so the
+  toolsets clip searches rather than paginates.
 
-**Starting URL:** `http://localhost:8080/app/toolsets`
-(Navigate to dashboard, click "MCP Toolsets" in the sidebar.)
+## The clips
 
-1. Start recording. Take an initial screenshot of the dashboard.
-2. Click **MCP Toolsets** in the sidebar — navigates to the toolsets list.
-3. Hover over **GitHub Security** for ~2 s, then click it to enter its tools list.
-4. Click **org_overview** to open the detail modal.
-5. Scroll the modal to the bottom (JS scroll or mouse wheel).
-6. Wait ~2 s, then click **✕** to close the modal.
-7. Click the **⋮ More actions** button on the `org_overview` row → **Edit**.
-8. Scroll the Edit Tool dialog to the bottom.
-9. Wait ~2 s, then click **CANCEL**.
-10. Click **MCP Skillsets** in the sidebar — navigates to the skillsets list.
-11. Hover over **GitHub Security Investigations** for ~2 s, then click it to enter its skills list.
-12. Hover over **GitHub Organization Security Overvi...** for ~2 s, then click it to open the detail modal.
-13. Scroll the modal to the bottom.
-14. Wait ~2 s, then click **CLOSE**.
-15. Click **⋮ More actions** on the skill row → **Render**.
-16. Type `mappedsky` in the **org** field, then click **RENDER**.
-17. Scroll the rendered output to the end.
-18. Wait ~2 s, then click **CLOSE**.
-19. Click **⋮ More actions** → **Edit**.
-20. Scroll the Edit Skill dialog to the bottom.
-21. Click **CANCEL**. Take a final screenshot. Stop recording.
-22. Export as `seizu-toolsets-skillsets-walkthrough.gif`.
+| File | GIF | Shows |
+|------|-----|-------|
+| `clips/reports.mjs` | `seizu-report-walkthrough.gif` | A slow pass down Panel Examples, changing each filter while the panels it drives are on screen, and selecting a node in the graph panel |
+| `clips/edit-report.mjs` | `seizu-edit-report-walkthrough.gif` | Edit mode: named Cypher, the Edit input dialog, the Edit panel dialog with the Markdown editor |
+| `clips/query-console.mjs` | `seizu-query-console-walkthrough.gif` | Schema browser, a discovery query, node selection with its properties, Graph/Table/Raw, then recalling a query from history and running it |
+| `clips/workflows.mjs` | `seizu-workflows-walkthrough.gif` | Building a two-stage workflow: a query stage feeding a second stage that fans out to Slack and statsd in parallel |
+| `clips/toolsets-plugins.mjs` | `seizu-toolsets-plugins-walkthrough.gif` | MCP toolsets, a tool's Cypher and parameters, a plugin package's skills, then the staged package editor |
+| `clips/chat.mjs` | `seizu-chat-walkthrough.gif` | Asking the graph a question and following the turn to its answer, with routing, thinking and tool calls in the details pane |
 
----
+`seizu-mcp-agent-walkthrough.gif` is **not** produced here. It is a terminal
+capture of Claude Code using Seizu's MCP tools, with hand-drawn redaction bars,
+and has to be remade by hand if it ever goes stale.
 
-## GIF 3: Edit Report (`seizu-edit-report-walkthrough.gif`)
+`clips/edit-report.mjs` deliberately ends on **Cancel**. Saving would add a
+version to the seeded report on every re-record; the clip shows the editing
+surface without mutating anything.
 
-**Starting URL:** `http://localhost:8080/app/reports/7458123696264187904?panel_examples_search=CVE-2024`
-(Navigate to dashboard, click "Panel Examples" in the sidebar.)
+## Output settings
 
-### Pre-flight: restore a clean version
+1568x727 at 1:1 — the capture viewport matches the output width, so nothing is
+resampled — 10 fps, 96-colour palette with `stats_mode=diff` and Bayer
+dithering. Raising the palette to 128 colours costs about 20% more bytes for no
+visible gain on this dark UI; dropping to 64 saves a little more but risks
+banding in the chart panels.
 
-Before recording, check the version history at
-`/app/reports/7458123696264187904/history`.
-If a recording-created version (e.g. v3 by "Seizu Admin") is current,
-restore the previous seed version (e.g. v2 "Updated from YAML dashboard config")
-via its three-dot menu → **Restore**, then navigate back to the report.
+Two per-clip knobs control length, and they are not the same thing:
 
-### Recording steps
+- `speed` divides every frame's duration, so a long build plays briskly without
+  losing any of it. The workflow clip runs at 1.7.
+- `maxFrameSeconds` caps how long a *single* held frame lasts. This is what
+  shortens a clip that spends a minute waiting on a model: it removes the dead
+  air and leaves the rest at its own pace.
 
-1. Start recording. Take an initial screenshot of the report view.
-2. Click **EDIT REPORT** (top-right).
-3. Wait ~2 s for the edit view to load (Named Queries section is expanded by default).
-4. Click the chevron on **Named Queries** to collapse it.
-5. Click the **pencil (edit) icon** on the **CVE ID Search** input row to open the Edit Input dialog.
-6. Wait ~3 s to let the viewer see the dialog, then click **CANCEL**.
-7. Scroll down (JS scroll) until the **About this report** markdown panel's action buttons
-   (pencil, trash, move, resize) are visible at the bottom right of the panel.
-8. Click the **pencil (Edit panel) icon** for the markdown panel.
-9. In the Edit Panel dialog, click the **MARKDOWN** tab.
-10. Click inside the markdown textarea and press `Ctrl+End` to move to the end.
-    (Use JS `textarea.selectionStart = textarea.value.length` if the key does not scroll
-    the textarea itself.)
-11. Type a new line:
-    ```
-    Markdown supports basic templating, using Markdoc: input example {% $panel_examples_severity %}
-    ```
-    Verify there is a space after `Markdoc:` — use `document.execCommand('insertText')` to
-    fix a missing space if the typing glitch recurs.
-12. Click **SAVE PANEL**.
-13. JS-scroll down to the **Table with text input filter** row. The panel inside it is
-    "CVEs matching CVE ID...".
-14. Drag the **resize handle** (diagonal-arrow icon, bottom-right corner of the panel)
-    leftward to resize from 12 columns to 6.
-    - Handle DOM position: `document.querySelector('.react-resizable-handle')` — use the one
-      whose `getBoundingClientRect().top` matches the current panel bottom.
-    - Drag from the handle's x to approximately `panel_left + (full_width / 2)`.
-15. JS-scroll down to the **Table with autocomplete filter** row. The panel inside it is
-    "CVEs by severity".
-16. Drag its resize handle the same way to resize to 6 columns.
-17. Click the **Move to row** icon (crosshair button) on the "CVEs by severity" panel.
-    In the dropdown, select **Table with text input filter**.
-18. JS-scroll up to the **Table with text input filter** row name input.
-    Triple-click it and type `Tables with inputs`.
-19. JS-scroll to the now-empty **Table with autocomplete filter** row.
-    Click its red **delete row** button (far right of the row header).
-20. Click **SAVE VERSION** (top-right, fixed toolbar).
-21. Take a final screenshot of the saved report view. Stop recording.
-22. Export as `seizu-edit-report-walkthrough.gif`.
+The chat clip needs both, plus `fps: 6` and `colors: 64`. Streaming text changes
+on every frame, which is the most expensive thing a GIF can encode — at the
+defaults that clip alone is 15 MB against 1-5 MB for every other one.

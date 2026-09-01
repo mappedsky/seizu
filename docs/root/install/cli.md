@@ -45,7 +45,7 @@ You can also create `~/.config/seizu/seizu.conf`:
 
 ```yaml
 api_url: https://seizu.example.com
-seed_file: ~/dashboards/reporting-dashboard.yaml
+seed_file: /home/user/dashboards/reporting-dashboard.yaml
 ```
 
 Configuration resolution is:

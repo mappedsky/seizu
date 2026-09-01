@@ -2,11 +2,38 @@
 
 ## Purpose
 
-The chat assistant is an LLM agent built into the web app at `/app/chat`. It answers questions about your graph by calling the same tools exposed by the [MCP server](mcp-toolsets.html) — running Cypher, inspecting the schema, reading reports and scheduled queries, rendering [skills](mcp-skillsets.html) — and can create or update resources with your explicit confirmation. Conversations stream token-by-token, persist across reloads, and are organized into named sessions in a sidebar.
+The chat assistant is an LLM agent built into the web app at `/app/chat`. It answers questions about your graph by calling the same tools exposed by the [MCP server](mcp-toolsets.html) — running Cypher, inspecting the schema, reading reports and scheduled queries, rendering [skills](agent-plugins.html) — and can create or update resources with your explicit confirmation. Conversations stream token-by-token, persist across reloads, and are organized into named sessions in a sidebar.
 
-The assistant also powers the headless features documented separately: [scheduled chats](chat-schedules.html), agent sessions started by [Temporal workflows](temporal-workflows.html), and [sandbox delegation](sandbox.html).
+The assistant also powers the headless features documented separately: [scheduled chats](chat-schedules.html), agent sessions started by [workflows](built-in-workflows.html), and [sandbox delegation](sandbox.html).
 
 ## Enabling chat
+
+Most of this page is reference material: orchestration, run budgets, context
+windows, prompt caching. Almost none of it is required reading, and almost every
+setting it documents is optional tuning with a working default. A useful chat
+deployment needs four things:
+
+1. **`CHAT_ENABLED=true`**, plus PostgreSQL checkpoint storage for history —
+   the `CHAT_CHECKPOINT_DATABASE_*` variables in
+   [backend configuration](backend.html).
+2. **A model and its API key**: `CHAT_LLM_MODEL` and the provider's key. This is
+   needed whether or not you use model profiles — Seizu refuses to start
+   without a model when a real provider is selected, and the router and verifier
+   stages always use the environment-configured model.
+3. **Permissions** for the people who should have chat, and for what the agent
+   may do on their behalf — see [Permissions](#permissions).
+4. **A model profile**, if you want more than one model. Skip this and every
+   turn uses the `CHAT_LLM_*` settings above. Add one from
+   [Model profiles](#model-profiles) to give users a choice of model or
+   reasoning level, an economy fallback, or a per-profile cost cap.
+
+Two optional capabilities are worth knowing about up front, because both are off
+by default and both noticeably change what the agent can do:
+
+- **[The sandbox](sandbox.html)** (`SANDBOX_ENABLED=true`) lets the agent run
+  code in an isolated VM, and is what makes skills that ship `scripts/` runnable.
+- **[External MCP](external-mcp.html)** (`MCP_EXTERNAL_ENABLED=true`) gives the
+  agent tools from other MCP servers through a configured proxy.
 
 Chat is off by default. Set `CHAT_ENABLED=true` to register the chat API routes, initialize checkpoint storage, and show the Chat UI (the frontend discovers it via `GET /api/v1/config` → `features.chat`).
 
@@ -135,9 +162,7 @@ conversation history: that lives in the checkpoint and is served by
 `/api/v1/chat/history`.
 
 Because each turn is a workflow, **interactive chat requires a reachable
-Temporal server and a running `seizu-temporal-worker`**. This is a change: chat
-previously ran entirely in the web process. Turns appear in the Temporal UI
-alongside scheduled chats and workflows.
+Temporal server and a running `seizu-temporal-worker`**.
 
 ### Gunicorn worker timeout
 
@@ -147,14 +172,13 @@ Under `UvicornWorker` this is a heartbeat watchdog rather than a per-request
 deadline: a healthy long-lived chat stream continues to notify Gunicorn and is
 not cut short by this value.
 
-Chat production runs in Temporal, so replacing a wedged web worker does not
-stop the turn. The client can reconnect and replay the durable event log. If
+The client can reconnect and replay the durable event log. If
 you supply your own Gunicorn configuration, choose its watchdog for web-worker
 health rather than for the maximum duration of a chat turn.
 
 ## Orchestration and run budgets
 
-For multi-step requests, chat can route a turn through a plan → dispatch → verify orchestration instead of the single-agent path. A cheap router classifies each turn; simple turns take the direct path with no extra LLM call, while complex ones get a planner, scoped sub-agent workers (run in parallel when steps are independent), and a verify gate with bounded retry. This is on by default and controlled by the `CHAT_ORCHESTRATOR_*` settings below.
+For multi-step requests, chat can route a turn through a `plan → dispatch → verify` orchestration instead of the single-agent path. A cheap router classifies each turn; simple turns take the direct path with no extra LLM call, while complex ones get a planner, scoped sub-agent workers (run in parallel when steps are independent), and a verify gate with bounded retry. This is on by default and controlled by the `CHAT_ORCHESTRATOR_*` settings below.
 
 The plan is a **directed acyclic graph**: each step lists the steps whose output
 it needs, and runs as soon as all of them have passed. The graph is validated as
@@ -328,8 +352,7 @@ halved conversation; a retry is skipped once text has streamed.
 fits, the oldest turns are condensed into a single block rather than dropped.
 The block is deterministic (never a model call) and is rebuilt in chunks, so it
 stays byte-identical for many turns at a stretch — which is what keeps a long
-conversation cacheable. Simulated over 40 turns against a 4,000-token budget:
-5 compactions, request bounded 2,421–3,348 tokens.
+conversation cacheable.
 
 The block is bounded by `CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS` and by a reserved
 share of the history budget, so this is **not unlimited memory**: as it fills,
@@ -347,9 +370,7 @@ block is deterministic and reserved, and the measurements behind each — see
 An agent loop re-sends a growing prefix on every call, and providers serve most
 of it from their prompt cache at a fraction of the input price. The ledger reads
 that accounting back out of the response (`input_token_details.cache_read` /
-`cache_creation`) and prices each portion at its own rate — a measured DeepSeek
-call re-sending a 4,016-token prefix reported 3,968 as cache reads, making the
-naive price **21.7× overstated**.
+`cache_creation`) and prices each portion at its own rate.
 
 Two things make Seizu's requests cacheable, and both are automatic:
 
@@ -363,10 +384,6 @@ Two things make Seizu's requests cacheable, and both are automatic:
   the session digest, and the last message. Providers with automatic caching are
   left untouched. A system prompt below `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` is
   left unmarked. Set `CHAT_LLM_PROMPT_CACHE_ENABLED=false` to disable.
-
-Measured on a live two-turn Anthropic conversation: turn 1 writes ~11,000 tokens
-and reads none (cold; writes carry a 1.25× premium); turn 2 reads 16,467 — 56%
-of its input — and writes 1,801.
 
 Two consequences worth knowing when reading the ledger:
 
@@ -423,12 +440,6 @@ Declarations ride on the skill listing the turn already makes, so this adds no
 store read. Names of tools that no longer exist, or that the user cannot reach,
 drop out — the live listing is the authority. Set
 `CHAT_LLM_DISCLOSE_SKILL_TOOLS=false` to disclose only on render.
-
-```{note}
-The measured cost of getting this wrong — a per-step system prompt, and a
-catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
-[CTX-006](../dev/decisions/chat-context.md).
-```
 
 ## Configuration
 
@@ -549,7 +560,7 @@ turn that starts in the same moment either wins the claim or is refused with
 "This conversation has been retired". The sweep runs as a Temporal Schedule on
 `seizu-temporal-worker`, so a deployment without that worker never reaps
 whatever this is set to — see
-[retiring idle sessions](sandbox.html#retiring-idle-sessions-and-their-sandboxes)
+[cleaning up idle conversations](sandbox.html#cleaning-up-idle-conversations)
 for why the session and its sandbox are retired together.
 ```
 
@@ -559,6 +570,6 @@ Checkpoint storage (`CHAT_CHECKPOINT_*`) is documented in the [backend configura
 
 - [Scheduled chats](chat-schedules.html) — run the agent headlessly on a recurring schedule.
 - [Sandbox delegation](sandbox.html) — let the agent run code in an isolated ephemeral sandbox.
-- [Temporal workflows](temporal-workflows.html) — durable workflows whose AI sessions run through the same headless chat machinery.
-- [MCP toolsets](mcp-toolsets.html) and [MCP skillsets](mcp-skillsets.html) — the user-defined tools and skills the agent can use.
+- [Built-in workflows](built-in-workflows.html) — durable workflows whose AI sessions run through the same headless chat machinery.
+- [MCP toolsets](mcp-toolsets.html) and [Agent Plugins](agent-plugins.html) — the user-defined tools and skills the agent can use.
 - [External MCP proxies](external-mcp.html) — connect the agent to proxied third-party MCP servers with per-user or M2M identity delegation.

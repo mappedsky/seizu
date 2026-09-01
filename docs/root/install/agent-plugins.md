@@ -19,7 +19,8 @@ plugins:
     enabled: true
 ```
 
-The mapping key must equal `skillsetId`. Seeding validates the package before
+The mapping key must equal the plugin's id, which is derived from the package
+`name` — see [Identity](#identity). Seeding validates the package before
 installing it and compares its content digest, so an unchanged package does not
 create another revision. Export preserves existing source declarations but
 does not invent filesystem paths for plugins installed through another client.
@@ -30,7 +31,9 @@ namespaced discovery proposed for later versions is not enabled.
 
 ## Seizu extension
 
-Add Seizu metadata under the stable extension namespace:
+The `com.mappedsky.seizu` extension is optional: a stock Agent Plugins 1.0.0
+package installs unmodified. Add it to give a skill a title, triggers, aliases,
+or inputs:
 
 ```json
 {
@@ -38,12 +41,9 @@ Add Seizu metadata under the stable extension namespace:
   "name": "security-investigations",
   "extensions": {
     "com.mappedsky.seizu": {
-      "skillsetId": "security_investigations",
       "skills": {
         "review-repository": {
-          "skillId": "review_repository",
           "title": "Review repository",
-          "enabled": true,
           "triggers": ["Review a repository"],
           "parameters": [
             {"name": "repository", "type": "string", "required": true}
@@ -56,10 +56,7 @@ Add Seizu metadata under the stable extension namespace:
 }
 ```
 
-`skillsetId` is required, immutable after installation, and uses Seizu's
-lower-snake identifier grammar. The MCP prompt name remains
-`skillsetId__skillId`. `skillId` is optional; without it Seizu converts the
-portable hyphenated Agent Skill name to lower snake case.
+Each key under `skills` is a skill's directory name under `skills/`.
 
 ## Tool dependencies
 
@@ -96,75 +93,47 @@ because that is what the agent has to call. The frontmatter is the portable
 contract; the body describes the tools of whichever host renders it, and the
 rendered skill carries that host's resolved names.
 
-`mcp__seizu__<tool>` names one of Seizu's own MCP tools; `seizu` is reserved, so
-neither an external proxy nor an `mcp.json` entry can claim it. Any other server
-must be declared in the package's `mcp.json`, and binds to a configured identity
-proxy — Seizu never connects to the declared address itself. Configure the
-proxy's `upstream_urls` entry to associate the portable endpoint with the proxy:
+`mcp__seizu__<tool>` names one of Seizu's own MCP tools; `seizu` is reserved and
+cannot be claimed by anything else. Any other server must be declared in the
+package's `mcp.json`.
 
-```json
-[
-  {
-    "name": "github",
-    "url": "https://proxy.example/mcp/github",
-    "upstream_urls": ["https://api.example/mcp"],
-    "transport": "streamable_http",
-    "auth_mode": "header_delegation"
-  }
-]
-```
+**Seizu never connects to the address a package declares.** It only ever talks
+to the external MCP proxies an operator has configured, so the declared URL is
+at most a hint used to work out which proxy a server means.
+`MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE` decides whether it is used for even that:
 
-The proxy URL remains the only network destination used by Seizu. `stdio` MCP
-entries are retained as package diagnostics and are not started.
+| Mode | How a declared server binds to a proxy |
+|------|----------------------------------------|
+| `none` (default) | The URL is ignored entirely; the proxy whose name matches the `mcp.json` server name is used |
+| `lax` | Prefer a proxy that claims the URL, else fall back to the name match |
+| `strict` | Require exactly one proxy claiming the URL |
 
-A proxy may also advertise aliases in its MCP initialize result under
-`capabilities.extensions.com.mappedsky.seizu.upstreamUrls`. Operator-configured
-`upstream_urls` always wins; advertised aliases are used only when exactly one
-enabled proxy claims the package endpoint.
-
-`MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE` controls how the declaration binds to a
-proxy. The default, `none`, ignores the package URL and uses an enabled proxy
-whose name is the same as the `mcp.json` server name. `lax` prefers a configured
-or advertised URL alias and falls back to that same-name lookup. `strict`
-requires exactly one URL alias match. Every mode still requires the user's
-discovered inventory to contain the exact remote tool.
+Under `lax` and `strict`, a proxy claims a URL through an `upstream_urls` entry
+in `MCP_EXTERNAL_PROXIES`; see [External MCP](external-mcp.md) for configuring
+proxies. In every mode the tool must also be present in that user's discovered
+inventory. `stdio` entries are kept as package diagnostics and never started.
 
 ## Files and scripts
 
-Published package files are immutable MCP resources with URIs of the form:
-
-```text
-seizu://plugins/<plugin>/versions/<revision>/files/<path>
-```
-
-Each enabled skill is listed as one MCP resource carrying its title,
-description and declared `allowed-tools`; the packaged files beneath it are not
-enumerated. A resource template advertises
-`seizu://plugins/{plugin_id}/versions/{revision}/files/{path}`, and any file in a
-published revision can be read at that URI.
-
-References and assets enter model context only when the agent reads their
-resource. During chat, a selected skill is also materialized inside the
-conversation sandbox under `/home/user/seizu_plugins/`. Scripts run only with
-`sandbox__run_script`; arguments are passed as an argv array without a shell.
-Seizu web and worker processes never execute package code.
-
-The authoring UI stages the whole package in the browser. It provides structured
-fields for the known `plugin.json` metadata and each skill's `SKILL.md` front
-matter, instructions, tools, triggers, aliases, and template variables.
-Supporting files can be created or uploaded into that skill's `references/`,
-`scripts/`, or `assets/` directory; scripts are marked executable.
-
-Nothing reaches the server until **Publish**, which submits the complete package
-in one request and creates one immutable revision. Files the editor did not
-change are carried by their SHA-256 digest rather than re-uploaded, so a
-one-line edit to a skill does not push its assets back through the browser. The
-publish names the revision it was loaded from and is refused with `409` if the
-plugin has been published in the meantime, so concurrent edits cannot silently
-revert each other. Unpublished edits live only in that browser tab; leaving the
-editor prompts before discarding them. Default package bounds are 10 MiB
-compressed, 25 MiB unpacked, 500 files, 10 MiB per file, and 512 KiB per
+A skill can ship `references/`, `scripts/` and `assets/` alongside its
 `SKILL.md`.
+
+**Those files only reach a skill when the sandbox is enabled.** Rendering a
+skill attaches and materializes its files when the skill ships `scripts/` *and*
+the caller holds `sandbox:delegate`; scripts then run through
+`sandbox__run_script` inside the conversation's sandbox. Seizu's web and worker
+processes never execute package code.
+
+Without the sandbox, a skill that references its files **still renders and still
+runs** — the agent gets the instructions, just not the script files, so any step
+that depends on running one cannot be carried out. See
+[Sandbox](sandbox.md) for enabling it.
+
+Packaged files are also readable as MCP resources by agents connected to
+Seizu's MCP endpoint, which discover them without configuration.
+
+Default package bounds are 10 MiB compressed, 25 MiB unpacked, 500 files,
+10 MiB per file, and 512 KiB per `SKILL.md`.
 
 ## Identity
 
@@ -177,11 +146,6 @@ directory.
 A name therefore has to derive a valid identifier: lower-case words separated by
 single hyphens, starting with a letter, at most 31 characters. `2fa-tools` and
 anything longer are refused at publish with that constraint named.
-
-Because every id derives, the `com.mappedsky.seizu` extension is optional: a
-stock Agent Plugins 1.0.0 package installs unmodified, and the extension is only
-needed to declare inputs, triggers or aliases. There is no field for stating an
-id — a package carrying `skillsetId` or `skillId` is refused.
 
 ## Turning skills on and off
 
@@ -204,18 +168,17 @@ plugins:
 
 or from the plugin's detail dialog in the UI. `PUT /api/v1/plugins/{id}/skills/{skill_id}`
 is the underlying call, and `plugins__set_skill_enabled` exposes it over MCP.
-A package cannot state this: an `enabled` key in its Seizu extension is refused.
 
 ## Skill inputs
 
-A skill declares its inputs in the Seizu extension, and `prompts/get` returns
-two messages: the `SKILL.md` body exactly as packaged, then a rendered `Inputs`
-block carrying this invocation's values. Write instructions that refer to an
-input by name — "the `repo` input" — rather than substituting it, so the file
-reads the same to a consumer that does not implement Seizu's extension.
+A skill declares its inputs as `parameters` in the Seizu extension. Seizu
+injects the values for an invocation: `prompts/get` returns the `SKILL.md` body
+exactly as packaged, followed by a rendered `Inputs` block holding this call's
+values.
 
-`{% $name %}` placeholders in a body are still substituted, so existing packages
-keep working, but publishing one records a `templated_skill_body` warning.
+Write instructions that refer to an input by name — "the `repository` input" —
+so the file reads the same to a consumer that does not implement Seizu's
+extension.
 
 ## Revisions and package versions
 
@@ -233,10 +196,3 @@ compare, so two revisions that both declare `1.0.0` are indistinguishable to
 them. Publishing changed contents under an unchanged version therefore records a
 non-blocking `unchanged_package_version` warning on the revision, visible in the
 plugin's diagnostics.
-
-## Compatibility
-
-Existing skillsets are projected into one plugin per skillset at startup, with
-their existing `skillset__skill` prompt names preserved. The `/api/v1/skillsets`
-REST routes, `skillsets__*` MCP tools, CLI commands, and permission names remain
-compatibility aliases for one release.

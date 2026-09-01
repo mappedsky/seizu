@@ -20,12 +20,12 @@ the compatibility release.
 
 The editor supports:
 
-- adding, removing, and reordering stages;
-- adding activities, reordering them within a stage, or moving them between stages;
-- assigning every activity a named output and selecting an earlier-stage output as its input;
-- activity-specific parameter forms supplied by the enabled module; and
-- manual-only, interval, hourly, daily, monthly, or SyncMetadata watch triggers; and
-- selecting one or more independent workflows to start after every stage succeeds.
+- adding, removing, and reordering stages
+- adding activities, reordering them within a stage, or moving them between stages
+- assigning every activity a named output and selecting an earlier-stage output as its input
+- activity-specific parameter forms supplied by the enabled module
+- manual-only, interval, hourly, daily, monthly, or SyncMetadata watch triggers
+- selecting one or more independent workflows to start after every stage succeeds
 
 Output names use `lower_snake_case` and are unique across the workflow. An
 activity may reference only an output from an earlier stage, which keeps
@@ -49,7 +49,7 @@ top-level types.
 runs a headless agent session as the workflow's creator, publishing the
 session's summary as its output. Its input reference is optional — referenced
 rows are passed to the agent as untrusted evidence rather than instructions.
-See the [Temporal workflows documentation](temporal-workflows.html#the-agent-chat-workflow).
+See the [built-in workflows documentation](built-in-workflows.html#the-agent-chat-workflow).
 
 When one activity fails, the other activities already running in that stage
 are allowed to settle. The workflow then fails and no later stage starts.
@@ -147,18 +147,31 @@ The `/api/v1/scheduled-queries` API and `seizu scheduled-queries` CLI remain
 temporary aliases. They list only definitions that can be projected to the
 old single-query/action shape without losing meaning.
 
-## Worker configuration
+## Configuration
 
 The `seizu-temporal-worker` service owns both schedule reconciliation and
-execution. Relevant settings are:
+execution. Set these on the worker; `TEMPORAL_ADDRESS` and `TEMPORAL_NAMESPACE`
+are additionally needed by the web service, which reads run history for the
+workflow detail page.
 
-- `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, and `TEMPORAL_TASK_QUEUE`;
-- `WORKFLOW_ACTIVITY_MODULES` (comma-separated Python modules);
-- `WORKFLOW_QUERY_MAX_ROWS`;
-- `WORKFLOW_RESULT_MAX_BYTES`;
-- `WORKFLOW_WATCH_POLL_SECONDS`; and
-- `WORKFLOW_RECONCILE_SECONDS`.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEMPORAL_ADDRESS` | `localhost:7233` | Temporal frontend (gRPC) address. `temporal:7233` in docker compose. |
+| `TEMPORAL_NAMESPACE` | `default` | Namespace workflows run in. |
+| `TEMPORAL_TASK_QUEUE` | `seizu-workflows` | Task queue shared by the action module and the worker. |
+| `TEMPORAL_WORKER_ENABLED` | `true` | Set `false` to disable the worker process. |
+| `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` | `100` | Activity slots per worker process. Also the cluster-wide bound on [distributed chat plan steps](chat.md). |
+| `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS` | `200` | Cap on result rows forwarded into a workflow. |
+| `TEMPORAL_ENABLED_WORKFLOWS` | `""` (all) | Comma-separated allowlist of code-defined workflows exposed as top-level activity types (e.g. `cve_repo_report` to allow assessment but not remediation). The workflow editor only offers enabled workflows and dispatch refuses disabled ones. Set it on both the web service (editor) and the temporal worker (enforcement). |
+| `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Default AI chat activity timeout (per repository for `cve_repo_report`; the default for `agent_chat`'s `timeout_minutes`). |
+| `WORKFLOW_ACTIVITY_MODULES` | SQS, Slack, StatsD | Comma-separated Python import locations for activities hosted by the worker. |
+| `WORKFLOW_QUERY_MAX_ROWS` | `200` | Default maximum rows retained by each query activity. |
+| `WORKFLOW_RESULT_MAX_BYTES` | `1000000` | Cap on the serialized size of an activity result. |
+| `WORKFLOW_WATCH_POLL_SECONDS` | `20` | Interval between SyncMetadata watch polls. |
+| `WORKFLOW_RECONCILE_SECONDS` | `30` | Interval between schedule reconciliation passes. |
 
-`SCHEDULED_QUERY_MODULES` is accepted as a fallback setting for one
-compatibility release. The standalone `seizu-scheduled-queries` service is no
-longer part of the Compose stack.
+Workflows that run an AI session (`agent_chat`, `cve_repo_report`) additionally
+need the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) on the worker;
+`CHAT_LLM_PROVIDER=mock` cannot call tools, so exercising them end to end needs
+a real provider. [CVE remediation](cve-remediation.html) has its own settings and
+uses no chat LLM at all.

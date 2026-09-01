@@ -124,6 +124,106 @@ Setting a free [NVD API key](https://nvd.nist.gov/developers/request-an-api-key)
 CARTOGRAPHY_NIST_NVD_TOKEN=<your_nvd_api_key>
 ```
 
+## Enabling the chat assistant
+
+Chat is off by default. It needs a model and its API key; everything else has a
+working default.
+
+```
+CHAT_ENABLED=true
+CHAT_LLM_MODEL=anthropic/claude-sonnet-4-6
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+```bash
+make down && make up
+```
+
+`CHAT_LLM_MODEL` is any model id LiteLLM understands, so an OpenAI, Gemini or
+DeepSeek model works the same way with its own key. `CHAT_LLM_PROVIDER=mock` is
+the default and only echoes input — it cannot call tools, so a real provider is
+required for anything useful.
+
+Open http://localhost:3000/app/chat and ask something about your graph, such as
+*"Which repositories have the most critical CVEs?"*. In the default
+unauthenticated dev mode every request gets all permissions, so there is nothing
+to grant; with auth enabled, `chat:use` gates the UI and `chat:tools:call` lets
+the agent run tools.
+
+Chat history needs the PostgreSQL checkpoint database, which the compose stack
+provisions for you. For per-user model choice, an economy fallback or spend
+caps, create a profile under **Model Profiles** in the sidebar. See
+[Chat Assistant](chat.html).
+
+### Adding the sandbox
+
+The sandbox lets the assistant run code, and is what makes skills that ship
+scripts runnable. It is off by default and needs a sandbox provider —
+[E2B](https://e2b.dev)'s free tier is the quickest way to try it:
+
+```
+SANDBOX_ENABLED=true
+SANDBOX_API_KEY=e2b_...
+```
+
+```bash
+make down && make up
+```
+
+Ask the assistant *"Can you run a Python script that prints the first 10
+Fibonacci numbers?"* to confirm it works. Sandboxes have no outbound internet
+unless you set `SANDBOX_ALLOW_INTERNET=true`. See [Sandbox](sandbox.html),
+including the self-hosted option if you would rather not use a hosted provider.
+
+## Running workflows
+
+Workflows need no enabling: `make up` already starts Temporal and the
+`seizu-temporal-worker` that executes them, and `make seed_dashboard` installs
+several examples. Open **Workflows** in the sidebar, pick one, and use **Run
+now**; the run and each of its stages appear in the workflow's history, and in
+the Temporal UI at http://localhost:8233.
+
+A workflow runs ordered stages, with the activities inside one stage running in
+parallel. Each activity publishes a named output that later stages can consume,
+so a query stage can feed a notification stage.
+
+To restrict which code-defined workflows are available, set
+`TEMPORAL_ENABLED_WORKFLOWS` to a comma-separated list on **both** the web
+service and the worker; unset means all of them. Note that the `agent_chat`
+workflow runs an AI session, so it needs chat configured as above. See
+[Workflows](workflows.html) and [Built-in workflows](built-in-workflows.html).
+
+## Enabling external MCP tools
+
+Seizu's chat assistant can use tools from other MCP servers, reached through an
+identity-aware proxy. The compose stack bundles two upstream servers to try this
+against: the GitHub MCP server and a deps.dev package-metadata server.
+
+Add a [fine-grained GitHub PAT](https://github.com/settings/tokens?type=beta)
+and the proxy configuration to `.env`:
+
+```
+DEV_GITHUB_MCP_TOKEN=<fine-grained-development-pat>
+DEV_GITHUB_MCP_READ_ONLY=1
+
+MCP_EXTERNAL_ENABLED=true
+MCP_EXTERNAL_PROXIES=[{"name":"github","url":"http://external-mcp-github-auth:8080/mcp","upstream_urls":["https://mcp.github.test/mcp"],"transport":"streamable_http","auth_mode":"header_delegation"},{"name":"deps","url":"http://external-mcp-deps:8080/mcp","upstream_urls":["https://mcp.deps.test/mcp"],"transport":"streamable_http","auth_mode":"header_delegation","require_confirmation":false}]
+```
+
+```bash
+make external_mcp_enable
+make down && make up
+```
+
+Discovered tools are namespaced `ext__<proxy>__<tool>` and appear on the
+**MCP Toolsets** page as read-only entries, so you can see what each proxy
+offers. They are available to the chat assistant; Seizu does not re-export them
+from its own MCP endpoint.
+
+In this local setup every GitHub call uses the one development PAT, so treat it
+as a shared service account and scope it to what you need for testing. See
+[External MCP](external-mcp.html) for per-user identity and the OAuth path.
+
 ## Testing authentication
 
 The stack includes an embedded [Authentik](https://goauthentik.io/) OIDC provider. To enable it, use `auth_enable_bootstrap`, which generates `SESSION_TOKEN_ENCRYPTION_KEY` and `REPORT_QUERY_SIGNING_SECRET` into your `.env` file (skipping either if already set) and then enables auth:
