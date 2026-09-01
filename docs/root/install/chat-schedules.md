@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Scheduled chats run the chat agent on a recurring schedule with a prompt you write — no Cypher required, since the agent uses its chat tools to query the graph itself. Each run records a chat session whose full transcript (tool calls included) is reviewable from the Scheduled Chats page afterwards.
+Scheduled chats run the chat agent on a recurring schedule with a prompt you write in plain text. Each run records a chat session whose full transcript (tool calls included) is reviewable from the Scheduled Chats page afterwards.
 
 Typical uses: a daily digest of new critical CVEs, a weekly security posture summary, or a recurring check that files findings into a report.
 
@@ -95,4 +95,4 @@ thinking models have enough output room to emit the final structured plan.
 Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`,
 and `failure`. The transcript metadata includes the final budget ledger.
 
-The temporal worker needs the same chat configuration as the web app (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) plus `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE`; see the [chat assistant](chat.html) and [Temporal workflows](temporal-workflows.html) documentation. Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so meaningful runs need a real LLM provider.
+The temporal worker needs the same chat configuration as the web app (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) plus `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE`; see the [chat assistant](chat.html) and [workflow configuration](workflows.html#configuration) documentation. Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so meaningful runs need a real LLM provider.

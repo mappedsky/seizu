@@ -78,6 +78,54 @@ intent, not an error.
   `make lock_proxy_requirements` and `make build_proxy_template`: a template is
   now used as built and a run installs nothing over it.
 
+### Scheduled queries become workflows
+
+**Existing definitions need no migration.** A workflow is the same record under
+a new name: same ids, same version history. A scheduled query is projected into
+a workflow automatically — its Cypher becomes the first stage, with an output
+named `query`, and each of its actions becomes a stage after it. Nothing is
+copied or rewritten, and `/app/scheduled-queries/<id>` redirects to
+`/app/workflows/<id>`.
+
+What a workflow adds is shape: ordered stages, several activities running in
+parallel within one stage, and named outputs that later stages consume. The old
+one-query-then-actions form is the narrowest case of that.
+
+Three things to change on your side:
+
+1. **Seed files.** Rename the top-level `scheduled_queries:` key to
+   `workflows:`. A configuration containing both is rejected — the loader
+   refuses rather than guessing which one wins.
+2. **`SCHEDULED_QUERY_MODULES`.** Renamed to `WORKFLOW_ACTIVITY_MODULES`; the
+   old name is accepted for one release.
+3. **The `seizu-scheduled-queries` service**, if you run one, is gone. The
+   `seizu-temporal-worker` owns both scheduling and execution. See
+   [Standing up Temporal for chat](#standing-up-temporal-for-chat) if you have
+   not deployed it yet.
+
+The `/api/v1/scheduled-queries` REST routes, `seizu scheduled-queries` CLI, and
+`scheduled_queries__*` MCP tools remain aliases for one release. Note that they
+list **only** definitions still expressible in the old single-query-plus-actions
+shape: a workflow with parallel activities or multiple query stages will not
+appear through them, so scripts that enumerate definitions should move to
+`/api/v1/workflows` before you build anything multi-stage.
+
+One case does need manual work: a definition saved under the superseded
+feature-branch `inputs`/`activities` shape cannot be projected and raises on
+read. Recreate or reseed those. Everything installed from a released version is
+unaffected.
+
+See [Workflows](workflows.md) for the stage model.
+
+### Skillsets become plugins
+
+Existing skillsets are projected into one plugin per skillset at startup, with
+their existing `skillset__skill` prompt names preserved, so agents calling them
+keep working. The `/api/v1/skillsets` REST routes, the `skillsets__*` MCP tools,
+the CLI commands and the permission names remain compatibility aliases for one
+release. See [Agent Plugins](agent-plugins.md) for the package format they are
+projected into.
+
 ### Reviewing roles before the plugin permissions land
 
 `plugins:read` / `plugins:write` / `plugins:delete` imply the legacy

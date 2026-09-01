@@ -285,7 +285,7 @@ The sandbox delegation feature lets the chat agent run Python code, execute shel
 * ``SANDBOX_MAX_OUTPUT_BYTES``: Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result returned to the chat agent; larger output is truncated; default: ``50000``
 * ``SANDBOX_LLM_MODEL``: LiteLLM model ID for the inner sandbox subagent. Empty → inherits ``CHAT_LLM_MODEL``; default: ``""``
 
-### Scheduled queries
+### Workflows
 
 * ``WORKFLOW_ACTIVITY_MODULES``: Comma-separated Python import locations for activities hosted by the Temporal worker; defaults to SQS, Slack, and StatsD. Code-defined workflows are top-level activity types registered in ``WORKFLOW_REGISTRY``, not activity modules.
 * ``WORKFLOW_QUERY_MAX_ROWS``: Default maximum rows retained by each query activity; default: ``200``.

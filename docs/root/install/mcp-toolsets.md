@@ -208,8 +208,27 @@ Built-in tools are grouped by area. Permissions for each tool mirror the equival
 | `spaces` | CRUD for spaces and their sub-spaces, the space overview pointer, and filing reports into a space. No version history — spaces are flat records. See [Spaces](spaces.html#mcp-tools). |
 | `toolsets` | Full CRUD for toolsets and nested tools, plus version history. Create/update tool calls reuse Cypher validation. |
 | `roles` | List built-in and user-defined roles; CRUD for user-defined roles; role version history. |
+| `plugins` | Install, publish, enable and delete [Agent Plugins](agent-plugins.html) and toggle individual skills, plus revision history. |
+| `workflows` | CRUD and version history for [workflows](workflows.html), plus running one on demand. |
+| `skillsets` | Legacy aliases for the plugin tools, kept for one release. See [upgrading](upgrading.html). |
+
+The `sandbox` group is **not** exposed here: those tools are available only to
+the built-in chat assistant, which is the only caller that has a sandbox
+session to act on. See [Sandbox](sandbox.html).
 
 Which groups are exposed is controlled by the `MCP_ENABLED_BUILTINS` setting (see [backend configuration](backend.html#mcp-server)). All groups are enabled by default; set it to ``none`` to disable all built-ins, or to a comma-separated list (e.g. ``graph,reports``) to enable only specific groups.
+
+## Tools from other MCP servers
+
+With [external MCP](external-mcp.html) enabled, Seizu can reach tools on other
+MCP servers through a configured proxy. They are discovered per user, namespaced
+`ext__<proxy>__<tool>`, and appear on the Toolsets page as read-only synthetic
+toolsets so you can see what each proxy offers for your identity.
+
+**They are available to the chat assistant, not re-exported from Seizu's own MCP
+endpoint.** An agent connected to `/api/v1/mcp` sees built-in and user-defined
+tools only. Seizu is not a gateway to your other MCP servers: a client that
+wants those should connect to them directly, with its own identity.
 
 ## MCP Server
 

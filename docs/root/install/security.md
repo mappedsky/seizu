@@ -126,7 +126,7 @@ Use built-in roles conservatively:
 |------|-----|
 | `seizu-viewer` | Read reports and dashboard. No ad-hoc query console or query history access. |
 | `seizu-editor` | Viewer plus report authoring, chat tool/skill use (`chat:tools:call`, `chat:skills:call`), chat confirmation bypass (`chat:bypass_permissions`), and scheduled chats (`chat:schedule`). |
-| `seizu-admin` | Editor plus toolsets, tools, skillsets, skills, scheduled queries, roles, and administrative objects. |
+| `seizu-admin` | Editor plus toolsets, tools, plugins, workflows, roles, and administrative objects. |
 
 Recommended settings:
 
@@ -137,7 +137,7 @@ RBAC_DEFAULT_ROLE=
 
 Setting `RBAC_DEFAULT_ROLE=` denies access when the token does not contain an explicit Seizu role. This is safer than silently assigning a default role to every authenticated user.
 
-Use user-defined roles for narrower access. For example, separate report authors from users who can manage scheduled queries or toolsets.
+Use user-defined roles for narrower access. For example, separate report authors from users who can manage workflows or toolsets.
 If a user truly needs ad-hoc Cypher, grant `query:execute` only to a tightly scoped role and keep that role out of general viewer assignments.
 
 ### Headless role snapshots
@@ -150,7 +150,7 @@ authenticates again. A downgraded user may retain
 `chat:bypass_permissions` for headless runs during that interval.
 
 For immediate revocation, archive the Seizu user or disable their schedules
-and scheduled queries. Treat bypass audit logs as a detection control, not as
+and workflows. Treat bypass audit logs as a detection control, not as
 revocation enforcement.
 
 ## Report Query Signing Secret
@@ -196,7 +196,7 @@ With the current split between execution paths:
 - Report tokens are short-lived capabilities. Treat them as authorization artifacts, not as values to expose or store outside the request flow.
 - Report API responses do not include `query_capabilities` unless the caller explicitly opts in with `include_query_capabilities=true`.
 
-When writing reports, scheduled queries, and tools:
+When writing reports, workflows, and tools:
 
 - Prefer parameters for user-controlled values.
 - Do not concatenate untrusted values into Cypher.
@@ -236,22 +236,27 @@ Toolsets should be treated like code:
 - Disable or delete tools that are no longer used.
 - Use version history to audit changes.
 
-## Scheduled Queries
+## Workflows
 
-Scheduled queries run without an interactive user at execution time. Keep them narrowly scoped.
+Workflows run without an interactive user at execution time, so nobody is there
+to approve anything they do. Keep them narrowly scoped.
 
 Recommendations:
 
-- Require `scheduled_queries:write` only for trusted administrators.
-- Review destination action configs, especially Slack channels and SQS queue names.
-- Avoid placing secrets in scheduled query config.
+- Require `workflows:write` only for trusted administrators. `scheduled_queries:write`
+  remains an alias for one release; grant neither more widely than the other.
+- Review destination activity configs, especially Slack channels and SQS queue names.
+- Avoid placing secrets in activity configuration.
 - Keep result sizes bounded.
-- Disable scheduled queries that are no longer required.
-- Run workers with only the cloud permissions they need for their configured actions.
+- Disable workflows that are no longer required.
+- Run the Temporal worker with only the cloud permissions its configured activities need.
+- Treat workflows that run an AI session (`agent_chat`) as the widest case: they
+  execute as their creator with that user's permissions and no interactive
+  confirmation. See [headless runs](chat.html#tool-access-and-action-confirmations).
 
 ## Report Store And Secrets
 
-Reports, scheduled queries, roles, toolsets, tools, skillsets, and skills are stored in the report store. Protect that store as configuration state, not as disposable cache.
+Reports, workflows, roles, toolsets, tools, and plugins are stored in the report store. Protect that store as configuration state, not as disposable cache.
 
 Recommendations:
 

@@ -2,7 +2,7 @@
 
 Decisions behind the Temporal pipelines, the cartography sync worker, and CVE
 dependency remediation. For configuration, see
-[temporal workflows](../../install/temporal-workflows.md) and
+[built-in workflows](../../install/built-in-workflows.md) and
 [cartography sync](../../install/cartography-sync.md).
 
 Primary code: `reporting/temporal_workflows/`, `cartography_sync/`,
