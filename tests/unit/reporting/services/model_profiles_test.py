@@ -15,8 +15,10 @@ def _profile(**updates) -> ModelProfileItem:
         "primary": {"model_id": "openai/gpt-5"},
         "economy": {"model_id": "openai/gpt-5-mini", "reasoning_effort": "low"},
         "stage_overrides": {
+            "router": {"model_id": "openai/gpt-5-router", "reasoning_effort": "none"},
             "worker": {"model_id": "openai/gpt-5-worker"},
             "worker_summary": {"reasoning_effort": "minimal"},
+            "verifier": {"model_id": "openai/gpt-5-verifier"},
         },
         "default_reasoning_effort": "medium",
         "run_cost_budget_usd": 1.5,
@@ -32,6 +34,11 @@ def _profile(**updates) -> ModelProfileItem:
 def test_profile_default_reasoning_must_be_user_selectable():
     with pytest.raises(ValueError, match="default user reasoning must be user-selectable"):
         _profile(user_reasoning_efforts=("low", "high"))
+
+
+def test_profile_rejects_an_assistant_override_because_primary_is_the_assistant_model():
+    with pytest.raises(ValueError, match="unknown profile stages: assistant"):
+        _profile(stage_overrides={"assistant": {"model_id": "openai/other"}})
 
 
 def test_a_resolved_profile_requires_every_runtime_stage():
@@ -70,7 +77,11 @@ async def test_resolve_expands_profile_and_preserves_structural_roles(mocker):
     assert result.spec_for("worker_summary").reasoning_effort == "minimal"
     assert result.spec_for("worker_summary", economy=True).reasoning_effort == "low"
     assert result.spec_for("worker", economy=True).model_id == "openai/gpt-5-mini"
-    assert result.spec_for("router").model_id == "environment/router"
+    assert result.spec_for("router").model_id == "openai/gpt-5-router"
+    assert result.spec_for("router").reasoning_effort == "none"
+    assert result.spec_for("verifier").model_id == "openai/gpt-5-verifier"
+    assert result.spec_for("planner").model_id == "openai/gpt-5"
+    assert result.spec_for("assistant").model_id == "openai/gpt-5"
     assert result.spec_for("worker").profile_name == "Accurate"
     with model_profiles.use(result):
         assert model_profiles.current_spec("assistant") == model_profiles.current_spec("default")

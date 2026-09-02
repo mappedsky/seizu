@@ -4,16 +4,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 SelectableReasoningEffort = Literal["default", "none", "minimal", "low", "medium", "high", "xhigh"]
 ConfiguredReasoningEffort = SelectableReasoningEffort
-PROFILE_STAGES = frozenset(
-    {
-        "assistant",
-        "planner",
-        "worker",
-        "worker_summary",
-        "sandbox_subagent",
-        "synthesizer",
-    }
+RESOLVED_MODEL_STAGES = (
+    "assistant",
+    "planner",
+    "worker",
+    "worker_summary",
+    "sandbox_subagent",
+    "synthesizer",
+    "router",
+    "verifier",
 )
+PROFILE_STAGES = frozenset(stage for stage in RESOLVED_MODEL_STAGES if stage != "assistant")
 
 
 class ModelChoice(BaseModel):
@@ -157,16 +158,6 @@ class SelectableModelProfilesResponse(BaseModel):
     default_profile_id: str | None = None
 
 
-RESOLVED_MODEL_STAGES = (
-    "assistant",
-    "planner",
-    "worker",
-    "worker_summary",
-    "sandbox_subagent",
-    "synthesizer",
-    "router",
-    "verifier",
-)
 _RESOLVED_ROLE_TO_STAGE = {
     "default": "assistant",
     "assistant": "assistant",

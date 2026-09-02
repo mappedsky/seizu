@@ -289,7 +289,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await oauth_client.verify_issuer_consistency()
     await report_store.initialize()
     if settings.CHAT_ENABLED:
-        validate_chat_llm_config()
+        await validate_chat_llm_config()
         telemetry.configure()
         await initialize_chat_checkpoints()
     try:

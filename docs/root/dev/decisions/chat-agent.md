@@ -2707,14 +2707,14 @@ explicit choice never silently falls through to another profile: schedules and
 workflows require a replacement, while a locked interactive conversation must
 be restarted under a new profile.
 
-A profile controls the primary models for assistant, planner, worker,
-worker-summary, sandbox-subagent, and synthesizer phases. Each stage may
-override the base primary model and may either inherit the user's selected
-reasoning level or fix an admin-configured value. One economy model and
-reasoning value applies wherever budget degradation needs the fallback; it is
-not duplicated per stage. Router and verifier continue to resolve from
-deployment settings. The run cost ceiling is the lower positive value of the
-profile cap and `CHAT_RUN_COST_BUDGET_USD`.
+A profile has one primary base model. Direct assistant calls use that base, and
+every runtime stage inherits it unless explicitly overridden. Router, planner,
+worker, worker-summary, sandbox-subagent, verifier, and synthesizer may each
+override the model and may either inherit the user's selected reasoning level
+or fix an admin-configured value. There is no separate assistant override.
+One economy model and reasoning value applies wherever budget degradation needs
+the fallback; it is not duplicated per stage. The run cost ceiling is the lower
+positive value of the profile cap and `CHAT_RUN_COST_BUDGET_USD`.
 
 Admins choose the user-visible subset from LiteLLM's fixed `default`, `none`,
 `minimal`, `low`, `medium`, `high`, and `xhigh` vocabulary. `default` is
@@ -2735,6 +2735,10 @@ not silently move them to a more expensive model.
 No profiles are seeded. Until an admin creates the first enabled profile, chat
 uses the environment configuration unchanged; the first enabled profile becomes
 the default. Once profiles exist, exactly one enabled profile is the default.
+`CHAT_LLM_MODEL` remains the concise environment base and fallback, but startup
+accepts an enabled default profile in its place. Both the web process and the
+Temporal worker validate this after initializing the report store, so a
+profile-only deployment does not need a placeholder environment model.
 
 **Why no built-ins:** unmeasured provider/model combinations would present an
 operational guess as a safe cost preset. The environment fallback preserves an

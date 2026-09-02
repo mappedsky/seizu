@@ -655,7 +655,11 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     history_summary = HistorySummary.from_state(state.get("history_summary"))
     messages, history_summary = _llm_context_with_summary(state["messages"], model, history_summary)
     writer = get_stream_writer()
-    base_system_prompt = build_system_prompt(provider, current_user)
+    base_system_prompt = build_system_prompt(
+        provider,
+        current_user,
+        model_id=_prompt_model_id("default"),
+    )
     if _headless_from_config(config):
         base_system_prompt = f"{base_system_prompt}\n\n{_HEADLESS_PROMPT_ADDENDUM}"
     # What earlier turns already established. The model that decides whether to
@@ -1445,7 +1449,11 @@ async def _resume_confirmed_tool_turn(
         else "The user approved the pending Seizu action. Summarize the completed tool result concisely."
     )
     system_prompt = _combined_system_prompt(
-        build_system_prompt(provider, current_user),
+        build_system_prompt(
+            provider,
+            current_user,
+            model_id=_prompt_model_id("default"),
+        ),
         f"{summary_note} Do not call additional tools in this resume turn.",
     )
     context = [
@@ -2668,7 +2676,12 @@ async def _run_tool_call(
     )
 
 
-def build_system_prompt(provider: str | None = None, current_user: CurrentUser | None = None) -> str:
+def build_system_prompt(
+    provider: str | None = None,
+    current_user: CurrentUser | None = None,
+    *,
+    model_id: str | None = None,
+) -> str:
     if settings.CHAT_LLM_SYSTEM_PROMPT:
         return settings.CHAT_LLM_SYSTEM_PROMPT
 
@@ -2681,7 +2694,7 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
     # narrative to inject prior-instruction-overriding text into the system
     # prompt. json.dumps escapes embedded quotes, newlines, and control chars.
     user_context = f"\nCurrent Seizu user display name: {json.dumps(display_name)}." if display_name else ""
-    provider_note = _provider_prompt_note(provider_name)
+    provider_note = _provider_prompt_note(provider_name, model_id=model_id)
     answer_budget = _answer_budget()
     _sandbox_available = settings.SANDBOX_ENABLED and (
         current_user is None or Permission.SANDBOX_DELEGATE.value in current_user.permissions
@@ -2752,11 +2765,15 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
     )
 
 
-def _provider_prompt_note(provider: str) -> str:
-    # provider may be the generic "litellm" sentinel now, so fold the configured
-    # model string into the match (e.g. "anthropic/claude-...") and key the
-    # family-specific note off whichever signal is present.
-    hint = f"{provider} {settings.CHAT_LLM_MODEL}".lower()
+def _prompt_model_id(role: str) -> str:
+    captured = model_profiles.current_spec(role)
+    return captured.model_id if captured is not None else chat_models.model_id_for_role(role)
+
+
+def _provider_prompt_note(provider: str, *, model_id: str | None = None) -> str:
+    # A resolved stage model is authoritative. Without one, provider may be the
+    # generic "litellm" sentinel, so include the configured base model too.
+    hint = (model_id if model_id is not None else f"{provider} {settings.CHAT_LLM_MODEL}").lower()
     if "anthropic" in hint or "claude" in hint:
         return "\nFor Claude, keep the final answer direct and avoid prefilling or hidden chain-of-thought."
     if "gemini" in hint or "vertex" in hint:
@@ -4328,22 +4345,43 @@ def _legacy_provider_api_key(provider: str) -> str:
     }.get(provider, "")
 
 
-def validate_chat_llm_config() -> None:
+async def validate_chat_llm_config() -> None:
     """Fail-fast validation called at startup when chat is enabled.
 
-    Raises ``ValueError`` if a real provider is selected without CHAT_LLM_MODEL,
-    catching a missing model that previously surfaced only on the first request.
+    A real provider needs either the environment base model or an enabled
+    default profile. Profile models are complete snapshots; environment stage
+    overrides continue to inherit ``CHAT_LLM_MODEL`` when no profile is active.
     """
     provider = _chat_provider()
     if provider == _MOCK_PROVIDER:
         return
-    _litellm_model_id(provider)
+    base_model = settings.CHAT_LLM_MODEL.strip()
+    if base_model:
+        _litellm_model_id(provider, base_model)
+    else:
+        profiles = await report_store.list_model_profiles(enabled_only=True)
+        if not profiles:
+            raise ValueError(
+                "CHAT_LLM_MODEL is required when CHAT_LLM_PROVIDER is not 'mock' and no enabled model "
+                "profile is configured. Set an environment base model or create and enable a default profile."
+            )
+        if not any(profile.is_default for profile in profiles):
+            raise ValueError("An enabled default model profile is required when CHAT_LLM_MODEL is empty.")
+        for profile in profiles:
+            _litellm_model_id(provider, profile.primary.model_id)
+            _litellm_model_id(provider, profile.economy.model_id)
+            for override in profile.stage_overrides.values():
+                if override.model_id:
+                    _litellm_model_id(provider, override.model_id)
     for configured_model in (
+        settings.CHAT_LLM_ROUTER_MODEL,
         settings.CHAT_LLM_PLANNER_MODEL,
         settings.CHAT_LLM_WORKER_MODEL,
+        settings.CHAT_LLM_WORKER_SUMMARY_MODEL,
         settings.CHAT_LLM_VERIFIER_MODEL,
         settings.CHAT_LLM_SYNTHESIZER_MODEL,
         settings.CHAT_LLM_ECONOMY_MODEL,
+        settings.SANDBOX_LLM_MODEL,
     ):
         if configured_model.strip():
             _litellm_model_id(provider, configured_model)

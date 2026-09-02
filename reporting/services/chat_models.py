@@ -372,6 +372,8 @@ def model_id_for_role(role: str, *, economy: bool = False) -> str:
         # binary classifier there too (AGT-043).
         "router": settings.CHAT_LLM_ROUTER_MODEL or settings.CHAT_LLM_PLANNER_MODEL,
         "worker": settings.CHAT_LLM_WORKER_MODEL,
+        "worker_summary": settings.CHAT_LLM_WORKER_SUMMARY_MODEL,
+        "worker_summary_retry": settings.CHAT_LLM_WORKER_SUMMARY_MODEL,
         "sandbox_subagent": settings.SANDBOX_LLM_MODEL,
         "verifier": settings.CHAT_LLM_VERIFIER_MODEL,
         "synthesizer": settings.CHAT_LLM_SYNTHESIZER_MODEL,

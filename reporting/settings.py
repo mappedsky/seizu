@@ -1048,6 +1048,7 @@ CHAT_LLM_PLANNER_MODEL = str_env("CHAT_LLM_PLANNER_MODEL", "")
 # Empty inherits CHAT_LLM_PLANNER_MODEL, which is where it used to live.
 CHAT_LLM_ROUTER_MODEL = str_env("CHAT_LLM_ROUTER_MODEL", "")
 CHAT_LLM_WORKER_MODEL = str_env("CHAT_LLM_WORKER_MODEL", "")
+CHAT_LLM_WORKER_SUMMARY_MODEL = str_env("CHAT_LLM_WORKER_SUMMARY_MODEL", "")
 CHAT_LLM_VERIFIER_MODEL = str_env("CHAT_LLM_VERIFIER_MODEL", "")
 CHAT_LLM_SYNTHESIZER_MODEL = str_env("CHAT_LLM_SYNTHESIZER_MODEL", "")
 CHAT_LLM_ECONOMY_MODEL = str_env("CHAT_LLM_ECONOMY_MODEL", "")
@@ -1314,7 +1315,8 @@ SANDBOX_STUCK_REPEAT_LIMIT = int_env("SANDBOX_STUCK_REPEAT_LIMIT", 3)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 
-# LiteLLM model id for the sandbox subagent.  Empty → inherits CHAT_LLM_MODEL.
+# LiteLLM model id for the sandbox subagent. Empty inherits the worker model,
+# then CHAT_LLM_MODEL.
 # Example: "anthropic/claude-haiku-4-5-20251001" for a cheaper inner agent.
 SANDBOX_LLM_MODEL = str_env("SANDBOX_LLM_MODEL", "")
 

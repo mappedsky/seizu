@@ -112,6 +112,15 @@ def test_litellm_model_id_passes_through_qualified_and_sentinel(mocker):
     assert chat_graph._litellm_model_id("litellm") == "gpt-4o"
 
 
+def test_provider_prompt_note_uses_the_resolved_stage_model(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "deepseek/deepseek-reasoner")
+
+    note = chat_graph._provider_prompt_note("deepseek", model_id="anthropic/claude-sonnet-4-6")
+
+    assert "For Claude" in note
+    assert "For DeepSeek" not in note
+
+
 def test_strip_reasoning_context_flattens_mixed_list_content_to_text():
     # Mirrors LiteLLM's streamed+merged shape: thinking dicts concatenated with a
     # bare answer-text string in one list. This is the shape that crashed
@@ -3198,14 +3207,78 @@ def test_trim_messages_keeps_window_starting_at_user_turn(mocker):
     assert [r.id for r in removals] == ["h1", "a1"]
 
 
-def test_validate_chat_llm_config_accepts_mock_and_rejects_missing_model(mocker):
+async def test_validate_chat_llm_config_accepts_mock_and_rejects_missing_model_without_profiles(mocker):
     mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "mock")
-    chat_graph.validate_chat_llm_config()
+    await chat_graph.validate_chat_llm_config()
 
     mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "litellm")
     mocker.patch("reporting.settings.CHAT_LLM_MODEL", "")
+    mocker.patch(
+        "reporting.services.chat_graph.report_store.list_model_profiles",
+        new=mocker.AsyncMock(return_value=[]),
+    )
     with pytest.raises(ValueError, match="CHAT_LLM_MODEL is required"):
-        chat_graph.validate_chat_llm_config()
+        await chat_graph.validate_chat_llm_config()
+
+
+async def test_validate_chat_llm_config_accepts_an_enabled_default_profile(mocker):
+    from reporting.schema.model_profiles import ModelProfileItem
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "litellm")
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "")
+    profile = ModelProfileItem.model_validate(
+        {
+            "profile_id": "profile-1",
+            "name": "Profile only",
+            "enabled": True,
+            "is_default": True,
+            "primary": {"model_id": "anthropic/claude-opus-4-6"},
+            "economy": {"model_id": "deepseek/deepseek-v4-flash"},
+            "stage_overrides": {"router": {"model_id": "deepseek/deepseek-v4-flash"}},
+            "default_reasoning_effort": "medium",
+            "run_cost_budget_usd": 1.0,
+            "current_version": 1,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "created_by": "admin",
+        }
+    )
+    mocker.patch(
+        "reporting.services.chat_graph.report_store.list_model_profiles",
+        new=mocker.AsyncMock(return_value=[profile]),
+    )
+
+    await chat_graph.validate_chat_llm_config()
+
+
+async def test_validate_chat_llm_config_rejects_profiles_without_a_default(mocker):
+    from reporting.schema.model_profiles import ModelProfileItem
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "litellm")
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "")
+    profile = ModelProfileItem.model_validate(
+        {
+            "profile_id": "profile-1",
+            "name": "Not default",
+            "enabled": True,
+            "is_default": False,
+            "primary": {"model_id": "anthropic/claude-opus-4-6"},
+            "economy": {"model_id": "deepseek/deepseek-v4-flash"},
+            "default_reasoning_effort": "medium",
+            "run_cost_budget_usd": 1.0,
+            "current_version": 1,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "created_by": "admin",
+        }
+    )
+    mocker.patch(
+        "reporting.services.chat_graph.report_store.list_model_profiles",
+        new=mocker.AsyncMock(return_value=[profile]),
+    )
+
+    with pytest.raises(ValueError, match="enabled default model profile"):
+        await chat_graph.validate_chat_llm_config()
 
 
 def test_get_chat_model_builds_litellm_streaming_client(mocker):

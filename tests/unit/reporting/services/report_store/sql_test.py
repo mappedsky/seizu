@@ -3594,6 +3594,27 @@ async def test_model_profiles_treat_legacy_stage_reasoning_as_fixed(store):
     assert loaded.stage_overrides["worker_summary"].reasoning_effort == "minimal"
 
 
+async def test_model_profiles_ignore_a_stored_legacy_assistant_override(store):
+    created = await store.create_model_profile(_model_profile_data(), "admin")
+    async with AsyncSession(sql_module._get_engine()) as session:
+        current = await session.get(sql_module.ModelProfileRecord, created.profile_id)
+        assert current is not None
+        legacy_config = dict(current.config)
+        legacy_config["stage_overrides"] = {
+            "assistant": {"model_id": "openai/legacy-assistant"},
+            "worker": {"model_id": "openai/worker"},
+        }
+        current.config = legacy_config
+        session.add(current)
+        await session.commit()
+
+    loaded = await store.get_model_profile(created.profile_id)
+
+    assert loaded is not None
+    assert "assistant" not in loaded.stage_overrides
+    assert loaded.stage_overrides["worker"].model_id == "openai/worker"
+
+
 async def test_model_profile_default_cannot_be_disabled_without_replacement(store):
     profile = await store.create_model_profile(_model_profile_data(), "admin")
 

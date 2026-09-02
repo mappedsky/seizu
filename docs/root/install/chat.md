@@ -16,10 +16,11 @@ deployment needs four things:
 1. **`CHAT_ENABLED=true`**, plus PostgreSQL checkpoint storage for history —
    the `CHAT_CHECKPOINT_DATABASE_*` variables in
    [backend configuration](backend.html).
-2. **A model and its API key**: `CHAT_LLM_MODEL` and the provider's key. This is
-   needed whether or not you use model profiles — Seizu refuses to start
-   without a model when a real provider is selected, and the router and verifier
-   stages always use the environment-configured model.
+2. **A real provider, model, and API key**: set `CHAT_LLM_PROVIDER=litellm`,
+   then either set `CHAT_LLM_MODEL` as the environment base model or configure
+   an enabled default model profile. Supply the provider keys needed by every
+   model in that configuration. Seizu refuses to start when neither source
+   supplies a model.
 3. **Permissions** for the people who should have chat, and for what the agent
    may do on their behalf — see [Permissions](#permissions).
 4. **A model profile**, if you want more than one model. Skip this and every
@@ -37,7 +38,7 @@ by default and both noticeably change what the agent can do:
 
 Chat is off by default. Set `CHAT_ENABLED=true` to register the chat API routes, initialize checkpoint storage, and show the Chat UI (the frontend discovers it via `GET /api/v1/config` → `features.chat`).
 
-The default provider is `mock`, which just echoes input — deterministic and keyless, useful for development but unable to call tools. For real use, pick a model through **LiteLLM**: set `CHAT_LLM_MODEL` to a provider-namespaced model id and supply the provider's API key. The supported provider/model surface is whatever LiteLLM supports rather than a fixed allowlist.
+The default provider is `mock`, which just echoes input — deterministic and keyless, useful for development but unable to call tools. For real use, set `CHAT_LLM_PROVIDER=litellm`, then set `CHAT_LLM_MODEL` to a provider-namespaced model id or configure an enabled default model profile, and supply the required provider keys. The supported provider/model surface is whatever LiteLLM supports rather than a fixed allowlist.
 
 ```shell
 CHAT_ENABLED=true
@@ -46,7 +47,7 @@ CHAT_LLM_MODEL=anthropic/claude-sonnet-4-6
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-API keys resolve in order: `CHAT_LLM_API_KEY`, then the standard provider env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`), then LiteLLM's own per-provider environment lookup. Seizu fails fast at startup if a real provider is selected without a model.
+API keys resolve in order: `CHAT_LLM_API_KEY`, then the standard provider env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`), then LiteLLM's own per-provider environment lookup. Seizu fails fast at startup if a real provider is selected without either `CHAT_LLM_MODEL` or an enabled default profile.
 
 `CHAT_LLM_BASE_URL` points chat at a self-hosted LiteLLM proxy or another OpenAI-compatible gateway. Legacy `CHAT_LLM_PROVIDER` values (`openai`, `anthropic`, `gemini`, `deepseek`) still work and namespace a bare `CHAT_LLM_MODEL`.
 
@@ -94,8 +95,9 @@ a running turn.
 The first enabled profile becomes the default. When profiles exist, exactly one
 enabled profile must be the default. Seizu does not install built-in profiles:
 until an admin creates one, chat continues to use the `CHAT_LLM_*` environment
-settings. Router and verifier always use their environment-configured models;
-profiles cover the answer-producing stages.
+settings. A profile has one primary base model. Direct assistant calls use that
+base, and every other runtime stage inherits it unless that stage has an
+override. There is no separate assistant setting in a profile.
 
 A profile's cost cap is bounded by `CHAT_RUN_COST_BUDGET_USD`: when both are
 positive, the lower value applies. Set the global value to the deployment-wide
@@ -449,7 +451,7 @@ drop out — the live listing is the authority. Set
 |----------|---------|-------------|
 | `CHAT_ENABLED` | `false` | Master switch: gates the chat routes, checkpoint storage, and the Chat UI. |
 | `CHAT_LLM_PROVIDER` | `mock` | `mock` echoes input (no tools); any other value routes through LiteLLM. Legacy values (`openai`, `anthropic`, `gemini`, `deepseek`) namespace a bare model name. |
-| `CHAT_LLM_MODEL` | `""` | LiteLLM model id, preferably provider-namespaced (e.g. `anthropic/claude-sonnet-4-6`). Required for any real provider. |
+| `CHAT_LLM_MODEL` | `""` | Environment base model and fallback, preferably provider-namespaced (e.g. `anthropic/claude-sonnet-4-6`). Required for a real provider only when no enabled default model profile exists. |
 | `CHAT_LLM_API_KEY` | `""` | Optional API key override passed to LiteLLM; falls back to the standard provider env vars. |
 | `CHAT_LLM_BASE_URL` | `""` | Optional OpenAI-compatible base URL (LiteLLM `api_base`) for a self-hosted proxy or gateway. |
 | `CHAT_LLM_TEMPERATURE` | `0.2` | Sampling temperature. |
@@ -526,7 +528,9 @@ drop out — the live listing is the authority. Set
 | `CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN` | `12.0` | Floor on a step's token ceiling, as a multiple of the planner's per-step estimate. The ceiling is normally a share of what the run has left. |
 | `CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE` | `1.0` | How far past its fair share a step may go before being stopped rather than only degraded and asked to converge. `1.0` makes the share a hard cut. |
 | `CHAT_LLM_PLANNER_MODEL` | `""` | Optional planner model override; empty inherits `CHAT_LLM_MODEL`. |
+| `CHAT_LLM_ROUTER_MODEL` | `""` | Optional router model override; empty inherits `CHAT_LLM_PLANNER_MODEL`, then `CHAT_LLM_MODEL`. |
 | `CHAT_LLM_WORKER_MODEL` | `""` | Optional worker model override. |
+| `CHAT_LLM_WORKER_SUMMARY_MODEL` | `""` | Optional worker-summary model override; empty inherits `CHAT_LLM_WORKER_MODEL`, then `CHAT_LLM_MODEL`. |
 | `CHAT_LLM_VERIFIER_MODEL` | `""` | Optional verifier model override. |
 | `CHAT_LLM_SYNTHESIZER_MODEL` | `""` | Optional synthesizer model override. |
 | `CHAT_LLM_ECONOMY_MODEL` | `""` | Model used for eligible read-only work after the soft budget limit. |

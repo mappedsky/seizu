@@ -23,7 +23,6 @@ class ModelProfileUnavailable(LookupError):
 
 _current_profile: ContextVar[ResolvedModelProfile | None] = ContextVar("chat_model_profile", default=None)
 
-_PROFILE_STAGES = frozenset({"assistant", "planner", "worker", "worker_summary", "sandbox_subagent", "synthesizer"})
 _RUNTIME_ROLE = {"assistant": "default"}
 
 
@@ -70,21 +69,17 @@ def _profile_snapshot(
     stages: dict[str, ResolvedStageModels] = {}
     for stage in RESOLVED_MODEL_STAGES:
         role = _RUNTIME_ROLE.get(stage, stage)
-        if stage in _PROFILE_STAGES:
-            primary_model_id, primary_reasoning = _primary_choice_for(profile, stage, reasoning_effort)
-            normal = chat_models.resolve_environment(
-                role,
-                model_id=primary_model_id,
-                reasoning_effort=primary_reasoning,
-            )
-            cheap = chat_models.resolve_environment(
-                role,
-                model_id=profile.economy.model_id,
-                reasoning_effort=profile.economy.reasoning_effort,
-            )
-        else:
-            normal = chat_models.resolve_environment(role)
-            cheap = chat_models.resolve_environment(role, economy=True)
+        primary_model_id, primary_reasoning = _primary_choice_for(profile, stage, reasoning_effort)
+        normal = chat_models.resolve_environment(
+            role,
+            model_id=primary_model_id,
+            reasoning_effort=primary_reasoning,
+        )
+        cheap = chat_models.resolve_environment(
+            role,
+            model_id=profile.economy.model_id,
+            reasoning_effort=profile.economy.reasoning_effort,
+        )
         stages[stage] = ResolvedStageModels(
             primary=replace(normal, **provenance).to_payload(),
             economy=replace(cheap, **provenance).to_payload(),
