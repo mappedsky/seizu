@@ -40,6 +40,32 @@ async def test_lifespan_initializes_and_closes_chat_checkpoints(mocker):
     close.assert_awaited_once_with()
 
 
+async def test_lifespan_accepts_environment_model_without_profiles(mocker):
+    mocker.patch("reporting.settings.CHAT_ENABLED", True)
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "litellm")
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "anthropic/claude-sonnet-4-6")
+    mocker.patch("reporting.app.settings.validate_persistence_settings")
+    mocker.patch(
+        "reporting.app.oauth_client.verify_issuer_consistency",
+        new=mocker.AsyncMock(),
+    )
+    mocker.patch("reporting.app.report_store.initialize", new=mocker.AsyncMock())
+    list_profiles = mocker.patch(
+        "reporting.services.chat_graph.report_store.list_model_profiles",
+        new=mocker.AsyncMock(return_value=[]),
+    )
+    initialize = mocker.patch("reporting.app.initialize_chat_checkpoints", new=mocker.AsyncMock())
+    close = mocker.patch("reporting.app.close_chat_checkpoints", new=mocker.AsyncMock())
+    mocker.patch("reporting.app.telemetry.configure")
+    app = SimpleNamespace(state=SimpleNamespace(mcp_session_manager=None))
+
+    async with lifespan(app):
+        initialize.assert_awaited_once_with()
+
+    list_profiles.assert_not_awaited()
+    close.assert_awaited_once_with()
+
+
 async def test_timeout_middleware_returns_504_for_slow_http_request():
     sent_messages: list[dict[str, Any]] = []
 
