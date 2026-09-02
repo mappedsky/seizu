@@ -290,19 +290,29 @@ def test_anthropic_thinking_forces_temperature_to_one():
 # --- stages ---------------------------------------------------------------------
 
 
-def test_a_summary_stage_runs_on_its_roles_model_with_its_own_effort(mocker):
+def test_a_summary_stage_can_override_its_roles_model_and_effort(mocker):
     """The worker's ReAct loop decides what to do next; its summary pass writes
     down what it already did. Same model, different job."""
     mocker.patch.object(settings, "CHAT_LLM_WORKER_MODEL", "worker/model")
+    mocker.patch.object(settings, "CHAT_LLM_WORKER_SUMMARY_MODEL", "summary/model")
     mocker.patch.object(settings, "CHAT_LLM_WORKER_REASONING_EFFORT", "high")
     mocker.patch.object(settings, "CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT", "minimal")
     _capability(mocker, max_output_tokens=32_768)
 
     summary = chat_models.resolve("worker_summary")
 
-    assert summary.model_id == "worker/model"
+    assert summary.model_id == "summary/model"
     assert summary.reasoning_effort == "minimal"
     assert chat_models.resolve("worker").reasoning_effort == "high"
+
+
+def test_a_summary_stage_inherits_its_roles_model_when_unset(mocker):
+    mocker.patch.object(settings, "CHAT_LLM_WORKER_MODEL", "worker/model")
+    mocker.patch.object(settings, "CHAT_LLM_WORKER_SUMMARY_MODEL", "")
+    _capability(mocker, max_output_tokens=32_768)
+
+    assert chat_models.resolve("worker_summary").model_id == "worker/model"
+    assert chat_models.resolve("worker_summary_retry").model_id == "worker/model"
 
 
 def test_a_stage_inherits_its_roles_effort_when_unset(mocker):

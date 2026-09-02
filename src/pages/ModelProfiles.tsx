@@ -38,11 +38,12 @@ import {
 import { pageContentSx } from 'src/theme/layout';
 
 const stages = [
-  'assistant',
+  'router',
   'planner',
   'worker',
   'worker_summary',
   'sandbox_subagent',
+  'verifier',
   'synthesizer',
 ] as const;
 const efforts = [

@@ -94,8 +94,8 @@ a running turn.
 The first enabled profile becomes the default. When profiles exist, exactly one
 enabled profile must be the default. Seizu does not install built-in profiles:
 until an admin creates one, chat continues to use the `CHAT_LLM_*` environment
-settings. Router and verifier always use their environment-configured models;
-profiles cover the answer-producing stages.
+settings. The profile's base primary model is the assistant model and the
+fallback for every other runtime stage; each of those stages can override it.
 
 A profile's cost cap is bounded by `CHAT_RUN_COST_BUDGET_USD`: when both are
 positive, the lower value applies. Set the global value to the deployment-wide
@@ -526,7 +526,9 @@ drop out — the live listing is the authority. Set
 | `CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN` | `12.0` | Floor on a step's token ceiling, as a multiple of the planner's per-step estimate. The ceiling is normally a share of what the run has left. |
 | `CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE` | `1.0` | How far past its fair share a step may go before being stopped rather than only degraded and asked to converge. `1.0` makes the share a hard cut. |
 | `CHAT_LLM_PLANNER_MODEL` | `""` | Optional planner model override; empty inherits `CHAT_LLM_MODEL`. |
+| `CHAT_LLM_ROUTER_MODEL` | `""` | Optional router model override; empty inherits `CHAT_LLM_PLANNER_MODEL`, then `CHAT_LLM_MODEL`. |
 | `CHAT_LLM_WORKER_MODEL` | `""` | Optional worker model override. |
+| `CHAT_LLM_WORKER_SUMMARY_MODEL` | `""` | Optional worker-summary model override; empty inherits `CHAT_LLM_WORKER_MODEL`, then `CHAT_LLM_MODEL`. |
 | `CHAT_LLM_VERIFIER_MODEL` | `""` | Optional verifier model override. |
 | `CHAT_LLM_SYNTHESIZER_MODEL` | `""` | Optional synthesizer model override. |
 | `CHAT_LLM_ECONOMY_MODEL` | `""` | Model used for eligible read-only work after the soft budget limit. |

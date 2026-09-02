@@ -71,6 +71,16 @@ describe('ModelProfiles', () => {
     render(<ModelProfiles />);
     fireEvent.click(screen.getByRole('button', { name: 'New profile' }));
 
+    expect(
+      screen.getByRole('textbox', { name: 'router model' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('textbox', { name: 'verifier model' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('textbox', { name: 'assistant model' }),
+    ).not.toBeInTheDocument();
+
     const costCap = screen.getByRole('spinbutton', {
       name: /Run cost cap \(USD\)/,
     });

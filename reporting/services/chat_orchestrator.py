@@ -359,7 +359,7 @@ def _worker_system_prompt() -> str:
     user message, where it costs one step's tokens instead of everyone's.
     """
     return (
-        f"{chat_graph.build_system_prompt()}"
+        f"{chat_graph.build_system_prompt(model_id=chat_graph._prompt_model_id('worker'))}"
         "\n\nYou are a sub-agent completing exactly ONE step of a larger plan."
         " Use the available tools/skills to accomplish the step you are given, then return a"
         " concise factual result for that step only. Do not list internal action"

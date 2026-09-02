@@ -112,6 +112,15 @@ def test_litellm_model_id_passes_through_qualified_and_sentinel(mocker):
     assert chat_graph._litellm_model_id("litellm") == "gpt-4o"
 
 
+def test_provider_prompt_note_uses_the_resolved_stage_model(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "deepseek/deepseek-reasoner")
+
+    note = chat_graph._provider_prompt_note("deepseek", model_id="anthropic/claude-sonnet-4-6")
+
+    assert "For Claude" in note
+    assert "For DeepSeek" not in note
+
+
 def test_strip_reasoning_context_flattens_mixed_list_content_to_text():
     # Mirrors LiteLLM's streamed+merged shape: thinking dicts concatenated with a
     # bare answer-text string in one list. This is the shape that crashed
