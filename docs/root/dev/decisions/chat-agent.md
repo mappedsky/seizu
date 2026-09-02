@@ -2707,10 +2707,11 @@ explicit choice never silently falls through to another profile: schedules and
 workflows require a replacement, while a locked interactive conversation must
 be restarted under a new profile.
 
-A profile's base primary model is the assistant model and the fallback for every
-other runtime stage. Router, planner, worker, worker-summary, sandbox-subagent,
-verifier, and synthesizer may each override that base model and may either
-inherit the user's selected reasoning level or fix an admin-configured value.
+A profile has one primary base model. Direct assistant calls use that base, and
+every runtime stage inherits it unless explicitly overridden. Router, planner,
+worker, worker-summary, sandbox-subagent, verifier, and synthesizer may each
+override the model and may either inherit the user's selected reasoning level
+or fix an admin-configured value. There is no separate assistant override.
 One economy model and reasoning value applies wherever budget degradation needs
 the fallback; it is not duplicated per stage. The run cost ceiling is the lower
 positive value of the profile cap and `CHAT_RUN_COST_BUDGET_USD`.

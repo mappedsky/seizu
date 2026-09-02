@@ -95,8 +95,9 @@ a running turn.
 The first enabled profile becomes the default. When profiles exist, exactly one
 enabled profile must be the default. Seizu does not install built-in profiles:
 until an admin creates one, chat continues to use the `CHAT_LLM_*` environment
-settings. The profile's base primary model is the assistant model and the
-fallback for every other runtime stage; each of those stages can override it.
+settings. A profile has one primary base model. Direct assistant calls use that
+base, and every other runtime stage inherits it unless that stage has an
+override. There is no separate assistant setting in a profile.
 
 A profile's cost cap is bounded by `CHAT_RUN_COST_BUDGET_USD`: when both are
 positive, the lower value applies. Set the global value to the deployment-wide
