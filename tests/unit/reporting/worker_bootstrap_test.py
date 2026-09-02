@@ -44,6 +44,10 @@ async def test_initialize_report_store_validates_and_initializes(mocker):
 
 async def test_chat_worker_resources_initializes_and_closes(mocker):
     mocker.patch("reporting.worker_bootstrap.initialize_report_store", AsyncMock())
+    validate_chat = mocker.patch(
+        "reporting.services.chat_graph.validate_chat_llm_config",
+        AsyncMock(),
+    )
     init_chat = mocker.patch(
         "reporting.services.chat_graph.initialize_chat_checkpoints",
         AsyncMock(),
@@ -56,12 +60,14 @@ async def test_chat_worker_resources_initializes_and_closes(mocker):
     async with chat_worker_resources():
         pass
 
+    validate_chat.assert_awaited_once()
     init_chat.assert_awaited_once()
     close_chat.assert_awaited_once()
 
 
 async def test_chat_worker_resources_closes_on_exception(mocker):
     mocker.patch("reporting.worker_bootstrap.initialize_report_store", AsyncMock())
+    mocker.patch("reporting.services.chat_graph.validate_chat_llm_config", AsyncMock())
     mocker.patch("reporting.services.chat_graph.initialize_chat_checkpoints", AsyncMock())
     close_chat = mocker.patch(
         "reporting.services.chat_graph.close_chat_checkpoints",

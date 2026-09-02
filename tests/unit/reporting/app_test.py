@@ -27,13 +27,13 @@ async def test_lifespan_initializes_and_closes_chat_checkpoints(mocker):
     mocker.patch("reporting.settings.CHAT_ENABLED", True)
     mocker.patch("reporting.app.settings.validate_persistence_settings")
     mocker.patch("reporting.app.report_store.initialize", new=mocker.AsyncMock())
-    validate = mocker.patch("reporting.app.validate_chat_llm_config")
+    validate = mocker.patch("reporting.app.validate_chat_llm_config", new=mocker.AsyncMock())
     initialize = mocker.patch("reporting.app.initialize_chat_checkpoints", new=mocker.AsyncMock())
     close = mocker.patch("reporting.app.close_chat_checkpoints", new=mocker.AsyncMock())
     app = SimpleNamespace(state=SimpleNamespace(mcp_session_manager=None))
 
     async with lifespan(app):
-        validate.assert_called_once_with()
+        validate.assert_awaited_once_with()
         initialize.assert_awaited_once_with()
         close.assert_not_awaited()
 

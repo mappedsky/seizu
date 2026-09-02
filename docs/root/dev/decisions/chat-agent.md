@@ -2734,6 +2734,10 @@ not silently move them to a more expensive model.
 No profiles are seeded. Until an admin creates the first enabled profile, chat
 uses the environment configuration unchanged; the first enabled profile becomes
 the default. Once profiles exist, exactly one enabled profile is the default.
+`CHAT_LLM_MODEL` remains the concise environment base and fallback, but startup
+accepts an enabled default profile in its place. Both the web process and the
+Temporal worker validate this after initializing the report store, so a
+profile-only deployment does not need a placeholder environment model.
 
 **Why no built-ins:** unmeasured provider/model combinations would present an
 operational guess as a safe cost preset. The environment fallback preserves an

@@ -4345,16 +4345,34 @@ def _legacy_provider_api_key(provider: str) -> str:
     }.get(provider, "")
 
 
-def validate_chat_llm_config() -> None:
+async def validate_chat_llm_config() -> None:
     """Fail-fast validation called at startup when chat is enabled.
 
-    Raises ``ValueError`` if a real provider is selected without CHAT_LLM_MODEL,
-    catching a missing model that previously surfaced only on the first request.
+    A real provider needs either the environment base model or an enabled
+    default profile. Profile models are complete snapshots; environment stage
+    overrides continue to inherit ``CHAT_LLM_MODEL`` when no profile is active.
     """
     provider = _chat_provider()
     if provider == _MOCK_PROVIDER:
         return
-    _litellm_model_id(provider)
+    base_model = settings.CHAT_LLM_MODEL.strip()
+    if base_model:
+        _litellm_model_id(provider, base_model)
+    else:
+        profiles = await report_store.list_model_profiles(enabled_only=True)
+        if not profiles:
+            raise ValueError(
+                "CHAT_LLM_MODEL is required when CHAT_LLM_PROVIDER is not 'mock' and no enabled model "
+                "profile is configured. Set an environment base model or create and enable a default profile."
+            )
+        if not any(profile.is_default for profile in profiles):
+            raise ValueError("An enabled default model profile is required when CHAT_LLM_MODEL is empty.")
+        for profile in profiles:
+            _litellm_model_id(provider, profile.primary.model_id)
+            _litellm_model_id(provider, profile.economy.model_id)
+            for override in profile.stage_overrides.values():
+                if override.model_id:
+                    _litellm_model_id(provider, override.model_id)
     for configured_model in (
         settings.CHAT_LLM_ROUTER_MODEL,
         settings.CHAT_LLM_PLANNER_MODEL,

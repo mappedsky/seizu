@@ -31,9 +31,14 @@ async def initialize_report_store() -> None:
 @asynccontextmanager
 async def chat_worker_resources() -> AsyncIterator[None]:
     """Own report-store and chat-checkpointer lifecycle for headless workers."""
-    from reporting.services.chat_graph import close_chat_checkpoints, initialize_chat_checkpoints
+    from reporting.services.chat_graph import (
+        close_chat_checkpoints,
+        initialize_chat_checkpoints,
+        validate_chat_llm_config,
+    )
 
     await initialize_report_store()
+    await validate_chat_llm_config()
     await initialize_chat_checkpoints()
     try:
         yield

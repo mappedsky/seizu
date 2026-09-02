@@ -16,10 +16,11 @@ deployment needs four things:
 1. **`CHAT_ENABLED=true`**, plus PostgreSQL checkpoint storage for history —
    the `CHAT_CHECKPOINT_DATABASE_*` variables in
    [backend configuration](backend.html).
-2. **A model and its API key**: `CHAT_LLM_MODEL` and the provider's key. This is
-   needed whether or not you use model profiles — Seizu refuses to start
-   without a model when a real provider is selected, and the router and verifier
-   stages always use the environment-configured model.
+2. **A real provider, model, and API key**: set `CHAT_LLM_PROVIDER=litellm`,
+   then either set `CHAT_LLM_MODEL` as the environment base model or configure
+   an enabled default model profile. Supply the provider keys needed by every
+   model in that configuration. Seizu refuses to start when neither source
+   supplies a model.
 3. **Permissions** for the people who should have chat, and for what the agent
    may do on their behalf — see [Permissions](#permissions).
 4. **A model profile**, if you want more than one model. Skip this and every
@@ -37,7 +38,7 @@ by default and both noticeably change what the agent can do:
 
 Chat is off by default. Set `CHAT_ENABLED=true` to register the chat API routes, initialize checkpoint storage, and show the Chat UI (the frontend discovers it via `GET /api/v1/config` → `features.chat`).
 
-The default provider is `mock`, which just echoes input — deterministic and keyless, useful for development but unable to call tools. For real use, pick a model through **LiteLLM**: set `CHAT_LLM_MODEL` to a provider-namespaced model id and supply the provider's API key. The supported provider/model surface is whatever LiteLLM supports rather than a fixed allowlist.
+The default provider is `mock`, which just echoes input — deterministic and keyless, useful for development but unable to call tools. For real use, set `CHAT_LLM_PROVIDER=litellm`, then set `CHAT_LLM_MODEL` to a provider-namespaced model id or configure an enabled default model profile, and supply the required provider keys. The supported provider/model surface is whatever LiteLLM supports rather than a fixed allowlist.
 
 ```shell
 CHAT_ENABLED=true
@@ -46,7 +47,7 @@ CHAT_LLM_MODEL=anthropic/claude-sonnet-4-6
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-API keys resolve in order: `CHAT_LLM_API_KEY`, then the standard provider env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`), then LiteLLM's own per-provider environment lookup. Seizu fails fast at startup if a real provider is selected without a model.
+API keys resolve in order: `CHAT_LLM_API_KEY`, then the standard provider env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`), then LiteLLM's own per-provider environment lookup. Seizu fails fast at startup if a real provider is selected without either `CHAT_LLM_MODEL` or an enabled default profile.
 
 `CHAT_LLM_BASE_URL` points chat at a self-hosted LiteLLM proxy or another OpenAI-compatible gateway. Legacy `CHAT_LLM_PROVIDER` values (`openai`, `anthropic`, `gemini`, `deepseek`) still work and namespace a bare `CHAT_LLM_MODEL`.
 
@@ -449,7 +450,7 @@ drop out — the live listing is the authority. Set
 |----------|---------|-------------|
 | `CHAT_ENABLED` | `false` | Master switch: gates the chat routes, checkpoint storage, and the Chat UI. |
 | `CHAT_LLM_PROVIDER` | `mock` | `mock` echoes input (no tools); any other value routes through LiteLLM. Legacy values (`openai`, `anthropic`, `gemini`, `deepseek`) namespace a bare model name. |
-| `CHAT_LLM_MODEL` | `""` | LiteLLM model id, preferably provider-namespaced (e.g. `anthropic/claude-sonnet-4-6`). Required for any real provider. |
+| `CHAT_LLM_MODEL` | `""` | Environment base model and fallback, preferably provider-namespaced (e.g. `anthropic/claude-sonnet-4-6`). Required for a real provider only when no enabled default model profile exists. |
 | `CHAT_LLM_API_KEY` | `""` | Optional API key override passed to LiteLLM; falls back to the standard provider env vars. |
 | `CHAT_LLM_BASE_URL` | `""` | Optional OpenAI-compatible base URL (LiteLLM `api_base`) for a self-hosted proxy or gateway. |
 | `CHAT_LLM_TEMPERATURE` | `0.2` | Sampling temperature. |
