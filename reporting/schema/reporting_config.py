@@ -11,6 +11,7 @@ from seizu_schema.reporting_config import (
     GraphPanelSettings,  # noqa: F401
     Input,  # noqa: F401
     InputDefault,  # noqa: F401
+    ModelProfileDef,  # noqa: F401
     Panel,  # noqa: F401
     PanelParam,  # noqa: F401
     PiePanelSettings,  # noqa: F401
