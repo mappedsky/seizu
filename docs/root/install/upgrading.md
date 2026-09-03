@@ -25,6 +25,64 @@ For every production upgrade:
    database written by a newer one unless its upgrade procedure explicitly says
    that downgrade is supported.
 
+## 5.1.0
+
+No schema migrations and no removed settings. Two defaults change behavior.
+
+### The MCP graph query rejects risky plans
+
+`graph__query` plans every query as part of the validation pass it already ran,
+and now refuses to execute one when Neo4j reports a performance notification, or
+when a non-index scan participates in a plan whose largest cardinality estimate
+exceeds `MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS` (100,000). The rejection
+returns the plan, the estimate and the scan operators so the caller can rewrite
+the query.
+
+1. After deploying, watch MCP clients and chat turns for the
+   `query_plan_rejected` error code. A bounded scan below the threshold is
+   unaffected.
+2. Raise `MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS` if your graph plans
+   legitimately large, set it to `0` to reject every non-index scan, or set
+   `MCP_GRAPH_QUERY_REJECT_UNINDEXED=false` to restore 5.0.0 behavior.
+3. Set both on the web service **and** on `seizu-temporal-worker`; the chat
+   agent calls this tool from either process.
+
+REST queries, the query console, and authored Cypher-backed toolset tools are
+not affected by this policy.
+
+### Model profiles: the assistant stage is now the base model
+
+A profile has one primary base model. Direct assistant calls use it, and every
+runtime stage inherits it unless the profile overrides that stage. The separate
+`assistant` stage override is gone; an entry stored by 5.0.0 is dropped when the
+profile is read, and the primary model governs those calls instead.
+
+1. Open each model profile and re-check any that set an `assistant` override.
+   Nothing fails, but the model in effect for direct assistant calls may change.
+2. `router` and `verifier` are now overridable stages, and
+   `CHAT_LLM_WORKER_SUMMARY_MODEL` is a new deployment setting for the
+   worker-summary pass. Both are optional; empty inherits as before.
+3. `CHAT_LLM_MODEL` may now be left empty when an enabled **default** profile
+   exists — the profile supplies every stage. Keep it set if you have no
+   profiles, or as the fallback for turns that run without one.
+4. `seizu-temporal-worker` now validates chat model ids at startup, the same way
+   the web service does, and it validates every enabled profile's primary,
+   economy and stage-override ids as well as `CHAT_LLM_ROUTER_MODEL`,
+   `CHAT_LLM_WORKER_SUMMARY_MODEL` and `SANDBOX_LLM_MODEL`. A model id LiteLLM
+   cannot resolve now fails the worker at startup rather than the first turn
+   that needs it. Deploy the worker before or with the web service and check its
+   logs.
+
+### Seeding model profiles
+
+Model profiles are now part of the seedable configuration. `seizu export` emits
+a top-level `model_profiles:` section, and `seizu seed` reconciles it by exact
+profile **name** — ids are server-generated and are deliberately not exported.
+Seeding never deletes a profile, and no profiles are seeded by default, so an
+existing deployment needs no action here. If you adopt the section, remember
+that exactly one enabled profile must be the default; the seeder writes the
+declared default first so the store is never left without one.
+
 ## 5.0.0
 
 ### Standing up Temporal for chat
