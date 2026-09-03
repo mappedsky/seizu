@@ -230,6 +230,13 @@ NEO4J_CONNECTION_TIMEOUT = int_env("NEO4J_CONNECTION_TIMEOUT", 10)
 # Timeout in seconds for Neo4j query execution (server-side transaction timeout).
 NEO4J_QUERY_TIMEOUT = int_env("NEO4J_QUERY_TIMEOUT", 30)
 
+# Refuse graph__query calls when Neo4j reports a performance warning, or when a
+# non-index scan participates in a plan whose estimated row count crosses the
+# threshold below. The rejection returns the plan so an MCP caller can rewrite
+# the query. This does not apply to REST queries or Cypher-backed toolset tools.
+MCP_GRAPH_QUERY_REJECT_UNINDEXED = bool_env("MCP_GRAPH_QUERY_REJECT_UNINDEXED", True)
+MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS = int_env("MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS", 100_000)
+
 # Procedures the Cypher query validator permits, in addition to the built-in
 # read-only schema procedures allowed by default (db.labels, db.propertyKeys,
 # db.schema.*, etc.). Each comma-separated entry is either an exact procedure

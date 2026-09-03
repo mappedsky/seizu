@@ -193,6 +193,15 @@ Seizu exposes a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 
   Known groups: ``graph``, ``reports``, ``scheduled_queries``, ``spaces``, ``toolsets``, ``roles``.
 
+* ``MCP_GRAPH_QUERY_REJECT_UNINDEXED``: Reject risky ``graph__query`` execution
+  plans before running them and return the retained ``EXPLAIN`` plan; default:
+  ``True``. This applies only to the generic MCP query tool, not REST queries or
+  Cypher-backed toolset tools.
+* ``MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS``: When a plan contains a
+  non-index scan, reject it if any operator exceeds this estimated row count;
+  default: ``100000``. Set to ``0`` to reject every non-index scan, or disable
+  ``MCP_GRAPH_QUERY_REJECT_UNINDEXED`` to permit them.
+
 * ``MCP_EXTERNAL_ENABLED``: Enables external MCP discovery and invocation;
   default: ``False``. In local development, use ``make external_mcp_enable`` or
   ``make external_mcp_disable`` so ``make up`` also selects the optional Compose

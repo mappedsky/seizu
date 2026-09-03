@@ -338,6 +338,8 @@ services:
         condition: service_completed_successfully
     environment:
       - NEO4J_URI=bolt://neo4j:7687
+      - MCP_GRAPH_QUERY_REJECT_UNINDEXED
+      - MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_NAMESPACE
       - TEMPORAL_TASK_QUEUE
@@ -542,6 +544,8 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
       - NEO4J_URI=bolt://neo4j:7687
+      - MCP_GRAPH_QUERY_REJECT_UNINDEXED
+      - MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS
       - NEO4J_NOTIFICATIONS_MIN_SEVERITY=OFF
       # JWT authentication is disabled for development by default.
       # To enable Authentik auth, start with --profile auth and change to:

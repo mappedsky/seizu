@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
@@ -11,6 +12,55 @@ from reporting.services.query_validator import validate_query
 from reporting.services.result_limits import current_result_limits, stream_truncation
 
 GROUP = "graph"
+
+
+def _unindexed_scans(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return non-index scan operators from a serialized Neo4j plan."""
+    found: list[dict[str, Any]] = []
+
+    def visit(operator: Any) -> None:
+        if not isinstance(operator, dict):
+            return
+        raw_type = str(operator.get("operatorType") or "")
+        operator_type = raw_type.split("@", 1)[0]
+        # NodeIndexScan and its partitioned variants are index-backed. Other
+        # *Scan operators enumerate nodes or relationships before filtering.
+        if operator_type.endswith("Scan") and "Index" not in operator_type:
+            raw_args = operator.get("args")
+            args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
+            found.append(
+                {
+                    "operator_type": operator_type,
+                    "details": args.get("Details"),
+                    "estimated_rows": args.get("EstimatedRows"),
+                }
+            )
+        for child in operator.get("children") or []:
+            visit(child)
+
+    visit(plan)
+    return found
+
+
+def _max_estimated_rows(plan: dict[str, Any]) -> float:
+    """Return the largest cardinality estimate in a serialized Neo4j plan."""
+    maximum = 0.0
+
+    def visit(operator: Any) -> None:
+        nonlocal maximum
+        if not isinstance(operator, dict):
+            return
+        raw_args = operator.get("args")
+        args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
+        try:
+            maximum = max(maximum, float(args.get("EstimatedRows") or 0))
+        except (TypeError, ValueError):
+            pass
+        for child in operator.get("children") or []:
+            visit(child)
+
+    visit(plan)
+    return maximum
 
 
 async def _handle_schema(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
@@ -24,6 +74,22 @@ async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) 
     validation = await validate_query(cypher)
     if validation.has_errors:
         return {"errors": validation.errors, "warnings": validation.warnings}
+    unindexed_scans = _unindexed_scans(validation.plan)
+    max_estimated_rows = _max_estimated_rows(validation.plan)
+    unindexed_plan_too_large = bool(unindexed_scans) and (
+        settings.MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS <= 0
+        or max_estimated_rows > settings.MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS
+    )
+    if settings.MCP_GRAPH_QUERY_REJECT_UNINDEXED and (validation.performance_warnings or unindexed_plan_too_large):
+        return {
+            "error": "Query rejected because its execution plan is risky",
+            "code": "query_plan_rejected",
+            "unindexed_operators": unindexed_scans,
+            "max_estimated_rows": max_estimated_rows,
+            "performance_warnings": validation.performance_warnings,
+            "plan": validation.plan,
+            "warnings": validation.warnings,
+        }
     # Stream and serialize under the caller's bounds rather than fetching
     # everything and trimming after. An unbounded MATCH is fast to issue and can
     # materialize the graph in worker memory before any limit is consulted.
@@ -60,14 +126,12 @@ async def _handle_explain(args: dict[str, Any], current_user: CurrentUser | None
     cypher = str(args.get("query", "")).strip()
     if not cypher:
         return {"error": "query parameter is required"}
-    # Validate before planning so the same guards as graph__query apply (no
-    # writes, no disallowed procedures/SSRF) — EXPLAIN must not become a way to
-    # plan a query the validator would otherwise reject.
+    # Validation already ran EXPLAIN and retained its result, so returning that
+    # plan applies the graph__query guards without planning the query twice.
     validation = await validate_query(cypher)
     if validation.has_errors:
         return {"errors": validation.errors, "warnings": validation.warnings}
-    plan = await reporting_neo4j.explain_query(cypher)
-    return {"plan": plan, "warnings": validation.warnings}
+    return {"plan": validation.plan, "warnings": validation.warnings}
 
 
 GROUP_DEF = BuiltinGroup(
@@ -91,8 +155,9 @@ GROUP_DEF = BuiltinGroup(
             group=GROUP,
             description=(
                 "Execute an ad-hoc read-only Cypher query against the Neo4j "
-                "graph database. The query is validated before execution — "
-                "write operations are not permitted."
+                "graph database. The query is validated and planned before execution — "
+                "write operations are not permitted, and risky unindexed plans are rejected by default. "
+                "A rejected unindexed query returns its EXPLAIN plan so it can be rewritten."
             ),
             input_schema={
                 "type": "object",
@@ -136,8 +201,8 @@ GROUP_DEF = BuiltinGroup(
             group=GROUP,
             description=(
                 "Return Neo4j's execution plan for a read-only Cypher query without running it. "
-                "The query is validated first (same guards as graph__query — writes and disallowed "
-                "procedures are rejected), then EXPLAIN is run and the planner's plan is returned as "
+                "The query is validated with the same EXPLAIN used by graph__query (writes and disallowed "
+                "procedures are rejected), and the retained planner result is returned as "
                 "{plan, warnings}. Use the plan (operator types, estimated rows, index usage) to check "
                 "that a query hits indexes and avoids full scans before saving or running it."
             ),
