@@ -17,6 +17,18 @@ LOWER_SNAKE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 # API accepts, including external MCP proxy tools (ext__<proxy>__<tool>).
 MCP_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*__[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 EXTERNAL_MCP_TOOL_NAME_RE = re.compile(r"^ext__[a-z][a-z0-9_-]{0,62}__[A-Za-z0-9_.-]{1,128}$")
+SelectableReasoningEffort = Literal["default", "none", "minimal", "low", "medium", "high", "xhigh"]
+PROFILE_STAGES = frozenset(
+    {
+        "planner",
+        "worker",
+        "worker_summary",
+        "sandbox_subagent",
+        "synthesizer",
+        "router",
+        "verifier",
+    }
+)
 
 
 def validate_lower_snake_id(value: str) -> str:
@@ -945,6 +957,61 @@ class ToolsetDef(BaseModel):
         return v
 
 
+class ModelChoiceDef(BaseModel):
+    """A model selected by its LiteLLM model identifier."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str = Field(min_length=1, max_length=300)
+
+
+class EconomyModelChoiceDef(ModelChoiceDef):
+    """The model used when a run enters budget-degraded mode."""
+
+    reasoning_effort: SelectableReasoningEffort = "default"
+
+
+class StageModelOverrideDef(BaseModel):
+    """An optional model or fixed reasoning level for one runtime stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str | None = Field(default=None, min_length=1, max_length=300)
+    reasoning_effort: SelectableReasoningEffort | None = None
+
+
+class ModelProfileDef(BaseModel):
+    """A seedable model profile, matched to stored profiles by exact name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=1000)
+    enabled: bool = True
+    is_default: bool = False
+    primary: ModelChoiceDef
+    economy: EconomyModelChoiceDef
+    stage_overrides: dict[str, StageModelOverrideDef] = Field(default_factory=dict)
+    user_reasoning_efforts: list[SelectableReasoningEffort] = Field(
+        default_factory=lambda: ["low", "medium", "high"], min_length=1
+    )
+    default_reasoning_effort: SelectableReasoningEffort = "medium"
+    run_cost_budget_usd: float = Field(gt=0, le=10_000)
+
+    @model_validator(mode="after")
+    def validate_profile(self) -> "ModelProfileDef":
+        unknown = set(self.stage_overrides) - PROFILE_STAGES
+        if unknown:
+            raise ValueError(f"unknown profile stages: {', '.join(sorted(unknown))}")
+        if len(set(self.user_reasoning_efforts)) != len(self.user_reasoning_efforts):
+            raise ValueError("user reasoning levels must be unique")
+        if self.default_reasoning_effort not in self.user_reasoning_efforts:
+            raise ValueError("default user reasoning must be user-selectable")
+        if self.is_default and not self.enabled:
+            raise ValueError("the default model profile must be enabled")
+        return self
+
+
 class SkillDef(BaseModel):
     """A prompt template definition within a skillset."""
 
@@ -1133,6 +1200,26 @@ class ReportingConfig(BaseModel):
         default_factory=list,
         description="Temporal-backed configurable workflows.",
     )
+
+    model_profiles: dict[str, ModelProfileDef] = Field(
+        default_factory=dict,
+        description=(
+            "Model profiles keyed by a local lower_snake_case handle. Stored profiles are matched by exact name."
+        ),
+    )
+
+    @field_validator("model_profiles")
+    @classmethod
+    def validate_model_profiles(cls, value: dict[str, ModelProfileDef]) -> dict[str, ModelProfileDef]:
+        for key in value:
+            validate_lower_snake_id(key)
+        names = [profile.name for profile in value.values()]
+        if len(set(names)) != len(names):
+            raise ValueError("model profile names must be unique")
+        enabled = [profile for profile in value.values() if profile.enabled]
+        if enabled and sum(profile.is_default for profile in enabled) != 1:
+            raise ValueError("enabled model_profiles must declare exactly one default profile")
+        return value
 
     @model_validator(mode="after")
     def exclusive_workflow_sections(self) -> "ReportingConfig":

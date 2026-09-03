@@ -19,6 +19,37 @@
             "title": "BarPanelSettings",
             "type": "object"
         },
+        "EconomyModelChoiceDef": {
+            "additionalProperties": false,
+            "description": "The model used when a run enters budget-degraded mode.",
+            "properties": {
+                "model_id": {
+                    "maxLength": 300,
+                    "minLength": 1,
+                    "title": "Model Id",
+                    "type": "string"
+                },
+                "reasoning_effort": {
+                    "default": "default",
+                    "enum": [
+                        "default",
+                        "none",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "title": "Reasoning Effort",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "model_id"
+            ],
+            "title": "EconomyModelChoiceDef",
+            "type": "object"
+        },
         "GraphPanelSettings": {
             "properties": {
                 "node_label": {
@@ -155,6 +186,109 @@
                 "value"
             ],
             "title": "InputDefault",
+            "type": "object"
+        },
+        "ModelChoiceDef": {
+            "additionalProperties": false,
+            "description": "A model selected by its LiteLLM model identifier.",
+            "properties": {
+                "model_id": {
+                    "maxLength": 300,
+                    "minLength": 1,
+                    "title": "Model Id",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "model_id"
+            ],
+            "title": "ModelChoiceDef",
+            "type": "object"
+        },
+        "ModelProfileDef": {
+            "additionalProperties": false,
+            "description": "A seedable model profile, matched to stored profiles by exact name.",
+            "properties": {
+                "name": {
+                    "maxLength": 120,
+                    "minLength": 1,
+                    "title": "Name",
+                    "type": "string"
+                },
+                "description": {
+                    "default": "",
+                    "maxLength": 1000,
+                    "title": "Description",
+                    "type": "string"
+                },
+                "enabled": {
+                    "default": true,
+                    "title": "Enabled",
+                    "type": "boolean"
+                },
+                "is_default": {
+                    "default": false,
+                    "title": "Is Default",
+                    "type": "boolean"
+                },
+                "primary": {
+                    "$ref": "#/$defs/ModelChoiceDef"
+                },
+                "economy": {
+                    "$ref": "#/$defs/EconomyModelChoiceDef"
+                },
+                "stage_overrides": {
+                    "additionalProperties": {
+                        "$ref": "#/$defs/StageModelOverrideDef"
+                    },
+                    "title": "Stage Overrides",
+                    "type": "object"
+                },
+                "user_reasoning_efforts": {
+                    "items": {
+                        "enum": [
+                            "default",
+                            "none",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh"
+                        ],
+                        "type": "string"
+                    },
+                    "minItems": 1,
+                    "title": "User Reasoning Efforts",
+                    "type": "array"
+                },
+                "default_reasoning_effort": {
+                    "default": "medium",
+                    "enum": [
+                        "default",
+                        "none",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "title": "Default Reasoning Effort",
+                    "type": "string"
+                },
+                "run_cost_budget_usd": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 10000,
+                    "title": "Run Cost Budget Usd",
+                    "type": "number"
+                }
+            },
+            "required": [
+                "name",
+                "primary",
+                "economy",
+                "run_cost_budget_usd"
+            ],
+            "title": "ModelProfileDef",
             "type": "object"
         },
         "Panel": {
@@ -1203,6 +1337,49 @@
             "title": "SpaceDef",
             "type": "object"
         },
+        "StageModelOverrideDef": {
+            "additionalProperties": false,
+            "description": "An optional model or fixed reasoning level for one runtime stage.",
+            "properties": {
+                "model_id": {
+                    "anyOf": [
+                        {
+                            "maxLength": 300,
+                            "minLength": 1,
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "title": "Model Id"
+                },
+                "reasoning_effort": {
+                    "anyOf": [
+                        {
+                            "enum": [
+                                "default",
+                                "none",
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high",
+                                "xhigh"
+                            ],
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "title": "Reasoning Effort"
+                }
+            },
+            "title": "StageModelOverrideDef",
+            "type": "object"
+        },
         "SubspaceDef": {
             "description": "A sub-space: a grouping label for reports within a single space.",
             "properties": {
@@ -1501,6 +1678,14 @@
             },
             "title": "Workflows",
             "type": "array"
+        },
+        "model_profiles": {
+            "additionalProperties": {
+                "$ref": "#/$defs/ModelProfileDef"
+            },
+            "description": "Model profiles keyed by a local lower_snake_case handle. Stored profiles are matched by exact name.",
+            "title": "Model Profiles",
+            "type": "object"
         },
         "toolsets": {
             "additionalProperties": {

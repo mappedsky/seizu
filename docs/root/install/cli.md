@@ -137,7 +137,7 @@ Run `seizu --help` or `seizu <group> --help` for the full command list.
 
 ## Seed and Export
 
-The CLI can seed spaces, reports, scheduled queries, toolsets, skillsets, and Agent Plugin package sources from the same YAML configuration format used by the quickstart:
+The CLI can seed model profiles, spaces, reports, scheduled queries, toolsets, skillsets, and Agent Plugin package sources from the same YAML configuration format used by the quickstart:
 
 ```bash
 seizu seed --config path/to/reporting-dashboard.yaml
@@ -145,6 +145,8 @@ seizu seed --dry-run
 seizu seed --force
 ```
 
+Model profiles are matched by exact name and seeded first. The declared default
+is reconciled before non-default profiles so changing defaults remains atomic.
 Spaces are seeded before reports, and report membership and space overviews are applied after — see
 [Spaces](spaces.html#seeding).
 

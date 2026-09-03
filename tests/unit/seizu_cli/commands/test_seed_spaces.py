@@ -129,6 +129,7 @@ def test_seed_matches_an_existing_space_by_name(mock_client: MagicMock, tmp_path
     config = tmp_path / "c.yaml"
     config.write_text(_SPACE_CONFIG)
     mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
         "/api/v1/spaces": {"spaces": [_space_row()]},
         "/api/v1/spaces/s1/subspaces": {
             "subspaces": [{"subspace_id": "ss1", "space_id": "s1", "name": "Vulnerabilities"}]
@@ -159,6 +160,7 @@ def test_reseeding_an_unchanged_config_writes_nothing(mock_client: MagicMock, tm
     config.write_text(_SPACE_CONFIG)
     stored = _report_config("Sec Overview")
     mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
         "/api/v1/spaces": {"spaces": [_space_row()]},
         "/api/v1/spaces/s1/subspaces": {
             "subspaces": [{"subspace_id": "ss1", "space_id": "s1", "name": "Vulnerabilities"}]
@@ -301,6 +303,7 @@ def test_seed_dry_run_writes_nothing(mock_client: MagicMock, tmp_path: Path) -> 
     config = tmp_path / "c.yaml"
     config.write_text(_SPACE_CONFIG)
     mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
         "/api/v1/spaces": {"spaces": []},
         "/api/v1/reports": {"reports": []},
     }[path]
@@ -325,6 +328,7 @@ def test_export_round_trips_spaces_membership_and_overview(mock_client: MagicMoc
         "reports": [],
     }
     mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
         "/api/v1/spaces": {"spaces": [_space_row()]},
         "/api/v1/spaces/s1/tree": tree,
         "/api/v1/reports": {
@@ -363,6 +367,7 @@ def test_export_reuses_existing_yaml_keys_for_spaces(mock_client: MagicMock, tmp
         "reports": [],
     }
     mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
         "/api/v1/spaces": {"spaces": [_space_row()]},
         "/api/v1/spaces/s1/tree": tree,
         "/api/v1/reports": {"reports": []},
@@ -384,6 +389,7 @@ def test_export_skips_builtin_toolsets(mock_client: MagicMock, tmp_path: Path) -
     config = tmp_path / "c.yaml"
     config.write_text("reports: {}\n")
     mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
         "/api/v1/spaces": {"spaces": []},
         "/api/v1/reports": {"reports": []},
         "/api/v1/reports/dashboard": {"report_id": None},
@@ -422,6 +428,7 @@ def test_export_skips_one_bad_toolset_without_aborting(mock_client: MagicMock, t
     config = tmp_path / "c.yaml"
     config.write_text("reports: {}\n")
     mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
         "/api/v1/spaces": {"spaces": []},
         "/api/v1/reports": {"reports": []},
         "/api/v1/reports/dashboard": {"report_id": None},
@@ -463,6 +470,7 @@ def test_export_drops_an_overview_whose_report_failed_to_export(mock_client: Mag
         "reports": [],
     }
     mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
         "/api/v1/spaces": {"spaces": [_space_row()]},
         "/api/v1/spaces/s1/tree": tree,
         "/api/v1/reports": {"reports": [_report_row("r1", "Sec Overview", space_id="s1")]},
