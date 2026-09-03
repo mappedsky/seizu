@@ -12,7 +12,7 @@ Rows are rendered in the order specified, and panels within rows are also render
 ## Configuration Storage
 
 Report and dashboard configurations are stored in PostgreSQL, not in the YAML configuration file.
-The YAML file contains a top-level `queries` dict (used only by `scheduled_queries` references), `scheduled_queries`, a `dashboard` pointer, and `spaces`, `reports`, `toolsets`, `skillsets`, and `plugins` sections — all used to seed the report store.
+The YAML file contains a top-level `queries` dict (used only by `scheduled_queries` references), `scheduled_queries`, a `dashboard` pointer, and `model_profiles`, `spaces`, `reports`, `toolsets`, `skillsets`, and `plugins` sections — all used to seed the report store.
 A report may name a `space` (and optionally a `subspace`) from the `spaces` section to be filed into it — see [Spaces](spaces.html#seeding).
 Each report has its own `queries` dict for named Cypher strings used by its panels.
 
@@ -24,6 +24,34 @@ plugins:
   security_review:
     source: plugins/security-review
     enabled: true
+```
+
+Model profile keys are local handles; seed and export match profiles to the
+server's generated IDs by exact, unique profile name. If any profiles are
+enabled, exactly one must be the enabled default. Profiles are seeded before
+other resources:
+
+```yaml
+model_profiles:
+  balanced:
+    name: Balanced
+    description: General-purpose interactive and scheduled chat
+    enabled: true
+    is_default: true
+    primary:
+      model_id: anthropic/claude-sonnet-4-6
+    economy:
+      model_id: openai/gpt-5-mini
+      reasoning_effort: low
+    stage_overrides:
+      planner:
+        reasoning_effort: high
+      worker_summary:
+        model_id: openai/gpt-5-mini
+        reasoning_effort: none
+    user_reasoning_efforts: [low, medium, high]
+    default_reasoning_effort: medium
+    run_cost_budget_usd: 2.0
 ```
 
 To populate the report store from the YAML file during initial setup or development, use the CLI directly:

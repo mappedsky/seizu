@@ -1,3 +1,60 @@
+model_profiles:
+  deepseek_pro:
+    name: deepseek-pro
+    description: DeepSeek Pro for primary stages, Flash for routing, verification, summaries, and economy mode.
+    enabled: true
+    is_default: true
+    primary:
+      model_id: deepseek/deepseek-v4-pro
+    economy:
+      model_id: deepseek/deepseek-v4-flash
+      reasoning_effort: low
+    stage_overrides:
+      worker: {}
+      worker_summary:
+        model_id: deepseek/deepseek-v4-flash
+        reasoning_effort: none
+      sandbox_subagent: {}
+      synthesizer:
+        reasoning_effort: low
+      router:
+        model_id: deepseek/deepseek-v4-flash
+        reasoning_effort: none
+      verifier:
+        model_id: deepseek/deepseek-v4-flash
+        reasoning_effort: low
+    user_reasoning_efforts: [low, medium, xhigh]
+    default_reasoning_effort: medium
+    run_cost_budget_usd: 2.0
+
+  claude_opus:
+    name: claude-opus
+    description: Opus for primary stages, Haiku for routing, verification, and summaries, with Sonnet for economy mode.
+    enabled: true
+    is_default: false
+    primary:
+      model_id: anthropic/claude-opus-4-6
+    economy:
+      model_id: anthropic/claude-sonnet-4-6
+      reasoning_effort: low
+    stage_overrides:
+      sandbox_subagent: {}
+      worker_summary:
+        model_id: anthropic/claude-haiku-4-6
+        reasoning_effort: low
+      worker: {}
+      router:
+        model_id: anthropic/claude-haiku-4-6
+        reasoning_effort: none
+      verifier:
+        model_id: anthropic/claude-haiku-4-6
+        reasoning_effort: low
+      synthesizer:
+        reasoning_effort: low
+    user_reasoning_efforts: [low, medium, high, xhigh]
+    default_reasoning_effort: medium
+    run_cost_budget_usd: 5.0
+
 dashboard: seizu-overview
 
 reports:
