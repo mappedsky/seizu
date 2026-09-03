@@ -133,6 +133,17 @@ def test_cve_repo_workflow_uses_new_security_issue_observation() -> None:
     ]
 
 
+def test_cve_severity_skill_declares_the_tools_in_its_workflow() -> None:
+    config_path = Path(__file__).parents[4] / ".config/dev/seizu/reporting-dashboard.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    skill = config["skillsets"]["cve_response"]["skills"]["cve_severity_analysis"]
+
+    assert skill["tools_required"] == [
+        "cve_analysis__get_recent_cves",
+        "cve_analysis__count_cves_by_severity",
+    ]
+
+
 def test_cve_dependency_remediation_workflow() -> None:
     config_path = Path(__file__).parents[4] / ".config/dev/seizu/reporting-dashboard.yaml"
     config = yaml.safe_load(config_path.read_text())

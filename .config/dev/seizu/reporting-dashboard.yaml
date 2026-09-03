@@ -2882,7 +2882,9 @@ skillsets:
           - vulnerability risk distribution
           - cve statistics
           - cvss percentiles
-        tools_required: []
+        tools_required:
+          - cve_analysis__get_recent_cves
+          - cve_analysis__count_cves_by_severity
         enabled: true
 
 workflows:

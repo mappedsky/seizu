@@ -202,7 +202,7 @@ Built-in tools are grouped by area. Permissions for each tool mirror the equival
 
 | Group | Tools |
 |-------|-------|
-| `graph` | `graph__schema` (Neo4j labels/relationship types/property keys), `graph__query` (validated read-only Cypher) |
+| `graph` | `graph__schema` (Neo4j labels/relationship types/property keys/indexes), `graph__validate_query` (validation without execution), `graph__explain` (retained execution plan), `graph__query` (validated read-only Cypher with risky unindexed plans rejected by default) |
 | `reports` | list / get / create / update metadata / delete / pin / set_dashboard / get_dashboard reports, plus save/list/get version history |
 | `scheduled_queries` | Full CRUD plus version history and an on-demand `run` (picked up by the worker's next poll). Create/update reuse the same Cypher + action-config validation as the REST routes. |
 | `spaces` | CRUD for spaces and their sub-spaces, the space overview pointer, and filing reports into a space. No version history — spaces are flat records. See [Spaces](spaces.html#mcp-tools). |
@@ -215,6 +215,15 @@ Built-in tools are grouped by area. Permissions for each tool mirror the equival
 The `sandbox` group is **not** exposed here: those tools are available only to
 the built-in chat assistant, which is the only caller that has a sandbox
 session to act on. See [Sandbox](sandbox.html).
+
+``graph__query`` plans each query as part of its existing validation pass. By
+default, it rejects a plan when Neo4j reports a performance warning, or when a
+non-index scan participates in a plan whose estimated cardinality exceeds
+``MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS``. The error includes the complete
+``plan``, the maximum estimated row count, and the scan operators so the caller
+can rewrite the Cypher without making a separate ``graph__explain`` call. A
+bounded scan below the threshold is still allowed. See the
+[backend settings](backend.html#mcp-server) to tighten or disable this policy.
 
 Which groups are exposed is controlled by the `MCP_ENABLED_BUILTINS` setting (see [backend configuration](backend.html#mcp-server)). All groups are enabled by default; set it to ``none`` to disable all built-ins, or to a comma-separated list (e.g. ``graph,reports``) to enable only specific groups.
 

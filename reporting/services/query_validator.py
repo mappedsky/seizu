@@ -302,6 +302,10 @@ def _scan_for_dangerous_constructs(query: str) -> str | None:
 class ValidationResult:
     errors: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    performance_warnings: list = field(default_factory=list)
+    # The plan produced by the validation EXPLAIN. Callers that enforce an
+    # execution policy should inspect this rather than planning the query again.
+    plan: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_errors(self) -> bool:
@@ -322,6 +326,7 @@ async def validate_query(query: str, params: dict[str, Any] | None = None) -> Va
             f"EXPLAIN {query}",
             parameters_=params or {},
         )
+        result.plan = summary.plan or {}
         if summary.query_type != "r":
             result.errors.append("Write queries are not allowed")
             return result
@@ -329,7 +334,10 @@ async def validate_query(query: str, params: dict[str, Any] | None = None) -> Va
             for notification in summary.notifications:
                 code = notification.get("code", "")
                 description = notification.get("description", str(notification))
-                if code == "Neo.ClientNotification.Statement.ParameterNotProvided":
+                if str(notification.get("category", "")).upper() == "PERFORMANCE":
+                    result.performance_warnings.append(description)
+                    result.warnings.append(description)
+                elif code == "Neo.ClientNotification.Statement.ParameterNotProvided":
                     # When params are omitted (e.g. /api/v1/validate called
                     # without params), surface as a warning rather than
                     # blocking the caller.

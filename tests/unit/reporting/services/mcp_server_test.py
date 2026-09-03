@@ -281,6 +281,143 @@ async def test_call_tool_query_success():
         assert data["results"][0]["n"] == 1
 
 
+async def test_call_tool_query_rejects_large_unindexed_plan_with_explain_result():
+    from reporting.services.query_validator import ValidationResult
+
+    plan = {
+        "operatorType": "ProduceResults@neo4j",
+        "args": {"EstimatedRows": 1},
+        "children": [
+            {
+                "operatorType": "VarLengthExpand(All)@neo4j",
+                "args": {"EstimatedRows": 265_000, "Details": "(r)-[*..5]-(n)"},
+                "children": [
+                    {
+                        "operatorType": "NodeByLabelScan@neo4j",
+                        "args": {"EstimatedRows": 11, "Details": "r:CodeRepository"},
+                        "children": [],
+                    }
+                ],
+            }
+        ],
+    }
+    execute = AsyncMock()
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(plan=plan),
+        ),
+        patch("reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_streamed", execute),
+        patch("reporting.services.mcp_builtins.graph.settings.MCP_GRAPH_QUERY_REJECT_UNINDEXED", True),
+        patch("reporting.services.mcp_builtins.graph.settings.MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS", 100_000),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__query", {"query": "MATCH p=(r)-[*1..5]-(n) RETURN p"})
+        data = json.loads(result[0].text)
+
+    assert data["code"] == "query_plan_rejected"
+    assert data["plan"] == plan
+    assert data["max_estimated_rows"] == 265_000
+    assert data["unindexed_operators"] == [
+        {"operator_type": "NodeByLabelScan", "details": "r:CodeRepository", "estimated_rows": 11}
+    ]
+    execute.assert_not_awaited()
+
+
+async def test_call_tool_query_allows_small_bounded_scan():
+    from reporting.services.query_validator import ValidationResult
+
+    plan = {
+        "operatorType": "ProduceResults@neo4j",
+        "args": {"EstimatedRows": 10},
+        "children": [
+            {
+                "operatorType": "NodeByLabelScan@neo4j",
+                "args": {"EstimatedRows": 10, "Details": "c:CVE"},
+                "children": [],
+            }
+        ],
+    }
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(plan=plan),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_streamed",
+            new_callable=AsyncMock,
+            return_value=([{"id": "CVE-1"}], False),
+        ) as execute,
+        patch("reporting.services.mcp_builtins.graph.settings.MCP_GRAPH_QUERY_REJECT_UNINDEXED", True),
+        patch("reporting.services.mcp_builtins.graph.settings.MCP_GRAPH_QUERY_UNINDEXED_MAX_ESTIMATED_ROWS", 100_000),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__query", {"query": "MATCH (c:CVE) RETURN c.id LIMIT 10"})
+        data = json.loads(result[0].text)
+
+    assert data["results"] == [{"id": "CVE-1"}]
+    execute.assert_awaited_once()
+
+
+async def test_call_tool_query_rejects_neo4j_performance_warning():
+    from reporting.services.query_validator import ValidationResult
+
+    plan = {"operatorType": "ProduceResults", "args": {"EstimatedRows": 1}, "children": []}
+    execute = AsyncMock()
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(
+                warnings=["The query contains a cartesian product"],
+                performance_warnings=["The query contains a cartesian product"],
+                plan=plan,
+            ),
+        ),
+        patch("reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_streamed", execute),
+        patch("reporting.services.mcp_builtins.graph.settings.MCP_GRAPH_QUERY_REJECT_UNINDEXED", True),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__query", {"query": "MATCH (a), (b) RETURN a, b"})
+        data = json.loads(result[0].text)
+
+    assert data["code"] == "query_plan_rejected"
+    assert data["performance_warnings"] == ["The query contains a cartesian product"]
+    assert data["plan"] == plan
+    execute.assert_not_awaited()
+
+
+async def test_call_tool_query_can_allow_a_risky_plan_by_configuration():
+    from reporting.services.query_validator import ValidationResult
+
+    plan = {
+        "operatorType": "NodeByLabelScan@neo4j",
+        "args": {"EstimatedRows": 500_000, "Details": "n:CVE"},
+        "children": [],
+    }
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(plan=plan),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_streamed",
+            new_callable=AsyncMock,
+            return_value=([{"count": 500_000}], False),
+        ) as execute,
+        patch("reporting.services.mcp_builtins.graph.settings.MCP_GRAPH_QUERY_REJECT_UNINDEXED", False),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__query", {"query": "MATCH (n:CVE) RETURN count(n) AS count"})
+        data = json.loads(result[0].text)
+
+    assert data["results"] == [{"count": 500_000}]
+    execute.assert_awaited_once()
+
+
 async def test_call_tool_query_execution_error():
     from reporting.services.query_validator import ValidationResult
 
@@ -365,12 +502,7 @@ async def test_call_tool_explain_returns_plan():
         patch(
             "reporting.services.mcp_builtins.graph.validate_query",
             new_callable=AsyncMock,
-            return_value=ValidationResult(errors=[], warnings=["unindexed scan"]),
-        ),
-        patch(
-            "reporting.services.mcp_builtins.graph.reporting_neo4j.explain_query",
-            new_callable=AsyncMock,
-            return_value=plan,
+            return_value=ValidationResult(errors=[], warnings=["unindexed scan"], plan=plan),
         ),
     ):
         server = _build_mcp_server()
@@ -383,21 +515,16 @@ async def test_call_tool_explain_returns_plan():
 async def test_call_tool_explain_blocks_invalid_query_before_planning():
     from reporting.services.query_validator import ValidationResult
 
-    explain = AsyncMock()
-    with (
-        patch(
-            "reporting.services.mcp_builtins.graph.validate_query",
-            new_callable=AsyncMock,
-            return_value=ValidationResult(errors=["Write queries are not allowed"], warnings=[]),
-        ),
-        patch("reporting.services.mcp_builtins.graph.reporting_neo4j.explain_query", explain),
+    with patch(
+        "reporting.services.mcp_builtins.graph.validate_query",
+        new_callable=AsyncMock,
+        return_value=ValidationResult(errors=["Write queries are not allowed"], warnings=[]),
     ):
         server = _build_mcp_server()
         result = await _call_tool(server, "graph__explain", {"query": "CREATE (n) RETURN n"})
         data = json.loads(result[0].text)
         assert "Write queries are not allowed" in data["errors"]
-    # A rejected query must never reach the planner.
-    explain.assert_not_called()
+        assert "plan" not in data
 
 
 async def test_call_tool_explain_empty_query_string():

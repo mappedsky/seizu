@@ -22,6 +22,7 @@ def _mock_cyver(
     mocker,
     syntax_notifications=None,
     syntax_exception=None,
+    plan=None,
     schema_ok=True,
     schema_meta=None,
     props_ok=True,
@@ -41,6 +42,7 @@ def _mock_cyver(
         mock_summary = MagicMock()
         mock_summary.notifications = syntax_notifications or []
         mock_summary.query_type = query_type
+        mock_summary.plan = plan or {}
         mock_driver.execute_query = AsyncMock(return_value=([], mock_summary, []))
     mocker.patch("reporting.services.query_validator._get_async_neo4j_client").return_value = mock_driver
 
@@ -214,12 +216,14 @@ class TestProcedureAllowlist:
 
 
 async def test_validate_query_success(mocker):
-    _mock_cyver(mocker)
+    plan = {"operatorType": "ProduceResults", "children": []}
+    _mock_cyver(mocker, plan=plan)
     result = await validate_query("MATCH (n) RETURN n")
     assert isinstance(result, ValidationResult)
     assert not result.has_errors
     assert result.errors == []
     assert result.warnings == []
+    assert result.plan == plan
 
 
 async def test_validate_query_syntax_error_is_error(mocker):
@@ -297,6 +301,25 @@ async def test_validate_query_parameterized_query_without_params_is_warning(mock
     assert not result.has_errors
     assert len(result.warnings) == 1
     assert "Missing parameters" in result.warnings[0]
+
+
+async def test_validate_query_preserves_performance_notifications(mocker):
+    description = "The query contains a cartesian product"
+    _mock_cyver(
+        mocker,
+        syntax_notifications=[
+            {
+                "code": "Neo.ClientNotification.Statement.CartesianProduct",
+                "category": "PERFORMANCE",
+                "description": description,
+            }
+        ],
+    )
+
+    result = await validate_query("MATCH (a), (b) RETURN a, b")
+
+    assert result.warnings == [description]
+    assert result.performance_warnings == [description]
 
 
 async def test_validate_query_write_is_error(mocker):
