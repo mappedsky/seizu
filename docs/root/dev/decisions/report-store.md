@@ -178,3 +178,17 @@ constraint closes the concurrent two-default race; store checks supply the
 exactly-one half that a partial index cannot express. Locking profile selection
 inside admission prevents a concurrent session update from moving a turn to a
 different model after its immutable command has been captured.
+
+## STO-012 — Application identifiers are UUIDv7 strings
+
+**Applies to:** `ReportStore.generate_id`, `report_store/sql.py`
+
+Every server-generated application identifier uses a canonical UUIDv7 string.
+Existing decimal identifiers remain valid because persisted and API identifier
+fields stay strings; this changes generation only and requires no data rewrite.
+
+**Why:** UUIDv7 preserves time-ordered identifiers without a per-instance
+machine ID, and its canonical string representation crosses JSON/JavaScript
+boundaries without integer precision loss. Snowflake identifiers required every
+replica to coordinate a machine ID and were unsafe when consumers treated them
+as JavaScript numbers.

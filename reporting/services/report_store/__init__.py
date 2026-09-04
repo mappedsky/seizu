@@ -73,7 +73,7 @@ def is_initialized() -> bool:
 
 
 def generate_id() -> str:
-    """Return a new Snowflake ID from the configured store backend."""
+    """Return a new UUIDv7 identifier from the configured store backend."""
     return get_store().generate_id()
 
 

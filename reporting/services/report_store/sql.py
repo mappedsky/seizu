@@ -4,7 +4,6 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from snowflake import SnowflakeGenerator
 from sqlalchemy import (
     JSON,
     Column,
@@ -23,6 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, col, select
+from uuid_utils import uuid7
 
 from reporting import settings
 from reporting.schema.chat import (
@@ -84,7 +84,6 @@ logger = logging.getLogger(__name__)
 
 
 _engine: AsyncEngine | None = None
-_snowflake_gen: SnowflakeGenerator | None = None
 
 # How many times an event-log append re-reads the highest sequence after losing
 # the race for it. The turn row is locked first, so a loss needs two producers to
@@ -693,15 +692,9 @@ class ModelProfileVersionRecord(SQLModel, table=True):  # type: ignore
 # ---------------------------------------------------------------------------
 
 
-def _get_snowflake_gen() -> SnowflakeGenerator:
-    global _snowflake_gen
-    if _snowflake_gen is None:
-        _snowflake_gen = SnowflakeGenerator(settings.SNOWFLAKE_MACHINE_ID)
-    return _snowflake_gen
-
-
 def generate_report_id() -> str:
-    return str(next(_get_snowflake_gen()))
+    """Return a time-ordered UUIDv7 identifier in canonical string form."""
+    return str(uuid7())
 
 
 async def _locked_report(session: AsyncSession, report_id: str) -> ReportRecord | None:
