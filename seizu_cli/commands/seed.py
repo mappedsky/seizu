@@ -496,7 +496,7 @@ def _seed_spaces(
     """Create or update the spaces and sub-spaces declared in *config*.
 
     Spaces are matched by name, like reports: their ids are server-generated
-    snowflakes, so the YAML key is a local handle that never reaches the API.
+    UUIDv7 values, so the YAML key is a local handle that never reaches the API.
     The match is exact, which is also how the API decides whether a name is
     taken — see ``find_duplicate_space_name``. Anything looser would have to be
     kept in step with the server by hand, and would make the seeder claim an

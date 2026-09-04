@@ -165,7 +165,7 @@ class ReportStore(ABC):
 
     @abstractmethod
     def generate_id(self) -> str:
-        """Return a new Snowflake ID from the backend's process-wide generator."""
+        """Return a new UUIDv7 identifier."""
 
     @abstractmethod
     async def initialize(self) -> None:

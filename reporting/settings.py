@@ -567,9 +567,6 @@ SLACK_TIMEOUT = int_env("SLACK_TIMEOUT", 30)
 # running behind an SSL-terminating load balancer.
 TALISMAN_FORCE_HTTPS = bool_env("TALISMAN_FORCE_HTTPS", True)
 
-# Snowflake ID generator machine ID (0–1023). Set a unique value per instance
-# when running multiple replicas to avoid ID collisions.
-SNOWFLAKE_MACHINE_ID = int_env("SNOWFLAKE_MACHINE_ID", 1)
 # PostgreSQL database URL for Seizu-managed application records. Keep
 # credentials out of this value and provide them through SQL_DATABASE_USER and
 # SQL_DATABASE_PASSWORD so secret managers can manage only the password.

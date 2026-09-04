@@ -68,7 +68,6 @@ Report and dashboard configurations are stored in PostgreSQL. Use ``seizu seed``
 ### Report storage configuration
 
 * ``REPORT_QUERY_SIGNING_SECRET``: cryptographically random secret used to sign report-query capability tokens. Use at least 32 bytes of entropy, 64 bytes preferred. Encode it as hex or base64, store it in a secret manager or deployment env var, and keep it stable across restarts so existing report tokens remain valid until they expire. If you use hex, 32 bytes becomes 64 characters and 64 bytes becomes 128 characters; if you use base64, 32 bytes is typically 44 characters with padding. Rotate it if exposed; rotation invalidates outstanding report tokens.
-* ``SNOWFLAKE_MACHINE_ID``: Snowflake ID generator machine ID (0–1023). Set a unique value per instance when running multiple replicas to avoid ID collisions; default: ``1``
 
 ### PostgreSQL configuration
 

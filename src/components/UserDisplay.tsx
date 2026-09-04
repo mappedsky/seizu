@@ -2,7 +2,7 @@ import { useUser } from 'src/hooks/useUser';
 import { getUserDisplayName, UNKNOWN_USER_LABEL } from 'src/utils/userDisplay';
 
 interface UserDisplayProps {
-  /** The stored created_by value — either a Snowflake user_id or a legacy email string. */
+  /** The stored created_by value — either a UUID user_id or a legacy email string. */
   userId: string;
 }
 

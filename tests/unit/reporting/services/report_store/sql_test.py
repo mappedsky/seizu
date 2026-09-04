@@ -10,6 +10,7 @@ import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from sqlalchemy import select, text
@@ -72,15 +73,6 @@ async def _plant_private_member(store, space_id: str, created_by: str) -> str:
         session.add(record)
         await session.commit()
     return report.report_id
-
-
-@pytest.fixture(autouse=True)
-def reset_snowflake_gen():
-    """Reset the module-level snowflake generator between tests."""
-    original = sql_module._snowflake_gen
-    sql_module._snowflake_gen = None
-    yield
-    sql_module._snowflake_gen = original
 
 
 @pytest.fixture(autouse=True)
@@ -1500,17 +1492,26 @@ async def test_list_report_versions_newest_first(store, mocker):
 # ---------------------------------------------------------------------------
 
 
+def test_generate_report_id_returns_unique_uuidv7_values():
+    first = UUID(sql_module.generate_report_id())
+    second = UUID(sql_module.generate_report_id())
+
+    assert first.version == 7
+    assert second.version == 7
+    assert first != second
+
+
 async def test_create_report_returns_list_item(store, mocker):
     mocker.patch(
         "reporting.services.report_store.sql.generate_report_id",
-        return_value="snowflake42",
+        return_value="report-42",
     )
     result = await store.create_report(
         name="My Report",
         created_by="creator@example.com",
     )
     assert isinstance(result, ReportListItem)
-    assert result.report_id == "snowflake42"
+    assert result.report_id == "report-42"
     assert result.name == "My Report"
     assert result.current_version == 1
 
