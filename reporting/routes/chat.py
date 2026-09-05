@@ -10,6 +10,7 @@ from reporting import settings
 from reporting.authnz import CurrentUser, require_permission
 from reporting.authnz.permissions import Permission
 from reporting.schema.chat import (
+    CHAT_THREAD_ID_MAX_LENGTH,
     CHAT_THREAD_ID_PATTERN,
     ChatHistoryMessage,
     ChatHistoryResponse,
@@ -56,7 +57,7 @@ def _stream_response(source: AsyncIterator[str]) -> StreamingResponse:
 async def admit_chat_turn(
     body: ChatTurnRequest,
     response: Response,
-    thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    thread_id: str = Path(min_length=1, max_length=CHAT_THREAD_ID_MAX_LENGTH, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> ChatTurnAdmissionResponse:
     """Admit a turn and return its id, without streaming anything.
@@ -153,7 +154,7 @@ async def admit_chat_turn(
     responses={204: {"description": "No turn is running for this thread"}},
 )
 async def active_chat_turn(
-    thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    thread_id: str = Path(min_length=1, max_length=CHAT_THREAD_ID_MAX_LENGTH, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> Response:
     """Return the thread's running turn, so a reloaded client can reattach.
@@ -221,7 +222,7 @@ async def cancel_chat_turn(
 
 @router.get("/api/v1/chat/history", response_model=ChatHistoryResponse)
 async def chat_history(
-    thread_id: str = Query(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    thread_id: str = Query(min_length=1, max_length=CHAT_THREAD_ID_MAX_LENGTH, pattern=CHAT_THREAD_ID_PATTERN),
     limit: int = Query(default=settings.CHAT_HISTORY_LIMIT, ge=1, le=500),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> ChatHistoryResponse:
@@ -411,7 +412,7 @@ async def create_chat_session(
 
 @router.get("/api/v1/chat/sessions/{thread_id}", response_model=ChatSessionItem)
 async def get_chat_session(
-    thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    thread_id: str = Path(min_length=1, max_length=CHAT_THREAD_ID_MAX_LENGTH, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> ChatSessionItem:
     """Return one chat session for the current user."""
@@ -424,7 +425,7 @@ async def get_chat_session(
 @router.patch("/api/v1/chat/sessions/{thread_id}", response_model=ChatSessionItem)
 async def update_chat_session(
     body: UpdateChatSessionRequest,
-    thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    thread_id: str = Path(min_length=1, max_length=CHAT_THREAD_ID_MAX_LENGTH, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> ChatSessionItem:
     """Update a chat session title or its profile reasoning selection."""
@@ -505,7 +506,7 @@ async def _close_session_for_deletion(user_id: str, thread_id: str) -> bool:
 
 @router.delete("/api/v1/chat/sessions/{thread_id}", status_code=204)
 async def delete_chat_session(
-    thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    thread_id: str = Path(min_length=1, max_length=CHAT_THREAD_ID_MAX_LENGTH, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> None:
     """Delete a chat session.

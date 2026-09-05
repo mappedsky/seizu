@@ -2,10 +2,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from reporting.schema.ids import STORE_ID_MAX_LENGTH, STORE_ID_PATTERN
 from reporting.schema.model_profiles import ResolvedModelProfile, SelectableReasoningEffort
 from reporting.schema.reporting_config import ScheduleSpec
 
-CHAT_THREAD_ID_PATTERN = r"^[0-9]+$"
+# A thread is addressed by the id the report store minted for it, so the
+# thread rule is just the store's id rule under a name the routes read better.
+CHAT_THREAD_ID_PATTERN = STORE_ID_PATTERN
+CHAT_THREAD_ID_MAX_LENGTH = STORE_ID_MAX_LENGTH
 
 
 class ChatTurnRequest(BaseModel):
@@ -178,7 +182,7 @@ class ChatTurnItem(BaseModel):
     """
 
     turn_id: str
-    thread_id: str = Field(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN)
+    thread_id: str = Field(min_length=1, max_length=CHAT_THREAD_ID_MAX_LENGTH, pattern=CHAT_THREAD_ID_PATTERN)
     user_id: str
     message_id: str = Field(min_length=1, max_length=128)
     text_id: str = Field(min_length=1, max_length=128)

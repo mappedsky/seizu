@@ -29,6 +29,7 @@ from reporting.services import chat_turns
 from reporting.services.chat_budget import BudgetController
 from reporting.services.report_store import base as base_store
 from reporting.services.report_store.base import chat_turn_execution_bound_seconds
+from reporting.services.report_store.sql import generate_report_id
 from tests.unit.reporting.model_profile_test_utils import resolved_model_profile
 
 _FAKE_USER = User(
@@ -1109,6 +1110,38 @@ async def test_create_chat_session_rejects_client_thread_id(mocker):
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/chat/sessions", json={"thread_id": "legacy", "title": "Legacy"})
+
+    assert response.status_code == 422
+
+
+async def test_chat_session_routes_admit_a_freshly_minted_id(mocker):
+    """The routes have to admit the id shape the store actually mints.
+
+    Nothing else holds those two together, and the ids are not written by hand
+    anywhere a user can reach: when ``generate_report_id`` moved from Snowflake
+    integers to UUIDv7, the digits-only route rule stayed behind and every
+    session created after that answered 422 to its own PATCH.
+    """
+    thread_id = generate_report_id()
+    _patch_chat_sessions(mocker, [("test-user-id", thread_id)])
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        fetched = await client.get(f"/api/v1/chat/sessions/{thread_id}")
+        renamed = await client.patch(f"/api/v1/chat/sessions/{thread_id}", json={"title": "Named"})
+
+    assert fetched.status_code == 200
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Named"
+
+
+async def test_chat_session_rejects_an_id_of_neither_shape(mocker):
+    """Widening the rule to cover UUIDs must not turn it into "any string"."""
+    _patch_chat_sessions(mocker)
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch("/api/v1/chat/sessions/not-an-id", json={"title": "Named"})
 
     assert response.status_code == 422
 

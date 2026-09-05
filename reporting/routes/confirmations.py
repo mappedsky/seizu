@@ -1,23 +1,22 @@
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 
 from reporting.authnz import CurrentUser, get_current_user
-from reporting.schema.chat import CHAT_THREAD_ID_PATTERN
+from reporting.schema.chat import CHAT_THREAD_ID_MAX_LENGTH, CHAT_THREAD_ID_PATTERN
 from reporting.schema.confirmations import (
     ActionConfirmationPublic,
     ConfirmationDecisionRequest,
     ConfirmationListResponse,
     ConfirmationResponse,
 )
+from reporting.schema.ids import STORE_ID_MAX_LENGTH, STORE_ID_PATTERN
 from reporting.services import action_confirmations, report_store
 
 router = APIRouter()
 
-_CONFIRMATION_ID_PATTERN = r"^[0-9]{1,20}$"
-
 
 @router.get("/api/v1/confirmations", response_model=ConfirmationListResponse)
 async def list_confirmations(
-    thread_id: str = Query(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    thread_id: str = Query(min_length=1, max_length=CHAT_THREAD_ID_MAX_LENGTH, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(get_current_user),
 ) -> ConfirmationListResponse:
     confirmations = await report_store.list_action_confirmations(
@@ -37,7 +36,7 @@ async def list_confirmations(
 
 @router.get("/api/v1/confirmations/batch/{batch_id}", response_model=ConfirmationListResponse)
 async def list_batch_confirmations(
-    batch_id: str = Path(min_length=1, max_length=20, pattern=_CONFIRMATION_ID_PATTERN),
+    batch_id: str = Path(min_length=1, max_length=STORE_ID_MAX_LENGTH, pattern=STORE_ID_PATTERN),
     current: CurrentUser = Depends(get_current_user),
 ) -> ConfirmationListResponse:
     batch = await report_store.list_batch_action_confirmations(
@@ -55,7 +54,7 @@ async def list_batch_confirmations(
 
 @router.get("/api/v1/confirmations/{confirmation_id}", response_model=ConfirmationResponse)
 async def get_confirmation(
-    confirmation_id: str = Path(min_length=1, max_length=20, pattern=_CONFIRMATION_ID_PATTERN),
+    confirmation_id: str = Path(min_length=1, max_length=STORE_ID_MAX_LENGTH, pattern=STORE_ID_PATTERN),
     current: CurrentUser = Depends(get_current_user),
 ) -> ConfirmationResponse:
     confirmation = await report_store.get_action_confirmation(confirmation_id, user_id=current.user.user_id)
@@ -66,7 +65,7 @@ async def get_confirmation(
 
 @router.post("/api/v1/confirmations/{confirmation_id}/decision", response_model=ConfirmationResponse)
 async def decide_confirmation(
-    confirmation_id: str = Path(min_length=1, max_length=20, pattern=_CONFIRMATION_ID_PATTERN),
+    confirmation_id: str = Path(min_length=1, max_length=STORE_ID_MAX_LENGTH, pattern=STORE_ID_PATTERN),
     body: ConfirmationDecisionRequest = Body(...),
     current: CurrentUser = Depends(get_current_user),
 ) -> ConfirmationResponse:

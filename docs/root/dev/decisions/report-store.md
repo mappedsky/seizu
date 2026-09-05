@@ -192,3 +192,10 @@ machine ID, and its canonical string representation crosses JSON/JavaScript
 boundaries without integer precision loss. Snowflake identifiers required every
 replica to coordinate a machine ID and were unsafe when consumers treated them
 as JavaScript numbers.
+
+Staying a string is not by itself enough for an identifier to survive the trip:
+a route that constrains the *shape* of an id it accepts has to admit both forms,
+because both address live rows and neither is written by hand. `STORE_ID_PATTERN`
+in `reporting/schema/ids.py` is that rule, and every path, query and body field
+carrying a store-minted id is validated against it rather than against a locally
+written pattern.

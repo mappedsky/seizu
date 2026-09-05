@@ -5,6 +5,7 @@ from reporting.authnz import CurrentUser, get_current_user
 from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import User
+from reporting.services.report_store.sql import generate_report_id
 
 _USER = User(
     user_id="user-1",
@@ -16,8 +17,10 @@ _USER = User(
 )
 
 
-_CONFIRMATION_ID = "123456789012345678"
-_BATCH_ID = "123456789012345679"
+# Minted the way the store mints them, so the routes are exercised against the
+# id shape they actually receive rather than a hand-written one.
+_CONFIRMATION_ID = generate_report_id()
+_BATCH_ID = generate_report_id()
 
 
 def _confirmation(expires_at: str = "2099-01-01T00:30:00+00:00") -> ActionConfirmation:
