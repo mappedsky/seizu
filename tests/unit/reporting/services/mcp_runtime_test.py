@@ -1044,6 +1044,12 @@ async def test_chat_skill_listing_includes_triggers_in_description(mocker):
     assert "trigger phrases" in prompts[0].description
     assert "Investigate a GitHub organization" in prompts[0].description
     assert "Investigate a specific GitHub repository" in prompts[0].description
+    assert prompts[0].meta == {
+        mcp_runtime.SKILL_TOOLS_META_KEY: [],
+        mcp_runtime.SKILL_ID_META_KEY: "security__summarize",
+        mcp_runtime.SKILL_NAME_META_KEY: "Summarize",
+        mcp_runtime.SKILL_VERSION_META_KEY: 1,
+    }
 
 
 async def test_plugin_shadows_legacy_skill_and_renders_materialized_package(mocker):
@@ -2138,15 +2144,19 @@ def _trace(mocker) -> _RecordingTracer:
 
 async def test_a_tool_call_is_traced_with_its_outcome(mocker):
     tracer = _trace(mocker)
+    mocker.patch.object(mcp_runtime.telemetry.settings, "TELEMETRY_RECORD_CONTENT", True)
+    mocker.patch.object(mcp_runtime.telemetry.settings, "TELEMETRY_CONTENT_MAX_CHARS", 20_000)
 
     async def _ok() -> tuple[list[Any], Any]:
-        return [], None
+        return [mcp_runtime.TextContent(type="text", text='{"rows": [1]}')], None
 
-    await mcp_runtime._guarded("graph__query", _ok())
+    await mcp_runtime._guarded("graph__query", _ok(), {"query": "RETURN 1"})
 
     name, span = tracer.spans[0]
     assert name == "tool graph__query"
     assert span.attributes["seizu.outcome"] == "ok"
+    assert json.loads(span.attributes["seizu.arguments"]) == {"query": "RETURN 1"}
+    assert span.attributes["seizu.result"] == '{"rows": [1]}'
 
 
 async def test_a_tools_own_failure_is_visible_on_its_span(mocker):

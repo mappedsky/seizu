@@ -881,6 +881,14 @@ def _skill_discovery_tools(
 
         if name not in skills_by_name:
             return f"[unknown skill {name!r}. Use find_seizu_skills to see what is available.]"
+        skill_meta = getattr(skills_by_name[name], "meta", None) or {}
+        telemetry.record_skill(
+            skill_id=str(skill_meta.get(_rt.SKILL_ID_META_KEY) or ""),
+            skill_name=str(
+                skill_meta.get(_rt.SKILL_NAME_META_KEY) or getattr(skills_by_name[name], "title", "") or name
+            ),
+            skill_version=int(skill_meta.get(_rt.SKILL_VERSION_META_KEY) or 0),
+        )
         try:
             arguments = json.loads(arguments_json or "{}")
         except ValueError as exc:
@@ -1132,9 +1140,15 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         self, input: Any, config: Any, current: Any, scope: str, phase: str, **kwargs: Any
     ) -> Any:
         normalized = self._cacheable(self._normalize(input))
+        telemetry.set_attributes(current, input_messages=telemetry.prompt(str(normalized)))
         controller = chat_budget.current_budget_controller()
         if controller is None:
-            return await self._model.ainvoke(normalized, config=config, **kwargs)
+            response = await self._model.ainvoke(normalized, config=config, **kwargs)
+            telemetry.set_attributes(
+                current,
+                response=telemetry.content(message_text(getattr(response, "content", ""))),
+            )
+            return response
 
         # Every inner LLM call funnels through here, so this is the one place
         # the sandbox subagent's spend can be seen at all. Reserving (rather
@@ -1217,7 +1231,7 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             # The thinking itself. The sub-agent does not stream, so this reads
             # the finished message rather than accumulating deltas as the outer
             # path does. Content, so opt-in (AGT-026, AGT-033).
-            reasoning=telemetry.content(_chunk_reasoning_delta(response) or "", 4000),
+            reasoning=telemetry.content(_chunk_reasoning_delta(response) or ""),
             cost_usd=cost_usd,
             cache_read_tokens=usage.cache_read_tokens,
             usage_estimated=estimated,
@@ -1324,13 +1338,21 @@ def _wrap_with_detail_events(
                         current,
                         outcome="error",
                         error_type=exc.__class__.__name__,
-                        error_text=telemetry.content(str(exc), 400),
+                        error_text=telemetry.content(str(exc)),
                     )
                     child["status"] = "error"
                     child["body"] = _truncate(str(exc), _CHILD_BODY_MAX)
                     _emit_section("running")
                     raise
-                telemetry.set_attributes(current, outcome="ok")
+                telemetry.set_attributes(
+                    current,
+                    outcome="ok",
+                    arguments=telemetry.content(json.dumps(kwargs, default=str)),
+                    result=telemetry.content(str(out) if out is not None else ""),
+                    rendered_skill=(
+                        telemetry.prompt(str(out) if out is not None else "") if _name == "load_seizu_skill" else ""
+                    ),
+                )
             child["status"] = "completed"
             body = str(out) if out is not None else ""
             child["body"] = _truncate(body, _CHILD_BODY_MAX)

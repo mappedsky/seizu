@@ -2760,3 +2760,28 @@ first is rejected by the store's exactly-one-enabled-default invariant, while
 selecting the target first atomically transfers that role without an invalid
 intermediate state. Running the section first gives later seedable resources a
 stable profile catalog to reference.
+
+## AGT-047 — Trace content separates prompts from results and identifies skills
+
+**Applies to:** `telemetry.py`, chat model/tool spans, skill prompt metadata;
+`TELEMETRY_RECORD_CONTENT`, `TELEMETRY_RECORD_PROMPTS`,
+`TELEMETRY_CONTENT_MAX_CHARS`
+
+Skill identity is non-content trace metadata. A listed skill carries its stable
+skill id, display name, and immutable revision into the chat tool spec; the
+primary rendered skill is inherited by the step and its descendant model/tool
+spans. This makes runs from two revisions comparable without exporting their
+instructions.
+
+Tool arguments and successful results follow the existing content opt-in.
+System prompts, model inputs, and rendered skill bodies use a separate prompt
+opt-in because they are larger and expose the complete instruction context.
+Both switches remain off by default and share one operator-configured per-
+attribute character bound.
+
+**Why:** output-only traces identify a bad answer but cannot reproduce what led
+to it, and spans without skill revision identity cannot form the before/after
+populations needed to improve a skill. Prompt capture is materially more
+sensitive than bounded action evidence, so accepting the latter must not imply
+accepting the former. A shared limit makes the amount exported an operator
+choice instead of a collection of code-site constants.

@@ -15,7 +15,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import User
-from reporting.services import chat_context, chat_graph, chat_models, sandbox_session
+from reporting.services import chat_context, chat_graph, chat_models, mcp_runtime, sandbox_session
 from reporting.services.chat_messages import MessageTag, created_at, has_tag, stamp_created_at
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
 
@@ -4508,6 +4508,23 @@ async def test_the_outer_llm_span_reports_what_the_prompt_cache_served(mocker):
 
     assert recorded["cache_read_tokens"] == 768
     assert recorded["usage_estimated"] is False
+
+
+def test_skill_tool_specs_preserve_trace_identity():
+    prompt = Prompt(
+        name="security__summarize",
+        title="Summarize alerts",
+        description="Summarize alerts",
+        meta={
+            mcp_runtime.SKILL_ID_META_KEY: "security__summarize",
+            mcp_runtime.SKILL_NAME_META_KEY: "Summarize alerts",
+            mcp_runtime.SKILL_VERSION_META_KEY: 3,
+        },
+    )
+
+    spec = chat_graph._skill_tool_specs([prompt])[0]
+
+    assert (spec.skill_id, spec.skill_name, spec.skill_version) == ("security__summarize", "Summarize alerts", 3)
 
 
 def test_tool_result_context_budget_is_measured_in_tokens_not_characters():

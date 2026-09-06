@@ -208,6 +208,9 @@ class ChatToolSpec:
     input_schema: dict[str, Any]
     llm_name: str | None = None
     annotations: ToolAnnotations | None = None
+    skill_id: str = ""
+    skill_name: str = ""
+    skill_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -607,18 +610,19 @@ async def _chat_agent_node_with_session(state: ChatState, config: RunnableConfig
     ``abandon_sandbox_session``. Without either, an error would leave a sandbox
     *running* until the provider reaped it.
     """
-    try:
-        update = await chat_agent_node(state, config)
-    except BaseException:
-        await sandbox_session.abandon_sandbox_session()
-        raise
-    teardown = await sandbox_session.close_sandbox_session()
-    if teardown.opened:
-        # Written even when empty -- omitting the key keeps a dead id rather
-        # than clearing it, and the digest then advertises receipts under it.
-        # A turn that opened nothing leaves the stored id alone. SBX-006.
-        update["sandbox_id"] = teardown.suspended_id
-    return update
+    with telemetry.skill_scope():
+        try:
+            update = await chat_agent_node(state, config)
+        except BaseException:
+            await sandbox_session.abandon_sandbox_session()
+            raise
+        teardown = await sandbox_session.close_sandbox_session()
+        if teardown.opened:
+            # Written even when empty -- omitting the key keeps a dead id rather
+            # than clearing it, and the digest then advertises receipts under it.
+            # A turn that opened nothing leaves the stored id alone. SBX-006.
+            update["sandbox_id"] = teardown.suspended_id
+        return update
 
 
 async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState:
@@ -1626,6 +1630,8 @@ async def _run_llm_tool_turn(
         model_profile_id=profile_spec.profile_id if profile_spec else "",
         model_profile_name=profile_spec.profile_name if profile_spec else "",
         model_profile_version=profile_spec.profile_version if profile_spec else 0,
+        system_prompt=telemetry.prompt(system_prompt),
+        input_messages=telemetry.prompt(_telemetry_messages(messages)),
     ) as current:
         result = await _run_llm_tool_turn_inner(model, system_prompt, messages, tools, *args, phase=phase, **kwargs)
         telemetry.set_attributes(
@@ -1641,7 +1647,7 @@ async def _run_llm_tool_turn(
             # The thinking itself, for reading back when the question is what a
             # stage deliberated over. Content, so opt-in like every other
             # (AGT-026).
-            reasoning=telemetry.content(result.reasoning_text, 4000),
+            reasoning=telemetry.content(result.reasoning_text),
             cost_usd=result.cost_usd,
             cache_read_tokens=result.cache_read_tokens,
             usage_estimated=result.usage_estimated,
@@ -2426,6 +2432,15 @@ def _json_schema_object(schema: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _telemetry_messages(messages: list[BaseMessage]) -> str:
+    """Serialize the actual model-side message objects without affecting a call."""
+    try:
+        return json.dumps([message.model_dump(mode="json") for message in messages], default=str)
+    except Exception:
+        # Prompt tracing is diagnostic only (AGT-026, AGT-047).
+        return ""
+
+
 def _skill_tool_specs(skills: list[Prompt]) -> list[ChatToolSpec]:
     return [
         ChatToolSpec(
@@ -2433,6 +2448,9 @@ def _skill_tool_specs(skills: list[Prompt]) -> list[ChatToolSpec]:
             kind="skill",
             description=prompt.description or f"{prompt.name} skill",
             input_schema=_prompt_input_schema(prompt),
+            skill_id=str((prompt.meta or {}).get(mcp_runtime.SKILL_ID_META_KEY) or ""),
+            skill_name=str((prompt.meta or {}).get(mcp_runtime.SKILL_NAME_META_KEY) or prompt.title or prompt.name),
+            skill_version=int((prompt.meta or {}).get(mcp_runtime.SKILL_VERSION_META_KEY) or 0),
         )
         for prompt in skills
     ]
@@ -2577,7 +2595,19 @@ async def _run_tool_call_batch(
                 bypass_confirmations=bypass_confirmations,
             )
 
-    return list(await asyncio.gather(*(run_one(request) for request in requests)))
+    results = list(await asyncio.gather(*(run_one(request) for request in requests)))
+    # Gather gives every action an isolated context. Carry the first successful
+    # skill back into the parent loop so later model spans inherit its identity.
+    for result in results:
+        spec = result.request.spec
+        if spec.kind == "skill" and result.blocked is None:
+            telemetry.record_skill(
+                skill_id=spec.skill_id,
+                skill_name=spec.skill_name,
+                skill_version=spec.skill_version,
+            )
+            break
+    return results
 
 
 def _ai_message_for_tool_results(message: AIMessage, results: list[ToolCallResult]) -> AIMessage:
@@ -2627,13 +2657,27 @@ async def _run_tool_call(
     bypass_confirmations: bool = False,
 ) -> ToolCallResult:
     if request.spec.kind == "skill":
-        string_arguments = {key: str(value) for key, value in request.arguments.items()}
-        outcome = await mcp_runtime.render_prompt_for_chat(
-            current_user,
-            request.name,
-            string_arguments,
-            gate_permission=Permission.CHAT_SKILLS_CALL,
+        telemetry.record_skill(
+            skill_id=request.spec.skill_id,
+            skill_name=request.spec.skill_name,
+            skill_version=request.spec.skill_version,
         )
+        string_arguments = {key: str(value) for key, value in request.arguments.items()}
+        with telemetry.span(
+            f"skill {request.name}",
+            arguments=telemetry.content(json.dumps(request.arguments, default=str)),
+        ) as current:
+            outcome = await mcp_runtime.render_prompt_for_chat(
+                current_user,
+                request.name,
+                string_arguments,
+                gate_permission=Permission.CHAT_SKILLS_CALL,
+            )
+            telemetry.set_attributes(
+                current,
+                outcome=outcome.blocked.value if outcome.blocked else "ok",
+                rendered_skill=telemetry.prompt(outcome.text),
+            )
         content = _idempotent_success_content(request, outcome.text)
         return ToolCallResult(
             request=request,

@@ -1417,7 +1417,7 @@ async def _expand_mapped_steps(
             # Planner-authored, so it is content and off unless recording is on
             # (AGT-026). It is what tells a wide trace whether the fan-out was
             # divergent work or a query that should have been one call.
-            reason=telemetry.content(str(parent.get("map_reason") or ""), 200),
+            reason=telemetry.content(str(parent.get("map_reason") or "")),
         ):
             _materialize(plan, by_id, parent, [(item, []) for item in items], source_id)
         _emit_plan(writer, plan)
@@ -2634,30 +2634,37 @@ async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> 
     The sandbox is not this function's to close any more: it belongs to the
     dispatcher and outlives every step in the batch.
     """
+    required = _required_action_spec(kwargs.get("tool_specs") or [], step)
+    skill_id = required.skill_id if required is not None and required.kind == "skill" else ""
+    skill_name = required.skill_name if required is not None and required.kind == "skill" else ""
+    skill_version = required.skill_version if required is not None and required.kind == "skill" else 0
     try:
-        with telemetry.span("chat step", step_id=str(step.get("id", ""))) as current:
-            result = await _run_worker_step(step, **kwargs)
-            telemetry.set_attributes(
-                current,
-                # Why the step ended, which is the question a slow or empty step
-                # actually raises and which no single log line answered (AGT-026).
-                stopped_by=(
-                    "step_share"
-                    if result.get("budget_step_share")
-                    else "run_budget"
-                    if result.get("budget_exhausted")
-                    else "budget_cap"
-                    if result.get("budget_capped")
-                    else "blocked"
-                    if result.get("blocked")
-                    else "error"
-                    if result.get("execution_error")
-                    else "complete"
-                ),
-                output_chars=len(str(result.get("output") or "")),
-                tool_calls=len(result.get("tool_details") or []),
-            )
-            return result
+        with telemetry.skill_scope(skill_id=skill_id, skill_name=skill_name, skill_version=skill_version):
+            with telemetry.span("chat step", step_id=str(step.get("id", ""))) as current:
+                result = await _run_worker_step(step, **kwargs)
+                telemetry.set_attributes(
+                    current,
+                    **telemetry.current_skill_attributes(),
+                    # Why the step ended, which is the question a slow or empty
+                    # step actually raises and which no single log line answered
+                    # (AGT-026).
+                    stopped_by=(
+                        "step_share"
+                        if result.get("budget_step_share")
+                        else "run_budget"
+                        if result.get("budget_exhausted")
+                        else "budget_cap"
+                        if result.get("budget_capped")
+                        else "blocked"
+                        if result.get("blocked")
+                        else "error"
+                        if result.get("execution_error")
+                        else "complete"
+                    ),
+                    output_chars=len(str(result.get("output") or "")),
+                    tool_calls=len(result.get("tool_details") or []),
+                )
+                return result
     finally:
         # In a finally. The step closes its own scope before its summary pass,
         # but an exception in the loop skipped that -- and because open_scope

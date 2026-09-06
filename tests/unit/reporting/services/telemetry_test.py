@@ -84,8 +84,36 @@ def test_content_is_withheld_unless_it_is_asked_for(mocker):
     assert telemetry.content("the user's question") == ""
 
     mocker.patch.object(settings, "TELEMETRY_RECORD_CONTENT", True)
-    assert telemetry.content("the user's question") == "the user's question"
-    assert telemetry.content("x" * 5000, limit=10) == "x" * 10
+    mocker.patch.object(settings, "TELEMETRY_CONTENT_MAX_CHARS", 10)
+    assert telemetry.content("the user's question") == "the user's"
+    assert telemetry.content("x" * 5000) == "x" * 10
+
+
+def test_prompts_have_a_separate_opt_in(mocker):
+    mocker.patch.object(settings, "TELEMETRY_CONTENT_MAX_CHARS", 20)
+    mocker.patch.object(settings, "TELEMETRY_RECORD_CONTENT", True)
+    mocker.patch.object(settings, "TELEMETRY_RECORD_PROMPTS", False)
+    assert telemetry.prompt("system prompt") == ""
+
+    mocker.patch.object(settings, "TELEMETRY_RECORD_PROMPTS", True)
+    assert telemetry.prompt("system prompt") == "system prompt"
+
+
+def test_skill_scope_is_inherited_by_spans_and_restored(mocker):
+    tracer = _enable(mocker)
+
+    with telemetry.skill_scope(skill_id="review", skill_name="Review", skill_version=3):
+        with telemetry.span("chat step"):
+            pass
+    with telemetry.span("unrelated"):
+        pass
+
+    assert tracer.spans[0][1].attributes == {
+        "seizu.skill_id": "review",
+        "seizu.skill_name": "Review",
+        "seizu.skill_version": 3,
+    }
+    assert tracer.spans[1][1].attributes == {}
 
 
 def test_configure_does_nothing_without_an_endpoint(mocker):

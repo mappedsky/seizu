@@ -1039,10 +1039,18 @@ TELEMETRY_OTLP_ENDPOINT = str_env("TELEMETRY_OTLP_ENDPOINT", "")
 # Comma-separated k=v pairs, for the collector's authentication.
 TELEMETRY_OTLP_HEADERS = str_env("TELEMETRY_OTLP_HEADERS", "")
 TELEMETRY_SERVICE_NAME = str_env("TELEMETRY_SERVICE_NAME", "seizu")
-# Whether spans carry prompts, results and tool output. Off by default: a trace
-# of this system contains graph rows and the user's own words, and exporting it
-# sends them wherever the collector is. Timings and token counts do not.
+# Whether spans carry model results and tool input/output. Off by default: a
+# trace of this system contains graph rows and the user's own words, and
+# exporting it sends them wherever the collector is. Timings and token counts
+# do not.
 TELEMETRY_RECORD_CONTENT = bool_env("TELEMETRY_RECORD_CONTENT", False)
+# Prompts are both larger and more sensitive than results, so they have their
+# own opt-in. This includes system prompts, model input messages, and rendered
+# skill bodies.
+TELEMETRY_RECORD_PROMPTS = bool_env("TELEMETRY_RECORD_PROMPTS", False)
+# Maximum characters stored in any one content-bearing span attribute. Set to 0
+# to record no content even when one of the content switches is enabled.
+TELEMETRY_CONTENT_MAX_CHARS = int_env("TELEMETRY_CONTENT_MAX_CHARS", 20_000)
 
 # Optional role-specific models. Empty values inherit CHAT_LLM_MODEL. The
 # economy model is selected for read-only worker/synthesis calls after the run
