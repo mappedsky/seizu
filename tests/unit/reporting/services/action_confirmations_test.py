@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from reporting.schema.confirmations import ActionConfirmation, ActionConfirmationTarget
 from reporting.services import action_confirmations
 
@@ -28,10 +30,6 @@ def _confirmation(status: str = "pending", arguments: dict[str, object] | None =
 
 
 async def test_pending_confirmation_is_bound_to_arguments_hash(mocker):
-    mocker.patch(
-        "reporting.services.action_confirmations.report_store.generate_id",
-        return_value="123456789012345678",
-    )
     create_confirmation = mocker.patch(
         "reporting.services.action_confirmations.report_store.create_action_confirmation",
         side_effect=lambda confirmation: confirmation,
@@ -52,17 +50,13 @@ async def test_pending_confirmation_is_bound_to_arguments_hash(mocker):
     )
 
     assert result is not None
-    assert result.confirmation_id == "123456789012345678"
+    assert UUID(result.confirmation_id).version == 7
     assert result.arguments == {"report_id": "r1", "comment": "new"}
     create_confirmation.assert_awaited_once()
 
 
 async def test_public_arguments_mirror_model_provided_arguments(mocker):
     """Public arguments show user-provided model args as-is when they are already safe."""
-    mocker.patch(
-        "reporting.services.action_confirmations.report_store.generate_id",
-        return_value="123456789012345678",
-    )
     mocker.patch(
         "reporting.services.action_confirmations.report_store.create_action_confirmation",
         side_effect=lambda confirmation: confirmation,

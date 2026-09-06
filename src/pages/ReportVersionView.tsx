@@ -227,7 +227,7 @@ function ReportVersionView() {
         report={reportVersion.config as Report}
         title={reportVersion.name}
         showTitle
-        queryCapabilities={reportVersion.query_capabilities}
+        queryCapabilities={reportVersion.query_capabilities ?? undefined}
         stickyToolbar={false}
       />
     </>

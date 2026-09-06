@@ -390,8 +390,11 @@ function ScheduledQueries() {
             key: actionType,
             label: actionType,
             icon: <BadgeIcon fontSize="small" />,
-            matches: (item) =>
-              item.actions.some((action) => action.action_type === actionType),
+            matches: (item: ScheduledQueryItem) =>
+              item.actions.some(
+                (action: ScheduledQueryItem['actions'][number]) =>
+                  action.action_type === actionType,
+              ),
           })),
         ],
       },

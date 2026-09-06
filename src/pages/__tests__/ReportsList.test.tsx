@@ -33,7 +33,6 @@ const SPACES = [
   {
     space_id: 'sp1',
     name: 'Cloud Security',
-    description: '',
     overview_report_id: 'ovr1',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -66,7 +65,6 @@ const REPORTS: reportsApiModule.ReportListItem[] = [
   {
     report_id: 'r1',
     name: 'Executive Risk',
-    description: '',
     current_version: 3,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-02T00:00:00Z',
@@ -80,7 +78,6 @@ const REPORTS: reportsApiModule.ReportListItem[] = [
   {
     report_id: 'r2',
     name: 'Draft Findings',
-    description: '',
     current_version: 1,
     created_at: '2026-01-03T00:00:00Z',
     updated_at: '2026-01-04T00:00:00Z',

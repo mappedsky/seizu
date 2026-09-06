@@ -145,7 +145,6 @@ function isVisibleAt(
 }
 
 function isPixelWidth(width: ColumnWidth | undefined): boolean {
-  if (typeof width === 'number') return true;
   return typeof width === 'string' && width.trim().endsWith('px');
 }
 
@@ -206,7 +205,9 @@ function getStoredRowsPerPage(
   return parsedValue;
 }
 
-function isResizingDisabled(column: ListTableColumn<unknown>): boolean {
+function isResizingDisabled(
+  column: Pick<ListTableColumn<unknown>, 'key' | 'resizable'>,
+): boolean {
   if (column.resizable !== undefined) return !column.resizable;
   return column.key === 'actions' || column.key === 'row_actions';
 }
@@ -300,7 +301,9 @@ export default function ListTable<T>({
       rowsPerPageOptions,
     );
   });
-  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [columnWidths, setColumnWidths] = useState<
+    Partial<Record<string, number>>
+  >({});
   const [filterText, setFilterText] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [filterAnchorEl, setFilterAnchorEl] = useState<HTMLElement | null>(
@@ -507,8 +510,11 @@ export default function ListTable<T>({
 
       if (typeof assigned === 'number') {
         pixelTotal += Math.max(assigned, minWidth);
-      } else if (isPixelWidth(assigned)) {
-        pixelTotal += Math.max(Number.parseFloat(assigned as string), minWidth);
+      } else if (
+        typeof assigned === 'string' &&
+        assigned.trim().endsWith('px')
+      ) {
+        pixelTotal += Math.max(Number.parseFloat(assigned), minWidth);
       } else if (
         typeof assigned === 'string' &&
         assigned.trim().endsWith('%')

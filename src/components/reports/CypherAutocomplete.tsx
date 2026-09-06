@@ -3,11 +3,9 @@ import { Typography, TextField, Autocomplete } from '@mui/material';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { useLazyCypherQuery } from 'src/hooks/useCypherQuery';
 import { setQueryStringValue } from 'src/components/QueryString';
+import type { InputValue } from 'src/config.context';
 
-interface AutocompleteOption {
-  label?: string;
-  value?: string;
-}
+type AutocompleteOption = InputValue;
 
 interface CypherAutocompleteProps {
   cypher?: string;
@@ -79,22 +77,20 @@ export default function CypherAutocomplete({
   }
 
   const mungedRecords: AutocompleteOption[] = records.map((record) => {
-    const val: AutocompleteOption = {};
-    if ('label' in record) {
-      val.label = record['label'] as string;
-    } else {
-      val.label = record['value'] as string;
-    }
-    val.value = record['value'] as string;
-    return val;
+    const value = String(record['value'] ?? '');
+    return {
+      label: String('label' in record ? (record['label'] ?? value) : value),
+      value,
+    };
   });
 
   // Add a clear/default option only if it isn't already present in the results.
-  const clearOption: AutocompleteOption = inputDefault ?? {};
-  const clearValue = clearOption.value ?? '';
-  const alreadyPresent = mungedRecords.some(
-    (r) => (r.value ?? '') === clearValue,
-  );
+  const clearOption: AutocompleteOption = inputDefault ?? {
+    label: '',
+    value: '',
+  };
+  const clearValue = clearOption.value;
+  const alreadyPresent = mungedRecords.some((r) => r.value === clearValue);
   if (!alreadyPresent) {
     mungedRecords.push(clearOption);
   }
@@ -106,10 +102,10 @@ export default function CypherAutocomplete({
       onChange={(event, newValue) => {
         if (newValue === null || newValue === undefined) {
           setValue?.({ ...value, [inputId || '']: inputDefault });
-          setQueryStringValue(inputId, inputDefault?.value);
+          if (inputId) setQueryStringValue(inputId, inputDefault?.value);
         } else {
           setValue?.({ ...value, [inputId || '']: newValue });
-          setQueryStringValue(inputId, newValue?.value);
+          if (inputId) setQueryStringValue(inputId, newValue?.value);
         }
       }}
       filterSelectedOptions
@@ -118,7 +114,7 @@ export default function CypherAutocomplete({
       handleHomeEndKeys
       id={inputId}
       size={size}
-      getOptionLabel={(option) => option?.label || ''}
+      getOptionLabel={(option) => option.label}
       options={mungedRecords}
       isOptionEqualToValue={(option, val) => {
         if (option?.value === val.value) {

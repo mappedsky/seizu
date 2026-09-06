@@ -19,6 +19,7 @@ def _mock_explain(query_type: str = "r") -> MagicMock:
 async def _validate_with_mocked_neo4j(query: str, query_type: str = "r"):
     with (
         patch("reporting.services.query_validator._get_async_neo4j_client", return_value=_mock_explain(query_type)),
+        patch("reporting.services.query_validator._get_sync_neo4j_client", return_value=MagicMock()),
         patch("reporting.services.query_validator.SchemaValidator") as schema_validator,
         patch("reporting.services.query_validator.PropertiesValidator") as properties_validator,
     ):

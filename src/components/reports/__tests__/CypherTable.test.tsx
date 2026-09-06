@@ -1,4 +1,5 @@
 import { render, screen, cleanup } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import CypherTable from '../CypherTable';
 
@@ -17,7 +18,7 @@ const { useLazyCypherQuery } = require('src/hooks/useCypherQuery');
 
 const theme = createTheme();
 
-function Wrapper({ children }) {
+function Wrapper({ children }: { children: ReactNode }) {
   return <ThemeProvider theme={theme}>{children}</ThemeProvider>;
 }
 

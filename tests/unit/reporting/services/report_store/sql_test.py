@@ -49,6 +49,12 @@ def _model_profile_data(**updates):
     return data
 
 
+def _assert_uuid7(value: str) -> None:
+    parsed = UUID(value)
+    assert parsed.version == 7
+    assert str(parsed) == value
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -244,16 +250,12 @@ async def test_chat_session_list_empty(store):
     assert await store.list_chat_sessions("user-1", limit=10) == []
 
 
-async def test_chat_session_create_and_get(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="thread-abc",
-    )
+async def test_chat_session_create_and_get(store):
     item = await store.create_chat_session("user-1", title="My session")
-    assert item.thread_id == "thread-abc"
+    _assert_uuid7(item.thread_id)
     assert item.title == "My session"
 
-    fetched = await store.get_chat_session("user-1", "thread-abc")
+    fetched = await store.get_chat_session("user-1", item.thread_id)
     assert fetched is not None
     assert fetched.title == "My session"
 
@@ -262,11 +264,7 @@ async def test_chat_session_get_not_found(store):
     assert await store.get_chat_session("user-1", "no-such-thread") is None
 
 
-async def test_chat_session_list_returns_sessions(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        side_effect=["t1", "t2"],
-    )
+async def test_chat_session_list_returns_sessions(store):
     await store.create_chat_session("user-1", title="First")
     await store.create_chat_session("user-1", title="Second")
     sessions = await store.list_chat_sessions("user-1", limit=10)
@@ -288,93 +286,82 @@ async def _backdate_session(store, thread_id: str, updated_at: str) -> None:
         await session.commit()
 
 
-async def test_list_idle_chat_sessions_selects_only_the_stale_ones(store, mocker):
+async def test_list_idle_chat_sessions_selects_only_the_stale_ones(store):
     """The reaper's one cross-user read (SBX-011). Anything it returns is about
     to be deleted, so "recently updated" must never appear in it."""
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        side_effect=["old", "fresh"],
-    )
-    await store.create_chat_session("user-1", title="Old")
+    old = await store.create_chat_session("user-1", title="Old")
     await store.create_chat_session("user-2", title="Fresh")
-    await _backdate_session(store, "old", "2020-01-01T00:00:00+00:00")
+    await _backdate_session(store, old.thread_id, "2020-01-01T00:00:00+00:00")
 
     idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
 
-    assert [(i.user_id, i.thread_id) for i in idle] == [("user-1", "old")]
+    assert [(i.user_id, i.thread_id) for i in idle] == [("user-1", old.thread_id)]
 
 
-async def test_list_idle_chat_sessions_ignores_headless_sessions(store, mocker):
+async def test_list_idle_chat_sessions_ignores_headless_sessions(store):
     """Scheduled run sessions belong to a schedule's history, are bounded by it,
     and never leave a suspended sandbox behind."""
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="run-1",
-    )
-    await store.create_chat_session("user-1", title="Run", origin="scheduled", scheduled_chat_id="sc-1")
-    await _backdate_session(store, "run-1", "2020-01-01T00:00:00+00:00")
+    run = await store.create_chat_session("user-1", title="Run", origin="scheduled", scheduled_chat_id="sc-1")
+    await _backdate_session(store, run.thread_id, "2020-01-01T00:00:00+00:00")
 
     assert await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10) == []
 
 
-async def test_claiming_a_session_that_moved_reports_failure(store, mocker):
+async def test_claiming_a_session_that_moved_reports_failure(store):
     """A conflict means keep, not retry: the conditional UPDATE is the only
     thing standing between a sweep and a conversation its owner just returned
     to."""
-    mocker.patch("reporting.services.report_store.sql.generate_report_id", return_value="t1")
     created = await store.create_chat_session("user-1", title="Test")
 
-    assert await store.claim_chat_session_for_retirement("user-1", "t1", "1999-01-01T00:00:00+00:00") is False
-    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
+    assert (
+        await store.claim_chat_session_for_retirement("user-1", created.thread_id, "1999-01-01T00:00:00+00:00") is False
+    )
+    assert await store.claim_chat_session_for_retirement("user-1", created.thread_id, created.updated_at) is True
 
 
-async def test_a_claimed_session_refuses_further_use(store, mocker):
+async def test_a_claimed_session_refuses_further_use(store):
     """Its checkpoint and sandbox are going away, so a turn must not start
     against it -- and it must not be renamed into looking alive either."""
-    mocker.patch("reporting.services.report_store.sql.generate_report_id", return_value="t1")
     created = await store.create_chat_session("user-1", title="Test")
-    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
+    thread_id = created.thread_id
+    assert await store.claim_chat_session_for_retirement("user-1", thread_id, created.updated_at) is True
 
-    assert await store.touch_chat_session("user-1", "t1") is None
-    assert await store.update_chat_session_title("user-1", "t1", "new") is None
-    assert await store.complete_chat_session_run("user-1", "t1", "success", []) is None
+    assert await store.touch_chat_session("user-1", thread_id) is None
+    assert await store.update_chat_session_title("user-1", thread_id, "new") is None
+    assert await store.complete_chat_session_run("user-1", thread_id, "success", []) is None
 
 
-async def test_a_claimed_session_is_left_untouched_by_concurrent_writes(store, mocker):
+async def test_a_claimed_session_is_left_untouched_by_concurrent_writes(store):
     """Not just refused -- unmodified. The guard is evaluated by the database as
     part of the write, so there is no window where a claim lands between a read
     and its update and the update commits anyway."""
-    mocker.patch("reporting.services.report_store.sql.generate_report_id", return_value="t1")
     created = await store.create_chat_session("user-1", title="Test")
-    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
+    thread_id = created.thread_id
+    assert await store.claim_chat_session_for_retirement("user-1", thread_id, created.updated_at) is True
 
-    assert await store.touch_chat_session("user-1", "t1") is None
-    assert await store.update_chat_session_title("user-1", "t1", "renamed") is None
+    assert await store.touch_chat_session("user-1", thread_id) is None
+    assert await store.update_chat_session_title("user-1", thread_id, "renamed") is None
 
-    unchanged = await store.get_chat_session("user-1", "t1")
+    unchanged = await store.get_chat_session("user-1", thread_id)
     assert unchanged is not None
     assert (unchanged.updated_at, unchanged.title) == (created.updated_at, "Test")
 
 
-async def test_a_claim_can_be_retried_after_a_failed_sweep(store, mocker):
+async def test_a_claim_can_be_retried_after_a_failed_sweep(store):
     """A pass that died between claiming and finishing has to be resumable, or
     the session is stuck claimed and its transcript is never collected."""
-    mocker.patch("reporting.services.report_store.sql.generate_report_id", return_value="t1")
     created = await store.create_chat_session("user-1", title="Test")
+    thread_id = created.thread_id
 
-    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
-    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
+    assert await store.claim_chat_session_for_retirement("user-1", thread_id, created.updated_at) is True
+    assert await store.claim_chat_session_for_retirement("user-1", thread_id, created.updated_at) is True
 
 
-async def test_chat_session_touch_updates_timestamp(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="t1",
-    )
-    await store.create_chat_session("user-1", title="Test")
-    result = await store.touch_chat_session("user-1", "t1")
+async def test_chat_session_touch_updates_timestamp(store):
+    created = await store.create_chat_session("user-1", title="Test")
+    result = await store.touch_chat_session("user-1", created.thread_id)
     assert result is not None
-    assert result.thread_id == "t1"
+    assert result.thread_id == created.thread_id
 
 
 async def test_chat_session_touch_missing_returns_none(store):
@@ -382,11 +369,7 @@ async def test_chat_session_touch_missing_returns_none(store):
     assert result is None
 
 
-async def test_scheduled_chat_session_records_run_status_and_errors(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="t1",
-    )
+async def test_scheduled_chat_session_records_run_status_and_errors(store):
     created = await store.create_chat_session(
         "user-1",
         title="Scheduled",
@@ -397,7 +380,7 @@ async def test_scheduled_chat_session_records_run_status_and_errors(store, mocke
 
     result = await store.complete_chat_session_run(
         "user-1",
-        "t1",
+        created.thread_id,
         "partial",
         ["Planner fallback"],
     )
@@ -407,13 +390,9 @@ async def test_scheduled_chat_session_records_run_status_and_errors(store, mocke
     assert result.run_errors == ["Planner fallback"]
 
 
-async def test_chat_session_update_title(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="t1",
-    )
-    await store.create_chat_session("user-1", title="Old")
-    result = await store.update_chat_session_title("user-1", "t1", "New")
+async def test_chat_session_update_title(store):
+    created = await store.create_chat_session("user-1", title="Old")
+    result = await store.update_chat_session_title("user-1", created.thread_id, "New")
     assert result is not None
     assert result.title == "New"
 
@@ -423,26 +402,17 @@ async def test_chat_session_update_title_missing_returns_none(store):
     assert result is None
 
 
-async def test_chat_session_delete(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="t1",
-    )
-    await store.create_chat_session("user-1", title="To delete")
-    assert await store.delete_chat_session("user-1", "t1") is True
-    assert await store.get_chat_session("user-1", "t1") is None
+async def test_chat_session_delete(store):
+    created = await store.create_chat_session("user-1", title="To delete")
+    assert await store.delete_chat_session("user-1", created.thread_id) is True
+    assert await store.get_chat_session("user-1", created.thread_id) is None
 
 
 async def test_chat_session_delete_missing_returns_false(store):
     assert await store.delete_chat_session("user-1", "no-such") is False
 
 
-async def test_workflow_chat_session_is_hidden_and_starts_running(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="workflow-1",
-    )
-
+async def test_workflow_chat_session_is_hidden_and_starts_running(store):
     created = await store.create_chat_session(
         "user-1",
         title="Workflow",
@@ -454,12 +424,8 @@ async def test_workflow_chat_session_is_hidden_and_starts_running(store, mocker)
     assert await store.list_chat_sessions("user-1", limit=10) == []
 
 
-async def test_delete_scheduled_chat_removes_associated_sessions(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        side_effect=["sc-1", "thread-1"],
-    )
-    await store.create_scheduled_chat(
+async def test_delete_scheduled_chat_removes_associated_sessions(store):
+    schedule = await store.create_scheduled_chat(
         name="Digest",
         prompt="Summarize",
         schedule={"type": "hourly", "interval_hours": 1},
@@ -467,23 +433,19 @@ async def test_delete_scheduled_chat_removes_associated_sessions(store, mocker):
         enabled=True,
         created_by="user-1",
     )
-    await store.create_chat_session(
+    run = await store.create_chat_session(
         "user-1",
         title="Run",
         origin="scheduled",
-        scheduled_chat_id="sc-1",
+        scheduled_chat_id=schedule.scheduled_chat_id,
     )
 
-    assert await store.delete_scheduled_chat("sc-1") is True
-    assert await store.get_chat_session("user-1", "thread-1") is None
+    assert await store.delete_scheduled_chat(schedule.scheduled_chat_id) is True
+    assert await store.get_chat_session("user-1", run.thread_id) is None
 
 
-async def test_partial_scheduled_chat_result_clears_stale_errors(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sc-1",
-    )
-    await store.create_scheduled_chat(
+async def test_partial_scheduled_chat_result_clears_stale_errors(store):
+    schedule = await store.create_scheduled_chat(
         name="Digest",
         prompt="Summarize",
         schedule={"type": "hourly", "interval_hours": 1},
@@ -491,10 +453,10 @@ async def test_partial_scheduled_chat_result_clears_stale_errors(store, mocker):
         enabled=True,
         created_by="user-1",
     )
-    await store.record_scheduled_chat_result("sc-1", "failure", error="boom")
-    await store.record_scheduled_chat_result("sc-1", "partial")
+    await store.record_scheduled_chat_result(schedule.scheduled_chat_id, "failure", error="boom")
+    await store.record_scheduled_chat_result(schedule.scheduled_chat_id, "partial")
 
-    item = await store.get_scheduled_chat("sc-1")
+    item = await store.get_scheduled_chat(schedule.scheduled_chat_id)
     assert item is not None
     assert item.last_run_status == "partial"
     assert item.last_errors == []
@@ -603,6 +565,7 @@ async def test_admission_reports_what_it_did(store):
 
     assert admission.outcome == "created"
     assert admission.turn is not None
+    _assert_uuid7(admission.turn.turn_id)
 
 
 async def test_first_admission_locks_profile_but_not_reasoning_effort(store):
@@ -1081,17 +1044,27 @@ async def test_list_expired_chat_turns_selects_only_expired(store):
 # ---------------------------------------------------------------------------
 
 
+async def test_create_scheduled_chat_mints_uuidv7(store):
+    created = await store.create_scheduled_chat(
+        name="Digest",
+        prompt="Summarize",
+        schedule=None,
+        watch_scans=[],
+        enabled=True,
+        created_by="user-1",
+    )
+
+    _assert_uuid7(created.scheduled_chat_id)
+    assert await store.get_scheduled_chat(created.scheduled_chat_id) == created
+
+
 async def test_get_scheduled_chat_returns_none_for_unknown(store):
     result = await store.get_scheduled_chat("does-not-exist")
     assert result is None
 
 
-async def test_update_scheduled_chat_bumps_version(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sc-u",
-    )
-    await store.create_scheduled_chat(
+async def test_update_scheduled_chat_bumps_version(store):
+    created = await store.create_scheduled_chat(
         name="Original",
         prompt="Prompt",
         schedule={"type": "hourly", "interval_hours": 1},
@@ -1101,7 +1074,7 @@ async def test_update_scheduled_chat_bumps_version(store, mocker):
     )
 
     updated = await store.update_scheduled_chat(
-        "sc-u",
+        created.scheduled_chat_id,
         name="Renamed",
         prompt="New prompt",
         schedule=None,
@@ -1130,12 +1103,8 @@ async def test_update_nonexistent_scheduled_chat_returns_none(store):
     assert result is None
 
 
-async def test_list_scheduled_chat_versions_returns_in_desc_order(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sc-v",
-    )
-    await store.create_scheduled_chat(
+async def test_list_scheduled_chat_versions_returns_in_desc_order(store):
+    created = await store.create_scheduled_chat(
         name="V",
         prompt="P",
         schedule=None,
@@ -1144,7 +1113,7 @@ async def test_list_scheduled_chat_versions_returns_in_desc_order(store, mocker)
         created_by="user-1",
     )
     await store.update_scheduled_chat(
-        "sc-v",
+        created.scheduled_chat_id,
         name="V2",
         prompt="P2",
         schedule=None,
@@ -1153,17 +1122,13 @@ async def test_list_scheduled_chat_versions_returns_in_desc_order(store, mocker)
         updated_by="user-1",
     )
 
-    versions = await store.list_scheduled_chat_versions("sc-v")
+    versions = await store.list_scheduled_chat_versions(created.scheduled_chat_id)
 
     assert [v.version for v in versions] == [2, 1]
 
 
-async def test_get_scheduled_chat_version_returns_correct_version(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sc-gv",
-    )
-    await store.create_scheduled_chat(
+async def test_get_scheduled_chat_version_returns_correct_version(store):
+    created = await store.create_scheduled_chat(
         name="GV",
         prompt="P",
         schedule=None,
@@ -1172,12 +1137,12 @@ async def test_get_scheduled_chat_version_returns_correct_version(store, mocker)
         created_by="user-1",
     )
 
-    v = await store.get_scheduled_chat_version("sc-gv", 1)
+    v = await store.get_scheduled_chat_version(created.scheduled_chat_id, 1)
     assert v is not None
     assert v.version == 1
     assert v.name == "GV"
 
-    missing = await store.get_scheduled_chat_version("sc-gv", 99)
+    missing = await store.get_scheduled_chat_version(created.scheduled_chat_id, 99)
     assert missing is None
 
 
@@ -1347,16 +1312,12 @@ async def test_create_action_confirmation_replaces_expired_pending_dedup(store):
     assert expired.status == "expired"
 
 
-async def test_list_reports_returns_created_reports(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="My Report", created_by="user@example.com")
+async def test_list_reports_returns_created_reports(store):
+    created = await store.create_report(name="My Report", created_by="user@example.com")
     result = await store.list_reports()
     assert len(result) == 1
     assert isinstance(result[0], ReportListItem)
-    assert result[0].report_id == "rid1"
+    assert result[0].report_id == created.report_id
     assert result[0].name == "My Report"
     assert result[0].current_version == 1
 
@@ -1370,34 +1331,26 @@ async def test_get_report_latest_not_found(store):
     assert await store.get_report_latest("missing") is None
 
 
-async def test_get_report_latest_returns_initial_version(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r1", created_by="user@example.com")
-    result = await store.get_report_latest("rid1")
+async def test_get_report_latest_returns_initial_version(store):
+    created = await store.create_report(name="r1", created_by="user@example.com")
+    result = await store.get_report_latest(created.report_id)
     assert result is not None
     assert result.version == 1
     assert result.config == {"name": "r1", "rows": [], "schema_version": 1}
     assert result.comment == "Initial version"
 
 
-async def test_get_report_latest_returns_version(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r1", created_by="user@example.com")
+async def test_get_report_latest_returns_version(store):
+    created = await store.create_report(name="r1", created_by="user@example.com")
     await store.save_report_version(
-        report_id="rid1",
+        report_id=created.report_id,
         config={"rows": [{"name": "r1"}]},
         created_by="user@example.com",
         comment="v1",
     )
-    result = await store.get_report_latest("rid1")
+    result = await store.get_report_latest(created.report_id)
     assert isinstance(result, ReportVersion)
-    assert result.report_id == "rid1"
+    assert result.report_id == created.report_id
     assert result.name == "r1"
     assert result.version == 2
     assert result.config == {"name": "r1", "rows": [{"name": "r1"}]}
@@ -1405,15 +1358,11 @@ async def test_get_report_latest_returns_version(store, mocker):
     assert result.comment == "v1"
 
 
-async def test_get_report_latest_returns_newest_after_update(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r", created_by="u@x.com", access=ReportAccess(scope="public"))
-    await store.save_report_version(report_id="rid1", config={"v": 1}, created_by="u@x.com")
-    await store.save_report_version(report_id="rid1", config={"v": 2}, created_by="u@x.com")
-    result = await store.get_report_latest("rid1")
+async def test_get_report_latest_returns_newest_after_update(store):
+    created = await store.create_report(name="r", created_by="u@x.com", access=ReportAccess(scope="public"))
+    await store.save_report_version(report_id=created.report_id, config={"v": 1}, created_by="u@x.com")
+    await store.save_report_version(report_id=created.report_id, config={"v": 2}, created_by="u@x.com")
+    result = await store.get_report_latest(created.report_id)
     assert result.version == 3
     assert result.config == {"name": "r", "v": 2}
 
@@ -1427,18 +1376,14 @@ async def test_get_report_version_not_found(store):
     assert await store.get_report_version("missing", 1) is None
 
 
-async def test_get_report_version_found(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r", created_by="u@x.com")
-    await store.save_report_version(report_id="rid1", config={"v": 1}, created_by="u@x.com")
-    await store.save_report_version(report_id="rid1", config={"v": 2}, created_by="u@x.com")
+async def test_get_report_version_found(store):
+    created = await store.create_report(name="r", created_by="u@x.com")
+    await store.save_report_version(report_id=created.report_id, config={"v": 1}, created_by="u@x.com")
+    await store.save_report_version(report_id=created.report_id, config={"v": 2}, created_by="u@x.com")
 
-    v1 = await store.get_report_version("rid1", 1)
-    v2 = await store.get_report_version("rid1", 2)
-    v3 = await store.get_report_version("rid1", 3)
+    v1 = await store.get_report_version(created.report_id, 1)
+    v2 = await store.get_report_version(created.report_id, 2)
+    v3 = await store.get_report_version(created.report_id, 3)
     assert v1.version == 1
     assert v1.name == "r"
     assert v1.config == {"name": "r", "rows": [], "schema_version": 1}
@@ -1457,29 +1402,21 @@ async def test_list_report_versions_empty(store):
     assert await store.list_report_versions("missing") == []
 
 
-async def test_list_report_versions_contains_initial_version(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r", created_by="u@x.com")
-    versions = await store.list_report_versions("rid1")
+async def test_list_report_versions_contains_initial_version(store):
+    created = await store.create_report(name="r", created_by="u@x.com")
+    versions = await store.list_report_versions(created.report_id)
     assert len(versions) == 1
     assert versions[0].version == 1
     assert versions[0].config == {"name": "r", "rows": [], "schema_version": 1}
 
 
-async def test_list_report_versions_newest_first(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r", created_by="u@x.com")
-    await store.save_report_version(report_id="rid1", config={"v": 1}, created_by="u@x.com")
-    await store.save_report_version(report_id="rid1", config={"v": 2}, created_by="u@x.com")
-    await store.save_report_version(report_id="rid1", config={"v": 3}, created_by="u@x.com")
+async def test_list_report_versions_newest_first(store):
+    created = await store.create_report(name="r", created_by="u@x.com")
+    await store.save_report_version(report_id=created.report_id, config={"v": 1}, created_by="u@x.com")
+    await store.save_report_version(report_id=created.report_id, config={"v": 2}, created_by="u@x.com")
+    await store.save_report_version(report_id=created.report_id, config={"v": 3}, created_by="u@x.com")
 
-    versions = await store.list_report_versions("rid1")
+    versions = await store.list_report_versions(created.report_id)
     assert len(versions) == 4
     assert versions[0].version == 4
     assert versions[1].version == 3
@@ -1493,25 +1430,23 @@ async def test_list_report_versions_newest_first(store, mocker):
 
 
 def test_generate_report_id_returns_unique_uuidv7_values():
-    first = UUID(sql_module.generate_report_id())
-    second = UUID(sql_module.generate_report_id())
+    first_value = sql_module.generate_report_id()
+    second_value = sql_module.generate_report_id()
+    _assert_uuid7(first_value)
+    _assert_uuid7(second_value)
+    first = UUID(first_value)
+    second = UUID(second_value)
 
-    assert first.version == 7
-    assert second.version == 7
     assert first != second
 
 
-async def test_create_report_returns_list_item(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="report-42",
-    )
+async def test_create_report_returns_list_item(store):
     result = await store.create_report(
         name="My Report",
         created_by="creator@example.com",
     )
     assert isinstance(result, ReportListItem)
-    assert result.report_id == "report-42"
+    _assert_uuid7(result.report_id)
     assert result.name == "My Report"
     assert result.current_version == 1
 
@@ -1526,14 +1461,10 @@ async def test_save_report_version_returns_none_for_missing_report(store):
     assert result is None
 
 
-async def test_save_report_version_increments_version(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r", created_by="u@x.com")
+async def test_save_report_version_increments_version(store):
+    created = await store.create_report(name="r", created_by="u@x.com")
     result = await store.save_report_version(
-        report_id="rid1",
+        report_id=created.report_id,
         config={"v": 2},
         created_by="editor@example.com",
         comment="update",
@@ -1544,14 +1475,10 @@ async def test_save_report_version_increments_version(store, mocker):
     assert result.comment == "update"
 
 
-async def test_save_report_version_does_not_change_name_without_config_name(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="Original Name", created_by="u@x.com")
+async def test_save_report_version_does_not_change_name_without_config_name(store):
+    created = await store.create_report(name="Original Name", created_by="u@x.com")
     await store.save_report_version(
-        report_id="rid1",
+        report_id=created.report_id,
         config={"rows": []},
         created_by="u@x.com",
     )
@@ -1560,20 +1487,16 @@ async def test_save_report_version_does_not_change_name_without_config_name(stor
     assert result[0].current_version == 2
 
 
-async def test_save_report_version_updates_name_from_config(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="Original Name", created_by="u@x.com")
+async def test_save_report_version_updates_name_from_config(store):
+    created = await store.create_report(name="Original Name", created_by="u@x.com")
     version = await store.save_report_version(
-        report_id="rid1",
+        report_id=created.report_id,
         config={"name": "Renamed Report", "rows": []},
         created_by="u@x.com",
     )
 
     reports = await store.list_reports()
-    latest = await store.get_report_latest("rid1")
+    latest = await store.get_report_latest(created.report_id)
 
     assert version.name == "Renamed Report"
     assert reports[0].name == "Renamed Report"
@@ -1581,14 +1504,10 @@ async def test_save_report_version_updates_name_from_config(store, mocker):
     assert latest.config["name"] == "Renamed Report"
 
 
-async def test_save_report_version_ignores_blank_config_name(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="Original Name", created_by="u@x.com")
+async def test_save_report_version_ignores_blank_config_name(store):
+    created = await store.create_report(name="Original Name", created_by="u@x.com")
     version = await store.save_report_version(
-        report_id="rid1",
+        report_id=created.report_id,
         config={"name": "   ", "rows": []},
         created_by="u@x.com",
     )
@@ -1599,16 +1518,12 @@ async def test_save_report_version_ignores_blank_config_name(store, mocker):
     assert reports[0].name == "Original Name"
 
 
-async def test_save_report_version_latest_reflects_new_version(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r", created_by="u@x.com")
-    await store.save_report_version(report_id="rid1", config={"v": 1}, created_by="u@x.com")
-    await store.save_report_version(report_id="rid1", config={"v": 2}, created_by="u@x.com")
+async def test_save_report_version_latest_reflects_new_version(store):
+    created = await store.create_report(name="r", created_by="u@x.com")
+    await store.save_report_version(report_id=created.report_id, config={"v": 1}, created_by="u@x.com")
+    await store.save_report_version(report_id=created.report_id, config={"v": 2}, created_by="u@x.com")
 
-    latest = await store.get_report_latest("rid1")
+    latest = await store.get_report_latest(created.report_id)
     assert latest.version == 3
 
 
@@ -1629,45 +1544,32 @@ async def test_set_dashboard_report_false_for_missing_report(store):
     assert await store.set_dashboard_report("nonexistent") is False
 
 
-async def test_set_dashboard_report_succeeds_for_empty_report(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="My Report", created_by="u@x.com", access=ReportAccess(scope="public"))
-    ok = await store.set_dashboard_report("rid1")
+async def test_set_dashboard_report_succeeds_for_empty_report(store):
+    created = await store.create_report(name="My Report", created_by="u@x.com", access=ReportAccess(scope="public"))
+    ok = await store.set_dashboard_report(created.report_id)
     assert ok is True
-    assert await store.get_dashboard_report_id() == "rid1"
+    assert await store.get_dashboard_report_id() == created.report_id
 
 
-async def test_set_and_get_dashboard_report(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="My Report", created_by="u@x.com", access=ReportAccess(scope="public"))
-    await store.save_report_version(report_id="rid1", config={"rows": []}, created_by="u@x.com")
-    ok = await store.set_dashboard_report("rid1")
+async def test_set_and_get_dashboard_report(store):
+    created = await store.create_report(name="My Report", created_by="u@x.com", access=ReportAccess(scope="public"))
+    await store.save_report_version(report_id=created.report_id, config={"rows": []}, created_by="u@x.com")
+    ok = await store.set_dashboard_report(created.report_id)
     assert ok is True
-    assert await store.get_dashboard_report_id() == "rid1"
+    assert await store.get_dashboard_report_id() == created.report_id
 
     report = await store.get_dashboard_report()
     assert isinstance(report, ReportVersion)
-    assert report.report_id == "rid1"
+    assert report.report_id == created.report_id
     assert report.version == 2
 
 
-async def test_set_dashboard_report_can_be_changed(store, mocker):
-    ids = iter(["rid1", "rid2"])
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        side_effect=lambda: next(ids),
-    )
-    await store.create_report(name="r1", created_by="u@x.com", access=ReportAccess(scope="public"))
-    await store.create_report(name="r2", created_by="u@x.com", access=ReportAccess(scope="public"))
-    await store.set_dashboard_report("rid1")
-    await store.set_dashboard_report("rid2")
-    assert await store.get_dashboard_report_id() == "rid2"
+async def test_set_dashboard_report_can_be_changed(store):
+    first = await store.create_report(name="r1", created_by="u@x.com", access=ReportAccess(scope="public"))
+    second = await store.create_report(name="r2", created_by="u@x.com", access=ReportAccess(scope="public"))
+    await store.set_dashboard_report(first.report_id)
+    await store.set_dashboard_report(second.report_id)
+    assert await store.get_dashboard_report_id() == second.report_id
 
 
 # ---------------------------------------------------------------------------
@@ -1679,41 +1581,28 @@ async def test_delete_report_returns_false_for_missing_report(store):
     assert await store.delete_report("nonexistent") is False
 
 
-async def test_delete_report_removes_report(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r", created_by="u@x.com", access=ReportAccess(scope="public"))
-    await store.save_report_version(report_id="rid1", config={"v": 1}, created_by="u@x.com")
-    assert await store.delete_report("rid1") is True
+async def test_delete_report_removes_report(store):
+    created = await store.create_report(name="r", created_by="u@x.com", access=ReportAccess(scope="public"))
+    await store.save_report_version(report_id=created.report_id, config={"v": 1}, created_by="u@x.com")
+    assert await store.delete_report(created.report_id) is True
     assert await store.list_reports() == []
-    assert await store.list_report_versions("rid1") == []
+    assert await store.list_report_versions(created.report_id) == []
 
 
-async def test_delete_report_clears_dashboard_pointer(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="rid1",
-    )
-    await store.create_report(name="r", created_by="u@x.com", access=ReportAccess(scope="public"))
-    await store.set_dashboard_report("rid1")
-    assert await store.get_dashboard_report_id() == "rid1"
-    await store.delete_report("rid1")
+async def test_delete_report_clears_dashboard_pointer(store):
+    created = await store.create_report(name="r", created_by="u@x.com", access=ReportAccess(scope="public"))
+    await store.set_dashboard_report(created.report_id)
+    assert await store.get_dashboard_report_id() == created.report_id
+    await store.delete_report(created.report_id)
     assert await store.get_dashboard_report_id() is None
 
 
-async def test_delete_report_does_not_clear_other_dashboard_pointer(store, mocker):
-    ids = iter(["rid1", "rid2"])
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        side_effect=lambda: next(ids),
-    )
-    await store.create_report(name="r1", created_by="u@x.com")
-    await store.create_report(name="r2", created_by="u@x.com", access=ReportAccess(scope="public"))
-    await store.set_dashboard_report("rid2")
-    await store.delete_report("rid1")
-    assert await store.get_dashboard_report_id() == "rid2"
+async def test_delete_report_does_not_clear_other_dashboard_pointer(store):
+    first = await store.create_report(name="r1", created_by="u@x.com")
+    second = await store.create_report(name="r2", created_by="u@x.com", access=ReportAccess(scope="public"))
+    await store.set_dashboard_report(second.report_id)
+    await store.delete_report(first.report_id)
+    assert await store.get_dashboard_report_id() == second.report_id
 
 
 # ---------------------------------------------------------------------------
@@ -1721,11 +1610,7 @@ async def test_delete_report_does_not_clear_other_dashboard_pointer(store, mocke
 # ---------------------------------------------------------------------------
 
 
-async def test_get_or_create_user_creates_new_user(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="uid1",
-    )
+async def test_get_or_create_user_creates_new_user(store):
     user = await store.get_or_create_user(
         sub="sub123",
         iss="https://idp.example.com",
@@ -1733,7 +1618,7 @@ async def test_get_or_create_user_creates_new_user(store, mocker):
         display_name="Alice",
     )
     assert isinstance(user, User)
-    assert user.user_id == "uid1"
+    _assert_uuid7(user.user_id)
     assert user.sub == "sub123"
     assert user.iss == "https://idp.example.com"
     assert user.email == "alice@example.com"
@@ -1741,25 +1626,15 @@ async def test_get_or_create_user_creates_new_user(store, mocker):
     assert user.archived_at is None
 
 
-async def test_get_or_create_user_returns_existing_user(store, mocker):
-    ids = iter(["uid1", "uid2"])
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        side_effect=lambda: next(ids),
-    )
-    await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
+async def test_get_or_create_user_returns_existing_user(store):
+    created = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
     # Second call with same (iss, sub) must not create a new user
     user = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
-    assert user.user_id == "uid1"
+    assert user.user_id == created.user_id
 
 
-async def test_get_or_create_user_returns_existing_without_update(store, mocker):
+async def test_get_or_create_user_returns_existing_without_update(store):
     """Subsequent calls with a changed email must not update the stored record."""
-    ids = iter(["uid1", "uid2"])
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        side_effect=lambda: next(ids),
-    )
     await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="old@example.com")
     user = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="new@example.com")
     assert user.email == "old@example.com"
@@ -1767,11 +1642,7 @@ async def test_get_or_create_user_returns_existing_without_update(store, mocker)
 
 async def test_get_or_create_user_returns_existing_after_unique_race(store, mocker):
     """A concurrent first login can win the insert race after the initial lookup."""
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="uid2",
-    )
-    await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
+    existing = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
 
     original_execute = sql_module.AsyncSession.execute
     first_lookup_done = False
@@ -1793,7 +1664,7 @@ async def test_get_or_create_user_returns_existing_after_unique_race(store, mock
 
     user = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
 
-    assert user.user_id == "uid2"
+    assert user.user_id == existing.user_id
 
 
 # ---------------------------------------------------------------------------
@@ -1801,64 +1672,43 @@ async def test_get_or_create_user_returns_existing_after_unique_race(store, mock
 # ---------------------------------------------------------------------------
 
 
-async def test_update_user_profile_updates_email_when_changed(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="uid1",
-    )
-    await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="old@example.com")
-    user = await store.update_user_profile(user_id="uid1", email="new@example.com")
+async def test_update_user_profile_updates_email_when_changed(store):
+    created = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="old@example.com")
+    user = await store.update_user_profile(user_id=created.user_id, email="new@example.com")
     assert user.email == "new@example.com"
 
 
-async def test_update_user_profile_no_write_when_nothing_changed(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="uid1",
-    )
-    await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
-    user = await store.update_user_profile(user_id="uid1", email="alice@example.com")
+async def test_update_user_profile_no_write_when_nothing_changed(store):
+    created = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
+    user = await store.update_user_profile(user_id=created.user_id, email="alice@example.com")
     assert user.email == "alice@example.com"
 
 
-async def test_update_user_profile_updates_last_login_when_iat_is_newer(store, mocker):
+async def test_update_user_profile_updates_last_login_when_iat_is_newer(store):
     from datetime import datetime
 
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="uid1",
-    )
     # Use future dates so both are guaranteed newer than the creation-time `now`
     first_iat = datetime(2030, 1, 1, tzinfo=UTC)
     second_iat = datetime(2030, 6, 1, tzinfo=UTC)
-    await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
-    await store.update_user_profile(user_id="uid1", email="alice@example.com", token_iat=first_iat)
-    user = await store.update_user_profile(user_id="uid1", email="alice@example.com", token_iat=second_iat)
+    created = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
+    await store.update_user_profile(user_id=created.user_id, email="alice@example.com", token_iat=first_iat)
+    user = await store.update_user_profile(user_id=created.user_id, email="alice@example.com", token_iat=second_iat)
     assert user.last_login == second_iat.isoformat()
 
 
-async def test_update_user_profile_does_not_update_last_login_when_iat_is_older(store, mocker):
+async def test_update_user_profile_does_not_update_last_login_when_iat_is_older(store):
     from datetime import datetime
 
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="uid1",
-    )
     # Use future dates so both are newer than creation-time `now`
     newer_iat = datetime(2030, 6, 1, tzinfo=UTC)
     older_iat = datetime(2030, 1, 1, tzinfo=UTC)
-    await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
-    await store.update_user_profile(user_id="uid1", email="alice@example.com", token_iat=newer_iat)
-    user = await store.update_user_profile(user_id="uid1", email="alice@example.com", token_iat=older_iat)
+    created = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
+    await store.update_user_profile(user_id=created.user_id, email="alice@example.com", token_iat=newer_iat)
+    user = await store.update_user_profile(user_id=created.user_id, email="alice@example.com", token_iat=older_iat)
     assert user.last_login == newer_iat.isoformat()
 
 
-async def test_get_or_create_user_different_sub_creates_separate_users(store, mocker):
-    ids = iter(["uid1", "uid2"])
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        side_effect=lambda: next(ids),
-    )
+async def test_get_or_create_user_different_sub_creates_separate_users(store):
     u1 = await store.get_or_create_user(sub="sub-alice", iss="https://idp.example.com", email="shared@example.com")
     u2 = await store.get_or_create_user(sub="sub-bob", iss="https://idp.example.com", email="shared@example.com")
     assert u1.user_id != u2.user_id
@@ -1873,15 +1723,11 @@ async def test_get_user_not_found(store):
     assert await store.get_user("nonexistent") is None
 
 
-async def test_get_user_returns_created_user(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="uid1",
-    )
-    await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
-    user = await store.get_user("uid1")
+async def test_get_user_returns_created_user(store):
+    created = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
+    user = await store.get_user(created.user_id)
     assert isinstance(user, User)
-    assert user.user_id == "uid1"
+    assert user.user_id == created.user_id
     assert user.email == "alice@example.com"
 
 
@@ -1894,14 +1740,10 @@ async def test_archive_user_returns_false_for_missing(store):
     assert await store.archive_user("nonexistent") is False
 
 
-async def test_archive_user_sets_archived_at(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="uid1",
-    )
-    await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
-    assert await store.archive_user("uid1") is True
-    user = await store.get_user("uid1")
+async def test_archive_user_sets_archived_at(store):
+    created = await store.get_or_create_user(sub="sub123", iss="https://idp.example.com", email="alice@example.com")
+    assert await store.archive_user(created.user_id) is True
+    user = await store.get_user(created.user_id)
     assert user.archived_at is not None
 
 
@@ -1926,72 +1768,57 @@ async def test_list_scheduled_queries_empty(store):
     assert await store.list_scheduled_queries() == []
 
 
-async def test_create_scheduled_query(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
+async def test_create_scheduled_query(store):
     result = await store.create_scheduled_query(**_SQ_KWARGS)
-    assert result.scheduled_query_id == "sq1"
+    _assert_uuid7(result.scheduled_query_id)
     assert result.name == "Test Query"
     assert result.current_version == 1
     assert result.created_by == "user@example.com"
     assert result.updated_by == "user@example.com"
 
 
-async def test_scheduled_query_runtime_state_methods(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
+async def test_scheduled_query_runtime_state_methods(store):
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
+    sq_id = created.scheduled_query_id
 
-    requested_at = await store.request_scheduled_query_run("sq1")
+    requested_at = await store.request_scheduled_query_run(sq_id)
     assert requested_at is not None
     assert await store.request_scheduled_query_run("missing") is None
 
-    await store.record_scheduled_query_result("sq1", "failure", "boom")
-    failed = await store.get_scheduled_query("sq1")
+    await store.record_scheduled_query_result(sq_id, "failure", "boom")
+    failed = await store.get_scheduled_query(sq_id)
     assert failed is not None
     assert failed.last_run_status == "failure"
     assert failed.last_errors[0]["error"] == "boom"
-    await store.record_scheduled_query_result("sq1", "success")
-    succeeded = await store.get_scheduled_query("sq1")
+    await store.record_scheduled_query_result(sq_id, "success")
+    succeeded = await store.get_scheduled_query(sq_id)
     assert succeeded is not None
     assert succeeded.last_errors == []
     await store.record_scheduled_query_result("missing", "success")
 
     await store.set_workflow_schedule_sync_status(
-        "sq1",
+        sq_id,
         "error",
         error="offline",
         synced_at="2026-01-01T00:00:00+00:00",
     )
-    synced = await store.get_scheduled_query("sq1")
+    synced = await store.get_scheduled_query(sq_id)
     assert synced is not None
     assert synced.schedule_sync_status == "error"
     assert synced.schedule_sync_error == "offline"
     await store.set_workflow_schedule_sync_status("missing", "synced")
 
 
-async def test_list_scheduled_queries_returns_created(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
+async def test_list_scheduled_queries_returns_created(store):
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
     items = await store.list_scheduled_queries()
     assert len(items) == 1
-    assert items[0].scheduled_query_id == "sq1"
+    assert items[0].scheduled_query_id == created.scheduled_query_id
 
 
-async def test_get_scheduled_query_success(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
-    item = await store.get_scheduled_query("sq1")
+async def test_get_scheduled_query_success(store):
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
+    item = await store.get_scheduled_query(created.scheduled_query_id)
     assert item is not None
     assert item.name == "Test Query"
     assert item.current_version == 1
@@ -2001,14 +1828,10 @@ async def test_get_scheduled_query_not_found(store):
     assert await store.get_scheduled_query("nonexistent") is None
 
 
-async def test_update_scheduled_query_success(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
+async def test_update_scheduled_query_success(store):
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
     result = await store.update_scheduled_query(
-        sq_id="sq1",
+        sq_id=created.scheduled_query_id,
         name="Updated Query",
         cypher="MATCH (n) RETURN n LIMIT 1",
         params=[],
@@ -2043,14 +1866,10 @@ async def test_update_scheduled_query_not_found(store):
     assert result is None
 
 
-async def test_list_scheduled_query_versions(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
+async def test_list_scheduled_query_versions(store):
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
     await store.update_scheduled_query(
-        sq_id="sq1",
+        sq_id=created.scheduled_query_id,
         name="Updated",
         cypher="MATCH (n) RETURN n LIMIT 1",
         params=[],
@@ -2062,7 +1881,7 @@ async def test_list_scheduled_query_versions(store, mocker):
         updated_by="u@x.com",
         comment="v2",
     )
-    versions = await store.list_scheduled_query_versions("sq1")
+    versions = await store.list_scheduled_query_versions(created.scheduled_query_id)
     assert len(versions) == 2
     assert versions[0].version == 2  # descending order
     assert versions[1].version == 1
@@ -2074,88 +1893,66 @@ async def test_list_scheduled_query_versions_not_found(store):
     assert await store.list_scheduled_query_versions("nonexistent") == []
 
 
-async def test_get_scheduled_query_version_success(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
-    v = await store.get_scheduled_query_version("sq1", 1)
+async def test_get_scheduled_query_version_success(store):
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
+    v = await store.get_scheduled_query_version(created.scheduled_query_id, 1)
     assert v is not None
     assert v.version == 1
     assert v.name == "Test Query"
 
 
-async def test_get_scheduled_query_version_not_found(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
-    assert await store.get_scheduled_query_version("sq1", 99) is None
+async def test_get_scheduled_query_version_not_found(store):
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
+    assert await store.get_scheduled_query_version(created.scheduled_query_id, 99) is None
 
 
 async def test_get_scheduled_query_version_sq_not_found(store):
     assert await store.get_scheduled_query_version("nonexistent", 1) is None
 
 
-async def test_delete_scheduled_query_success(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
-    assert await store.delete_scheduled_query("sq1") is True
-    assert await store.get_scheduled_query("sq1") is None
-    assert await store.list_scheduled_query_versions("sq1") == []
+async def test_delete_scheduled_query_success(store):
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
+    assert await store.delete_scheduled_query(created.scheduled_query_id) is True
+    assert await store.get_scheduled_query(created.scheduled_query_id) is None
+    assert await store.list_scheduled_query_versions(created.scheduled_query_id) == []
 
 
 async def test_delete_scheduled_query_not_found(store):
     assert await store.delete_scheduled_query("nonexistent") is False
 
 
-async def test_acquire_scheduled_query_lock_no_previous(store, mocker):
+async def test_acquire_scheduled_query_lock_no_previous(store):
     """First-ever lock acquisition (last_scheduled_at is None) succeeds."""
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
-    acquired = await store.acquire_scheduled_query_lock("sq1", None)
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
+    acquired = await store.acquire_scheduled_query_lock(created.scheduled_query_id, None)
     assert acquired is True
-    item = await store.get_scheduled_query("sq1")
+    item = await store.get_scheduled_query(created.scheduled_query_id)
     assert item is not None
     assert item.last_scheduled_at is not None
 
 
-async def test_acquire_scheduled_query_lock_with_expected(store, mocker):
+async def test_acquire_scheduled_query_lock_with_expected(store):
     """CAS succeeds when expected value matches stored value."""
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
+    sq_id = created.scheduled_query_id
     # Acquire once to set a known value
-    await store.acquire_scheduled_query_lock("sq1", None)
-    item = await store.get_scheduled_query("sq1")
+    await store.acquire_scheduled_query_lock(sq_id, None)
+    item = await store.get_scheduled_query(sq_id)
     assert item is not None
     prev = item.last_scheduled_at
     # CAS with correct expected value
-    acquired = await store.acquire_scheduled_query_lock("sq1", prev)
+    acquired = await store.acquire_scheduled_query_lock(sq_id, prev)
     assert acquired is True
 
 
-async def test_acquire_scheduled_query_lock_race(store, mocker):
+async def test_acquire_scheduled_query_lock_race(store):
     """CAS fails when expected value no longer matches (another worker won)."""
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="sq1",
-    )
-    await store.create_scheduled_query(**_SQ_KWARGS)
+    created = await store.create_scheduled_query(**_SQ_KWARGS)
+    sq_id = created.scheduled_query_id
     # Acquire once to set a value
-    await store.acquire_scheduled_query_lock("sq1", None)
+    await store.acquire_scheduled_query_lock(sq_id, None)
     # A second worker uses the old (None) expected value — should fail
-    acquired = await store.acquire_scheduled_query_lock("sq1", None)
+    acquired = await store.acquire_scheduled_query_lock(sq_id, None)
     assert acquired is False
 
 
@@ -2177,11 +1974,7 @@ _TS_KWARGS = {
 # ---------------------------------------------------------------------------
 
 
-async def test_create_toolset_and_list(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="ts1",
-    )
+async def test_create_toolset_and_list(store):
     ts = await store.create_toolset(**_TS_KWARGS)
     assert ts.toolset_id == "ts1"
     assert ts.name == "My Toolset"
@@ -2207,11 +2000,7 @@ async def test_get_toolset_not_found(store):
     assert await store.get_toolset("missing") is None
 
 
-async def test_get_toolset_found(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="ts1",
-    )
+async def test_get_toolset_found(store):
     await store.create_toolset(**_TS_KWARGS)
     ts = await store.get_toolset("ts1")
     assert ts is not None
@@ -2224,11 +2013,7 @@ async def test_get_toolset_found(store, mocker):
 # ---------------------------------------------------------------------------
 
 
-async def test_update_toolset_success(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="ts1",
-    )
+async def test_update_toolset_success(store):
     await store.create_toolset(**_TS_KWARGS)
     updated = await store.update_toolset(
         toolset_id="ts1",
@@ -2262,11 +2047,7 @@ async def test_update_toolset_not_found(store):
 # ---------------------------------------------------------------------------
 
 
-async def test_list_toolset_versions(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="ts1",
-    )
+async def test_list_toolset_versions(store):
     await store.create_toolset(**_TS_KWARGS)
     await store.update_toolset(
         toolset_id="ts1",
@@ -2282,11 +2063,7 @@ async def test_list_toolset_versions(store, mocker):
     assert nums == {1, 2}
 
 
-async def test_get_toolset_version_found(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="ts1",
-    )
+async def test_get_toolset_version_found(store):
     await store.create_toolset(**_TS_KWARGS)
     v = await store.get_toolset_version("ts1", 1)
     assert v is not None
@@ -2303,11 +2080,7 @@ async def test_get_toolset_version_not_found(store):
 # ---------------------------------------------------------------------------
 
 
-async def test_delete_toolset_success(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="ts1",
-    )
+async def test_delete_toolset_success(store):
     await store.create_toolset(**_TS_KWARGS)
     assert await store.delete_toolset("ts1") is True
     assert await store.get_toolset("ts1") is None
@@ -2333,11 +2106,7 @@ _TOOL_KWARGS = {
 }
 
 
-async def _make_toolset(store, mocker, ts_id: str = "ts1") -> None:
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value=ts_id,
-    )
+async def _make_toolset(store, ts_id: str = "ts1") -> None:
     await store.create_toolset(**{**_TS_KWARGS, "toolset_id": ts_id})
 
 
@@ -2346,12 +2115,8 @@ async def _make_toolset(store, mocker, ts_id: str = "ts1") -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_create_tool_and_list(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_create_tool_and_list(store):
+    await _make_toolset(store, "ts1")
     tool = await store.create_tool(toolset_id="ts1", **_TOOL_KWARGS)
     assert tool is not None
     assert tool.tool_id == "tool1"
@@ -2365,17 +2130,13 @@ async def test_create_tool_and_list(store, mocker):
     assert tools[0].tool_id == "tool1"
 
 
-async def test_create_tool_toolset_not_found(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_create_tool_toolset_not_found(store):
     result = await store.create_tool(toolset_id="missing", **_TOOL_KWARGS)
     assert result is None
 
 
-async def test_list_tools_empty(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
+async def test_list_tools_empty(store):
+    await _make_toolset(store, "ts1")
     assert await store.list_tools("ts1") == []
 
 
@@ -2388,12 +2149,8 @@ async def test_get_tool_not_found(store):
     assert await store.get_tool("missing") is None
 
 
-async def test_get_tool_found(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_get_tool_found(store):
+    await _make_toolset(store, "ts1")
     await store.create_tool(toolset_id="ts1", **_TOOL_KWARGS)
     tool = await store.get_tool("tool1")
     assert tool is not None
@@ -2406,12 +2163,8 @@ async def test_get_tool_found(store, mocker):
 # ---------------------------------------------------------------------------
 
 
-async def test_update_tool_success(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_update_tool_success(store):
+    await _make_toolset(store, "ts1")
     await store.create_tool(toolset_id="ts1", **_TOOL_KWARGS)
     updated = await store.update_tool(
         tool_id="tool1",
@@ -2458,12 +2211,8 @@ async def test_update_tool_not_found(store):
 # ---------------------------------------------------------------------------
 
 
-async def test_list_tool_versions(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_list_tool_versions(store):
+    await _make_toolset(store, "ts1")
     await store.create_tool(toolset_id="ts1", **_TOOL_KWARGS)
     await store.update_tool(
         tool_id="tool1",
@@ -2481,12 +2230,8 @@ async def test_list_tool_versions(store, mocker):
     assert nums == {1, 2}
 
 
-async def test_get_tool_version_found(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_get_tool_version_found(store):
+    await _make_toolset(store, "ts1")
     await store.create_tool(toolset_id="ts1", **_TOOL_KWARGS)
     v = await store.get_tool_version("tool1", 1)
     assert v is not None
@@ -2504,12 +2249,8 @@ async def test_get_tool_version_not_found(store):
 # ---------------------------------------------------------------------------
 
 
-async def test_delete_tool_success(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_delete_tool_success(store):
+    await _make_toolset(store, "ts1")
     await store.create_tool(toolset_id="ts1", **_TOOL_KWARGS)
     assert await store.delete_tool("tool1") is True
     assert await store.get_tool("tool1") is None
@@ -2525,12 +2266,8 @@ async def test_delete_tool_not_found(store):
 # ---------------------------------------------------------------------------
 
 
-async def test_delete_toolset_cascades_to_tools(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_delete_toolset_cascades_to_tools(store):
+    await _make_toolset(store, "ts1")
     await store.create_tool(toolset_id="ts1", **_TOOL_KWARGS)
     assert await store.delete_toolset("ts1") is True
     assert await store.get_tool("tool1") is None
@@ -2546,24 +2283,16 @@ async def test_list_enabled_tools_empty(store):
     assert await store.list_enabled_tools() == []
 
 
-async def test_list_enabled_tools_returns_tools_in_enabled_toolsets(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_list_enabled_tools_returns_tools_in_enabled_toolsets(store):
+    await _make_toolset(store, "ts1")
     await store.create_tool(toolset_id="ts1", **_TOOL_KWARGS)
     tools = await store.list_enabled_tools()
     assert len(tools) == 1
     assert tools[0].tool_id == "tool1"
 
 
-async def test_list_enabled_tools_excludes_disabled_toolset(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_list_enabled_tools_excludes_disabled_toolset(store):
+    await _make_toolset(store, "ts1")
     await store.create_tool(toolset_id="ts1", **_TOOL_KWARGS)
     # Disable the toolset
     await store.update_toolset(
@@ -2577,12 +2306,8 @@ async def test_list_enabled_tools_excludes_disabled_toolset(store, mocker):
     assert await store.list_enabled_tools() == []
 
 
-async def test_list_enabled_tools_excludes_disabled_tool(store, mocker):
-    await _make_toolset(store, mocker, "ts1")
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="tool1",
-    )
+async def test_list_enabled_tools_excludes_disabled_tool(store):
+    await _make_toolset(store, "ts1")
     await store.create_tool(
         toolset_id="ts1",
         tool_id="tool1",
@@ -2608,13 +2333,9 @@ _ROLE_KWARGS = dict(
 )
 
 
-async def test_create_role_and_list(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="r1",
-    )
+async def test_create_role_and_list(store):
     role = await store.create_role(**_ROLE_KWARGS)
-    assert role.role_id == "r1"
+    _assert_uuid7(role.role_id)
     assert role.name == "Custom Role"
     assert role.current_version == 1
     assert role.created_by == "uid1"
@@ -2622,7 +2343,7 @@ async def test_create_role_and_list(store, mocker):
 
     items = await store.list_roles()
     assert len(items) == 1
-    assert items[0].role_id == "r1"
+    assert items[0].role_id == role.role_id
 
 
 async def test_list_roles_empty(store):
@@ -2633,22 +2354,14 @@ async def test_get_role_not_found(store):
     assert await store.get_role("missing") is None
 
 
-async def test_get_role_found(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="r1",
-    )
-    await store.create_role(**_ROLE_KWARGS)
-    role = await store.get_role("r1")
+async def test_get_role_found(store):
+    created = await store.create_role(**_ROLE_KWARGS)
+    role = await store.get_role(created.role_id)
     assert role is not None
-    assert role.role_id == "r1"
+    assert role.role_id == created.role_id
 
 
-async def test_get_role_by_name_found(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="r1",
-    )
+async def test_get_role_by_name_found(store):
     await store.create_role(**_ROLE_KWARGS)
     role = await store.get_role_by_name("Custom Role")
     assert role is not None
@@ -2659,14 +2372,10 @@ async def test_get_role_by_name_not_found(store):
     assert await store.get_role_by_name("nonexistent") is None
 
 
-async def test_update_role_success(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="r1",
-    )
-    await store.create_role(**_ROLE_KWARGS)
+async def test_update_role_success(store):
+    created = await store.create_role(**_ROLE_KWARGS)
     updated = await store.update_role(
-        role_id="r1",
+        role_id=created.role_id,
         name="Updated Role",
         description="new desc",
         permissions=["reports:read", "reports:write"],
@@ -2691,50 +2400,38 @@ async def test_update_role_not_found(store):
     assert result is None
 
 
-async def test_delete_role_success(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="r1",
-    )
-    await store.create_role(**_ROLE_KWARGS)
-    assert await store.delete_role("r1") is True
-    assert await store.get_role("r1") is None
+async def test_delete_role_success(store):
+    created = await store.create_role(**_ROLE_KWARGS)
+    assert await store.delete_role(created.role_id) is True
+    assert await store.get_role(created.role_id) is None
 
 
 async def test_delete_role_not_found(store):
     assert await store.delete_role("missing") is False
 
 
-async def test_list_role_versions(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="r1",
-    )
-    await store.create_role(**_ROLE_KWARGS)
+async def test_list_role_versions(store):
+    created = await store.create_role(**_ROLE_KWARGS)
     await store.update_role(
-        role_id="r1",
+        role_id=created.role_id,
         name="Updated Role",
         description="",
         permissions=[],
         updated_by="uid1",
         comment="v2",
     )
-    versions = await store.list_role_versions("r1")
+    versions = await store.list_role_versions(created.role_id)
     assert len(versions) == 2
     assert versions[0].version == 2
     assert versions[1].version == 1
 
 
-async def test_get_role_version_found(store, mocker):
-    mocker.patch(
-        "reporting.services.report_store.sql.generate_report_id",
-        return_value="r1",
-    )
-    await store.create_role(**_ROLE_KWARGS)
-    v = await store.get_role_version("r1", 1)
+async def test_get_role_version_found(store):
+    created = await store.create_role(**_ROLE_KWARGS)
+    v = await store.get_role_version(created.role_id, 1)
     assert v is not None
     assert v.version == 1
-    assert v.role_id == "r1"
+    assert v.role_id == created.role_id
 
 
 async def test_get_role_version_not_found(store):
@@ -3000,6 +2697,8 @@ async def test_subspace_crud(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
     sub = await store.create_subspace(space_id=space.space_id, name="Network", created_by="u1")
     assert isinstance(sub, SubspaceItem)
+    _assert_uuid7(space.space_id)
+    _assert_uuid7(sub.subspace_id)
     assert sub.space_id == space.space_id
     assert sub.name == "Network"
 
@@ -3237,6 +2936,7 @@ async def test_create_space_starts_with_no_overview(store):
     """A space no longer auto-creates a report; the overview is set later."""
     space = await store.create_space(name="Cloud Security", description="AWS", created_by="u1")
 
+    _assert_uuid7(space.space_id)
     assert space.overview_report_id is None
     assert await store.list_space_reports(space.space_id) == []
 
@@ -3504,8 +3204,26 @@ async def test_republishing_a_plugin_keeps_operator_skill_enablement(store):
     assert await store.set_plugin_skill_enabled("review_tools", "missing", True) is None
 
 
+# ---------------------------------------------------------------------------
+# Query history
+# ---------------------------------------------------------------------------
+
+
+async def test_query_history_uses_the_store_id_contract(store):
+    saved = await store.save_query_history("user-1", "MATCH (n) RETURN n")
+
+    _assert_uuid7(saved.history_id)
+    fetched = await store.get_query_history_item("user-1", saved.history_id)
+    assert fetched == saved
+    assert await store.get_query_history_item("other-user", saved.history_id) is None
+    items, total = await store.list_query_history("user-1", page=1, per_page=20)
+    assert total == 1
+    assert items == [saved]
+
+
 async def test_model_profiles_are_versioned_and_keep_one_default(store):
     first = await store.create_model_profile(_model_profile_data(), "admin")
+    _assert_uuid7(first.profile_id)
     assert first.is_default is True
 
     second = await store.create_model_profile(

@@ -103,10 +103,9 @@ export function useConfirmationsApi(threadId?: string | null): {
       if (!Array.isArray(data.confirmations)) {
         throw new Error('Invalid confirmation list response');
       }
+      const confirmations = data.confirmations;
       setConfirmations((current) =>
-        sameConfirmations(current, data.confirmations)
-          ? current
-          : data.confirmations,
+        sameConfirmations(current, confirmations) ? current : confirmations,
       );
     } catch {
       setError('Failed to load confirmations.');

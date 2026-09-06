@@ -20,6 +20,11 @@ os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 # ``external_mcp.settings.MCP_EXTERNAL_PROXIES`` directly.
 os.environ["MCP_EXTERNAL_PROXIES"] = "[]"
 
+# Unit tests enable telemetry explicitly when they exercise it. A developer's
+# Compose environment must not start an exporter thread in an unrelated test.
+os.environ["TELEMETRY_ENABLED"] = "false"
+os.environ["TELEMETRY_OTLP_ENDPOINT"] = ""
+
 # Same shape of problem for the per-stage reasoning efforts: a developer tuning
 # them in `.env` (they reach the container now that Compose forwards them) would
 # change what "the default effort" is under the tests that assert it. Cleared

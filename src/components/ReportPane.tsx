@@ -158,11 +158,11 @@ function ReportPane({
       setDisplayedAccessScope(reportVersion.access.scope);
       setDisplayedOwnerId(reportVersion.report_created_by);
       setDisplayedSpace({
-        spaceId: reportVersion.space_id,
-        subspaceId: reportVersion.subspace_id,
+        spaceId: reportVersion.space_id ?? null,
+        subspaceId: reportVersion.subspace_id ?? null,
       });
     }
-    setDisplayedQueryCapabilities(queryCapabilities);
+    setDisplayedQueryCapabilities(queryCapabilities ?? undefined);
   }, [report, name, reportVersion, queryCapabilities]);
 
   // Sync edit param in URL
@@ -197,13 +197,13 @@ function ReportPane({
       report: version.config,
       name: version.name,
       reportVersion: version,
-      queryCapabilities: version.query_capabilities,
+      queryCapabilities: version.query_capabilities ?? undefined,
     });
     setDisplayedReport(
       savedName ? { ...version.config, name: savedName } : version.config,
     );
     setDisplayedName(savedName);
-    setDisplayedQueryCapabilities(version.query_capabilities);
+    setDisplayedQueryCapabilities(version.query_capabilities ?? undefined);
     window.dispatchEvent(new Event('seizu:reports-updated'));
     setEditMode(false);
     // Navigate back to view mode (clears ?edit param)
@@ -459,8 +459,8 @@ function ReportPane({
           onConfirm={async (spaceId, subspaceId) => {
             const updated = await setReportSpace(id, spaceId, subspaceId);
             setDisplayedSpace({
-              spaceId: updated.space_id,
-              subspaceId: updated.subspace_id,
+              spaceId: updated.space_id ?? null,
+              subspaceId: updated.subspace_id ?? null,
             });
           }}
         />

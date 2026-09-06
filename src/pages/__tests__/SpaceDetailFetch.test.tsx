@@ -4,7 +4,7 @@
  * The tree endpoint is the expensive one on the space detail page, so browsing
  * report to report inside a space must reuse the tree it already has.
  */
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
@@ -188,7 +188,7 @@ describe('SpaceDetail tree fetching', () => {
 
     // Saving a report broadcasts this; the tree embeds report names, so the
     // sidebar entry would otherwise keep the old one.
-    window.dispatchEvent(new Event('seizu:reports-updated'));
+    act(() => window.dispatchEvent(new Event('seizu:reports-updated')));
 
     await waitFor(() => expect(treeCalls()).toBe(2));
   });
@@ -197,7 +197,7 @@ describe('SpaceDetail tree fetching', () => {
     renderApp();
     await waitFor(() => expect(treeCalls()).toBe(1));
 
-    window.dispatchEvent(new Event('seizu:spaces-updated'));
+    act(() => window.dispatchEvent(new Event('seizu:spaces-updated')));
 
     await waitFor(() => expect(treeCalls()).toBe(2));
   });
@@ -209,11 +209,15 @@ describe('SpaceDetail tree fetching', () => {
     renderApp();
     await waitFor(() => expect(treeCalls()).toBe(1));
 
-    window.dispatchEvent(new Event('seizu:spaces-updated'));
+    act(() => window.dispatchEvent(new Event('seizu:spaces-updated')));
     await waitFor(() => expect(treeCalls()).toBe(2));
 
-    // Give any stray second fetch a chance to land before asserting.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Flush the event and React microtask queues before making the negative
+    // assertion; wall-clock sleeps make this test depend on machine load.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(treeCalls()).toBe(2);
   });
 });

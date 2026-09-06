@@ -25,11 +25,10 @@ from reporting.schema.chat import (
     ChatTurnRequest,
 )
 from reporting.schema.report_config import User
-from reporting.services import chat_turns
+from reporting.services import chat_turns, report_store
 from reporting.services.chat_budget import BudgetController
 from reporting.services.report_store import base as base_store
 from reporting.services.report_store.base import chat_turn_execution_bound_seconds
-from reporting.services.report_store.sql import generate_report_id
 from tests.unit.reporting.model_profile_test_utils import resolved_model_profile
 
 _FAKE_USER = User(
@@ -149,10 +148,8 @@ def _chat_turn_log(mocker):
 
     turns: dict[str, ChatTurnItem] = {}
     events: dict[str, dict[int, str]] = {}
-    counter = 0
 
     async def admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key, command):
-        nonlocal counter
         for turn in turns.values():
             if (turn.user_id, turn.thread_id, turn.idempotency_key) == (
                 user_id,
@@ -167,9 +164,8 @@ def _chat_turn_log(mocker):
         for turn in turns.values():
             if turn.user_id == user_id and turn.thread_id == thread_id and turn.status == "running":
                 return ChatTurnAdmission(outcome="busy")
-        counter += 1
         turn = ChatTurnItem(
-            turn_id=f"turn-{counter}",
+            turn_id=report_store.generate_id(),
             thread_id=thread_id,
             user_id=user_id,
             message_id=message_id,
@@ -376,7 +372,6 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
     sessions: dict[tuple[str, str], ChatSessionItem] = _SESSIONS
     sessions.clear()
     counter = 0
-    id_counter = 1000
 
     def _now() -> str:
         nonlocal counter
@@ -408,9 +403,7 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
         model_profile_id: str | None = None,
         model_reasoning_effort: str | None = None,
     ) -> ChatSessionItem:
-        nonlocal id_counter
-        id_counter += 1
-        thread_id = str(id_counter)
+        thread_id = report_store.generate_id()
         now = _now()
         session = ChatSessionItem(
             thread_id=thread_id,
@@ -1115,24 +1108,27 @@ async def test_create_chat_session_rejects_client_thread_id(mocker):
 
 
 async def test_chat_session_routes_admit_a_freshly_minted_id(mocker):
-    """The routes have to admit the id shape the store actually mints.
-
-    Nothing else holds those two together, and the ids are not written by hand
-    anywhere a user can reach: when ``generate_report_id`` moved from Snowflake
-    integers to UUIDv7, the digits-only route rule stayed behind and every
-    session created after that answered 422 to its own PATCH.
-    """
-    thread_id = generate_report_id()
-    _patch_chat_sessions(mocker, [("test-user-id", thread_id)])
+    """Every route must admit the current ID shape minted by the store."""
+    fake_graph = FakeChatGraph()
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker)
     app = _make_app()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/api/v1/chat/sessions", json={"title": "New"})
+        thread_id = created.json()["thread_id"]
         fetched = await client.get(f"/api/v1/chat/sessions/{thread_id}")
         renamed = await client.patch(f"/api/v1/chat/sessions/{thread_id}", json={"title": "Named"})
+        active = await client.get(f"/api/v1/chat/threads/{thread_id}/turns/active")
+        sent = await _send(client, json={"message": "Hi", "thread_id": thread_id})
 
+    assert created.status_code == 201
     assert fetched.status_code == 200
     assert renamed.status_code == 200
     assert renamed.json()["title"] == "Named"
+    assert active.status_code == 204
+    assert sent.status_code == 200
+    assert fake_graph.calls[0][1]["configurable"]["thread_id"].endswith(thread_id)
 
 
 async def test_chat_session_rejects_an_id_of_neither_shape(mocker):

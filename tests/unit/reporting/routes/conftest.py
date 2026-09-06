@@ -23,7 +23,7 @@ def _stub_save_query_history(mocker):
         report_store,
         "save_query_history",
         return_value=QueryHistoryItem(
-            history_id="stub-history-id",
+            history_id=report_store.generate_id(),
             user_id="user-1",
             query="stubbed",
             executed_at="2024-01-01T00:00:00+00:00",

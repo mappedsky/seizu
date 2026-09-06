@@ -1,12 +1,14 @@
 """Tests for the report_store __init__ module (factory and delegators)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 
 from reporting.schema.chat import ChatTurnCommand
 from reporting.schema.space_config import SpaceDeleteResult
 from reporting.services import report_store
+from reporting.services.report_store.base import ReportStore
 from reporting.services.report_store.sql import SQLModelReportStore
 
 
@@ -38,6 +40,12 @@ def test_get_store_returns_singleton():
     assert s1 is s2
 
 
+def test_public_generator_returns_the_store_id_shape():
+    generated = report_store.generate_id()
+
+    assert UUID(generated).version == 7
+
+
 # ---------------------------------------------------------------------------
 # Module-level delegators
 # ---------------------------------------------------------------------------
@@ -45,7 +53,7 @@ def test_get_store_returns_singleton():
 
 @pytest.fixture()
 def mock_store():
-    store = MagicMock()
+    store = MagicMock(spec_set=ReportStore)
     # Make the facade targets async so the delegator tests can assert calls.
     async_methods = {
         "initialize": None,

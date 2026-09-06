@@ -40,11 +40,13 @@ def _mock_cyver(
         mock_driver.execute_query = AsyncMock(side_effect=syntax_exception)
     else:
         mock_summary = MagicMock()
+        mock_summary.gql_status_objects = None
         mock_summary.notifications = syntax_notifications or []
         mock_summary.query_type = query_type
         mock_summary.plan = plan or {}
         mock_driver.execute_query = AsyncMock(return_value=([], mock_summary, []))
     mocker.patch("reporting.services.query_validator._get_async_neo4j_client").return_value = mock_driver
+    mocker.patch("reporting.services.query_validator._get_sync_neo4j_client", return_value=MagicMock())
 
     mocker.patch("reporting.services.query_validator.SchemaValidator").return_value.validate.return_value = (
         schema_ok,
@@ -320,6 +322,29 @@ async def test_validate_query_preserves_performance_notifications(mocker):
 
     assert result.warnings == [description]
     assert result.performance_warnings == [description]
+
+
+def test_current_gql_status_api_does_not_read_deprecated_notifications() -> None:
+    class Status:
+        is_notification = True
+        gql_status = "01N42"
+        status_description = "The query contains a cartesian product"
+        raw_classification = "PERFORMANCE"
+
+    class Summary:
+        gql_status_objects = (Status(),)
+
+        @property
+        def notifications(self):
+            raise AssertionError("deprecated notifications property was read")
+
+    assert query_validator._summary_notifications(Summary()) == [
+        {
+            "code": "01N42",
+            "description": "The query contains a cartesian product",
+            "category": "PERFORMANCE",
+        }
+    ]
 
 
 async def test_validate_query_write_is_error(mocker):

@@ -434,6 +434,7 @@ def test_main_enabled(mocker):
     run_mock = mocker.patch("asyncio.run")
     scheduled_queries.main()
     assert run_mock.call_count == 1
+    run_mock.call_args.args[0].close()
 
 
 def test__bootstrap_registers_sigterm(mocker):

@@ -15,7 +15,7 @@ export interface PanelItemProps {
   item: Panel;
   rowIndex: number;
   index: number;
-  varData: Record<string, { label?: string; value?: string }>;
+  varData: Record<string, { label?: string; value?: string } | undefined>;
   allInputs: ReportInput[];
   resolveQuery: (cypher: string | undefined) => string | undefined;
   resolveCapability: (path: string) => string | undefined;

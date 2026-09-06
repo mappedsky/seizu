@@ -1,11 +1,12 @@
 import { render, screen, cleanup } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import NavItem from '../NavItem';
 
 const theme = createTheme();
 
-function Wrapper({ children }) {
+function Wrapper({ children }: { children: ReactNode }) {
   return (
     <MemoryRouter>
       <ThemeProvider theme={theme}>{children}</ThemeProvider>

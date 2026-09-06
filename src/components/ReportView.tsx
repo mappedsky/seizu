@@ -19,7 +19,7 @@ import {
 import Error from '@mui/icons-material/Error';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 
-import { Report } from 'src/config.context';
+import { Report, type InputValue } from 'src/config.context';
 import { getQueryStringValue } from 'src/components/QueryString';
 import CypherAutocomplete from 'src/components/reports/CypherAutocomplete';
 import FreeTextInput from 'src/components/reports/FreeTextInput';
@@ -90,7 +90,9 @@ function ReportView({
     (path: string): string | undefined => capabilities[path],
     [capabilities],
   );
-  const [varData, setVarData] = useState({});
+  const [varData, setVarData] = useState<
+    Record<string, InputValue | undefined>
+  >({});
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const [toolbarHeight, setToolbarHeight] = useState(64);
   const [collapsedRows, setCollapsedRows] = useState<Record<number, boolean>>(
@@ -140,20 +142,23 @@ function ReportView({
   }, [onRefreshCapabilities]);
 
   useEffect(() => {
-    const initialVarState = {};
+    const initialVarState: Record<string, InputValue | undefined> = {};
     if (report.inputs) {
       report.inputs.forEach((input) => {
         const inputValue = getQueryStringValue(input.input_id);
-        if (inputValue !== undefined) {
+        const scalarInputValue = Array.isArray(inputValue)
+          ? inputValue.find((value): value is string => value !== null)
+          : inputValue;
+        if (typeof scalarInputValue === 'string') {
           // TODO(ryan-lane): Figure out a way to pass the label along with the value in the param
           initialVarState[input.input_id] = {
-            label: inputValue,
-            value: inputValue,
+            label: scalarInputValue,
+            value: scalarInputValue,
           };
         } else if (input.default !== undefined) {
           initialVarState[input.input_id] = input.default;
         } else {
-          initialVarState[input.input_id] = {};
+          initialVarState[input.input_id] = undefined;
         }
       });
     }

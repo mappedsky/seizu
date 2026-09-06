@@ -1,2 +1,4 @@
 [test]
 preload = ["./src/registerTestDom.ts", "./src/setupTests.ts"]
+coverageSkipTestFiles = true
+coverageThreshold = { line = 0.73, function = 0.64 }

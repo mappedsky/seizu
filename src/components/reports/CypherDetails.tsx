@@ -60,13 +60,13 @@ interface DetailsData {
 }
 
 interface CypherDetailsProps {
-  details: DetailsData;
+  details?: DetailsData;
   open: boolean;
   setOpen: (open: boolean) => void;
 }
 
 export default function CypherDetails({
-  details,
+  details = {},
   open,
   setOpen,
 }: CypherDetailsProps) {

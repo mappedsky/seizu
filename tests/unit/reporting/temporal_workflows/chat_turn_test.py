@@ -20,6 +20,7 @@ from reporting.temporal_workflows.shared import ChatTurnInvocation, ChatTurnRunR
 
 #: Turns the fake activities finalized, by turn id.
 _FINALIZED: list[str] = []
+_BLOCKING_STARTED: asyncio.Event
 
 
 def _invocation(**kwargs) -> ChatTurnInvocation:
@@ -50,13 +51,16 @@ async def _run_failing(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
 async def _run_blocking(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
     # Stands in for an activity that is scheduled but never gets to finish --
     # the case where no code of ours runs at the end.
-    await asyncio.sleep(600)
+    _BLOCKING_STARTED.set()
+    await asyncio.Event().wait()
     raise AssertionError("should not be reached")  # pragma: no cover
 
 
 @pytest.fixture(autouse=True)
 def _reset() -> None:
+    global _BLOCKING_STARTED
     _FINALIZED.clear()
+    _BLOCKING_STARTED = asyncio.Event()
 
 
 async def test_a_finished_turn_is_not_finalized_twice() -> None:
@@ -119,8 +123,7 @@ async def test_a_cancelled_turn_is_finalized() -> None:
                 id=workflow_id_for("turn-3"),
                 task_queue="test-q",
             )
-            # Let the workflow reach the activity before stopping it.
-            await asyncio.sleep(0.2)
+            await _BLOCKING_STARTED.wait()
             await handle.cancel()
             with pytest.raises(WorkflowFailureError):
                 await handle.result()

@@ -799,8 +799,8 @@ function ReportsList() {
         <MoveToSpaceDialog
           open
           reportName={moveTarget.name}
-          currentSpaceId={moveTarget.space_id}
-          currentSubspaceId={moveTarget.subspace_id}
+          currentSpaceId={moveTarget.space_id ?? null}
+          currentSubspaceId={moveTarget.subspace_id ?? null}
           onClose={() => setMoveTarget(null)}
           onConfirm={async (spaceId, subspaceId) => {
             await setReportSpace(moveTarget.report_id, spaceId, subspaceId);

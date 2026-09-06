@@ -2,6 +2,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
@@ -1893,7 +1894,7 @@ async def test_chat_tool_call_forwards_external_annotations(mocker):
     assert call.await_args.kwargs["external_tool_annotations"] == annotations
 
 
-def test_confirmation_batch_id_only_for_multiple_requests(mocker):
+def test_confirmation_batch_id_only_for_multiple_requests():
     request = chat_graph.ToolCallRequest(
         id="call_1",
         name="reports__delete",
@@ -1907,12 +1908,9 @@ def test_confirmation_batch_id_only_for_multiple_requests(mocker):
     )
 
     assert chat_graph._confirmation_batch_id_for_requests([request]) is None
-    mocker.patch(
-        "reporting.services.chat_graph.report_store.generate_id",
-        return_value="123456789012345678",
-    )
     batch_id = chat_graph._confirmation_batch_id_for_requests([request, request])
-    assert batch_id == "123456789012345678"
+    assert batch_id is not None
+    assert UUID(batch_id).version == 7
 
 
 async def test_pending_confirmation_response_uses_chat_panel_not_url():

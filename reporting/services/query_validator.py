@@ -312,6 +312,30 @@ class ValidationResult:
         return bool(self.errors)
 
 
+def _summary_notifications(summary: Any) -> list[dict[str, str]]:
+    """Normalize current GQL status objects and legacy Neo4j notifications."""
+    statuses = getattr(summary, "gql_status_objects", None)
+    if isinstance(statuses, (list, tuple)):
+        notifications = []
+        for status in statuses:
+            if not getattr(status, "is_notification", False):
+                continue
+            notifications.append(
+                {
+                    "code": str(getattr(status, "gql_status", "")),
+                    "description": str(getattr(status, "status_description", status)),
+                    "category": str(
+                        getattr(status, "raw_classification", None) or getattr(status, "classification", "")
+                    ),
+                }
+            )
+        return notifications
+
+    # Neo4j drivers before gql_status_objects exposed dictionaries here. Only
+    # read the compatibility property when the current API is unavailable.
+    return list(getattr(summary, "notifications", None) or [])
+
+
 async def validate_query(query: str, params: dict[str, Any] | None = None) -> ValidationResult:
     result = ValidationResult()
     driver = _get_async_neo4j_client()
@@ -330,8 +354,9 @@ async def validate_query(query: str, params: dict[str, Any] | None = None) -> Va
         if summary.query_type != "r":
             result.errors.append("Write queries are not allowed")
             return result
-        if summary.notifications:
-            for notification in summary.notifications:
+        notifications = _summary_notifications(summary)
+        if notifications:
+            for notification in notifications:
                 code = notification.get("code", "")
                 description = notification.get("description", str(notification))
                 if str(notification.get("category", "")).upper() == "PERFORMANCE":
@@ -341,6 +366,8 @@ async def validate_query(query: str, params: dict[str, Any] | None = None) -> Va
                     # When params are omitted (e.g. /api/v1/validate called
                     # without params), surface as a warning rather than
                     # blocking the caller.
+                    result.warnings.append(description)
+                elif "parameter" in description.lower() and "provided" in description.lower():
                     result.warnings.append(description)
                 elif code in (
                     "Neo.DatabaseError.Statement.ExecutionFailed",
