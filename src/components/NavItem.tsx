@@ -98,14 +98,20 @@ function NavItem({
             ...(rest.sx as object),
           }}
         >
-          <Button
-            aria-label={collapsed ? title : undefined}
-            component={RouterLink}
-            sx={buttonSx}
-            to={href}
-          >
-            {buttonContent}
-          </Button>
+          {href ? (
+            <Button
+              aria-label={collapsed ? title : undefined}
+              component={RouterLink}
+              sx={buttonSx}
+              to={href}
+            >
+              {buttonContent}
+            </Button>
+          ) : (
+            <Button disabled sx={buttonSx}>
+              {buttonContent}
+            </Button>
+          )}
         </ListItem>
       </div>
     );

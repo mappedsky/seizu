@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 from hypothesis import given, settings
@@ -24,8 +23,8 @@ async def _call_graph_query(args: dict[str, object]) -> dict[str, object]:
 
 @settings(max_examples=75)
 @given(query=st.one_of(st.none(), st.booleans(), st.integers(), st.text(max_size=120)))
-def test_graph_query_fuzzed_query_argument_never_raises(query: object) -> None:
-    result = asyncio.run(_call_graph_query({"query": query}))
+async def test_graph_query_fuzzed_query_argument_never_raises(query: object) -> None:
+    result = await _call_graph_query({"query": query})
 
     assert "error" in result or "results" in result or "errors" in result
 
@@ -38,7 +37,7 @@ def test_graph_query_fuzzed_query_argument_never_raises(query: object) -> None:
         max_size=5,
     )
 )
-def test_graph_query_fuzzed_argument_map_never_raises(args: dict[str, object]) -> None:
-    result = asyncio.run(_call_graph_query(args))
+async def test_graph_query_fuzzed_argument_map_never_raises(args: dict[str, object]) -> None:
+    result = await _call_graph_query(args)
 
     assert "error" in result or "results" in result or "errors" in result

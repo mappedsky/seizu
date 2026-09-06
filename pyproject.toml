@@ -59,6 +59,7 @@ seizu-temporal-worker = "reporting.temporal_worker:main"
 dev = [
     "aiosqlite>=0.21.0",
     "hypothesis>=6.152.6",
+    "mutmut>=3.7.0",
     "pre-commit>=4.0.0",
     # Samples a running process's stack from outside it. The chat path
     # intermittently blocks the event loop past gunicorn's worker timeout, and
@@ -93,6 +94,22 @@ override-dependencies = [
 # repository has a single canonical uv.lock for dependency graph submission.
 [tool.uv.workspace]
 members = ["packages/seizu-cli"]
+
+[tool.mutmut]
+source_paths = ["reporting/"]
+only_mutate = [
+    "reporting/services/query_validator.py",
+    "reporting/services/report_store/sql.py",
+]
+pytest_add_cli_args_test_selection = [
+    "tests/unit/reporting/schema/ids_test.py",
+    "tests/unit/reporting/services/query_validator_test.py",
+    "tests/unit/reporting/fuzz/query_validator_fuzz_test.py",
+    "tests/unit/reporting/services/report_store/store_test.py",
+]
+pytest_add_cli_args = ["-q", "-p", "no:cov"]
+also_copy = ["cartography_sync/", "seizu_schema/"]
+max_stack_depth = 12
 
 [tool.ruff]
 line-length = 120

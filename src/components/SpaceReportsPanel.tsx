@@ -360,7 +360,6 @@ function SpaceReportsPanel({
                           component="span"
                           sx={{
                             flexGrow: 1,
-                            minWidth: 0,
                             ...listTableTruncateSx,
                           }}
                         >

@@ -15,7 +15,14 @@ const reactRecommended = eslintReact.configs['recommended-typescript'];
 // not compatible with ESLint 10.
 export default [
   {
-    ignores: ['build/**', 'dist/**', 'coverage/**', 'node_modules/**', 'notebooks/**'],
+    ignores: [
+      'build/**',
+      'dist/**',
+      'coverage/**',
+      'node_modules/**',
+      'notebooks/**',
+      'src/api/openapi.generated.ts',
+    ],
   },
   js.configs.recommended,
   {

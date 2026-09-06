@@ -5,7 +5,7 @@ from reporting.authnz import CurrentUser, get_current_user
 from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import User
-from reporting.services.report_store.sql import generate_report_id
+from reporting.services import report_store
 
 _USER = User(
     user_id="user-1",
@@ -19,8 +19,9 @@ _USER = User(
 
 # Minted the way the store mints them, so the routes are exercised against the
 # id shape they actually receive rather than a hand-written one.
-_CONFIRMATION_ID = generate_report_id()
-_BATCH_ID = generate_report_id()
+_CONFIRMATION_ID = report_store.generate_id()
+_BATCH_ID = report_store.generate_id()
+_THREAD_ID = report_store.generate_id()
 
 
 def _confirmation(expires_at: str = "2099-01-01T00:30:00+00:00") -> ActionConfirmation:
@@ -29,7 +30,7 @@ def _confirmation(expires_at: str = "2099-01-01T00:30:00+00:00") -> ActionConfir
             "confirmation_id": _CONFIRMATION_ID,
             "user_id": "user-1",
             "source": "chat",
-            "session_key": "123",
+            "session_key": _THREAD_ID,
             "tool_name": "toolsets__update_tool",
             "action": "update",
             "resource_type": "tool",
@@ -64,7 +65,7 @@ async def test_get_confirmation_returns_public_shape(mocker):
     assert response.status_code == 200
     body = response.json()["confirmation"]
     assert body["arguments"] == {"name": "Lookup", "cypher": "MATCH (n) RETURN n"}
-    assert body["thread_id"] == "123"
+    assert body["thread_id"] == _THREAD_ID
     assert "arguments_hash" not in body
     assert "session_key" not in body
     assert "user_id" not in body
@@ -89,14 +90,14 @@ async def test_list_confirmations_uses_chat_thread_session(mocker):
     app = _make_app()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/v1/confirmations?thread_id=123")
+        response = await client.get("/api/v1/confirmations", params={"thread_id": _THREAD_ID})
 
     assert response.status_code == 200
     assert len(response.json()["confirmations"]) == 1
     list_confirmations.assert_awaited_once_with(
         user_id="user-1",
         source="chat",
-        session_key="123",
+        session_key=_THREAD_ID,
         status="pending",
     )
 

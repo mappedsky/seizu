@@ -1,10 +1,11 @@
 import { render, screen, cleanup } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import Hidden from '../Hidden';
 
 const theme = createTheme();
 
-function Wrapper({ children }) {
+function Wrapper({ children }: { children: ReactNode }) {
   return <ThemeProvider theme={theme}>{children}</ThemeProvider>;
 }
 
@@ -24,18 +25,14 @@ describe('Hidden', () => {
     expect(screen.getByText('visible content')).toBeInTheDocument();
   });
 
-  it('renders null when hidden (lgUp and media matches)', () => {
-    // Mock useMediaQuery to return true (meaning the breakpoint matches, so children are hidden)
-    jest.mock('@mui/material/useMediaQuery', () => () => true);
-    // Re-import to get mocked version - instead, just verify the component renders without error
+  it('uses the default down-lg rule when lgUp is absent', () => {
     render(
       <Wrapper>
-        <Hidden lgUp>
-          <span>hidden content</span>
+        <Hidden>
+          <span>responsive content</span>
         </Hidden>
       </Wrapper>,
     );
-    // Without mocking matchMedia in jsdom, useMediaQuery returns false so lgUp won't hide content
-    // This test verifies the component renders without error in either case
+    expect(screen.getByText('responsive content')).toBeInTheDocument();
   });
 });

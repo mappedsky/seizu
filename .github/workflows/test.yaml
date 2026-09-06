@@ -24,7 +24,10 @@ jobs:
       - name: Run unit tests
         run: |
           uv sync --frozen --all-groups --all-packages --no-install-workspace
-          uv run --frozen --no-sync pytest --strict --junitxml=coverage/unit.xml --cov=reporting --cov=seizu_schema --cov-report=html:coverage/cov_html --cov-report=xml:coverage/cov.xml --cov-report=term --no-cov-on-fail tests/unit
+          uv run --frozen --no-sync pytest --strict --junitxml=coverage/unit.xml --cov=reporting --cov=seizu_schema --cov=seizu_cli --cov=cartography_sync --cov-fail-under=0 --cov-report=html:coverage/cov_html --cov-report=xml:coverage/cov.xml --cov-report=json:coverage/cov.json --cov-report=term --no-cov-on-fail tests/unit
+          scripts/check_unit_coverage.py
+      - name: Check critical branch coverage
+        run: scripts/test_critical_branches.sh
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -41,8 +44,54 @@ jobs:
         run: bun install
       - name: Type check
         run: bun run type-check
+      - name: Verify generated API types
+        run: bun run openapi:check
       - name: Run tests
         run: bun run test:ci
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read  # for actions/checkout
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: seizu
+          POSTGRES_USER: seizu
+          POSTGRES_PASSWORD: seizu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U seizu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      neo4j:
+        image: neo4j:5.26
+        env:
+          NEO4J_AUTH: none
+        ports:
+          - 7474:7474
+          - 7687:7687
+        options: >-
+          --health-cmd "wget -qO- http://localhost:7474/ || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 18
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+      - name: Run live dependency contracts
+        env:
+          TEST_POSTGRES_URL: postgresql://seizu:seizu@localhost:5432/seizu
+          NEO4J_URI: bolt://localhost:7687
+        run: |
+          uv sync --frozen --all-groups --all-packages --no-install-workspace
+          uv run --frozen --no-sync pytest tests/integration -v
   build-python-packages:
     runs-on: ubuntu-latest
     permissions:

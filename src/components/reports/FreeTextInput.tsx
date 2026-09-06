@@ -34,13 +34,13 @@ export default function FreeTextInput({
         localValue === ''
       ) {
         setValue?.({ ...value, [inputId || '']: inputDefault });
-        setQueryStringValue(inputId, inputDefault?.value);
+        if (inputId) setQueryStringValue(inputId, inputDefault?.value);
       } else {
         setValue?.({
           ...value,
           [inputId || '']: { label: '', value: localValue },
         });
-        setQueryStringValue(inputId, localValue);
+        if (inputId) setQueryStringValue(inputId, localValue);
       }
     }, DEBOUNCE_MS);
 

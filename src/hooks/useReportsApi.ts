@@ -1,4 +1,5 @@
 import { useState, useEffect, useContext, useCallback } from 'react';
+import type { components } from 'src/api/openapi.generated';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
 import { Report } from 'src/config.context';
@@ -41,40 +42,12 @@ export function clearCapabilitiesCache(): void {
   dashboardCacheEntry = null;
 }
 
-export interface ReportListItem {
-  report_id: string;
-  name: string;
-  description: string;
-  current_version: number;
-  created_at: string;
-  updated_at: string;
-  created_by: string;
-  updated_by: string;
-  access: ReportAccess;
-  pinned: boolean;
-  space_id: string | null;
-  subspace_id: string | null;
-}
-
-export interface ReportAccess {
-  scope: 'private' | 'public';
-}
-
-export interface ReportVersion {
-  report_id: string;
-  name: string;
-  version: number;
-  config: Report;
-  created_at: string;
-  created_by: string;
-  report_created_by: string;
-  report_updated_by: string;
-  access: ReportAccess;
-  comment: string | null;
-  query_capabilities?: Record<string, string>;
-  space_id: string | null;
-  subspace_id: string | null;
-}
+export type ReportListItem = components['schemas']['ReportListItem'];
+export type ReportAccess = components['schemas']['ReportAccess'];
+export type ReportVersion = Omit<
+  components['schemas']['ReportVersion'],
+  'config'
+> & { config: Report };
 
 const REPORT_QUERY_CAPABILITIES_QUERY = '?include_query_capabilities=true';
 const REPORTS_LIST_PAGE_SIZE = 500;
@@ -341,10 +314,10 @@ export function useDashboardReport(): {
         if (data) {
           dashboardCacheEntry = {
             report: data.config,
-            queryCapabilities: data.query_capabilities,
+            queryCapabilities: data.query_capabilities ?? undefined,
           };
           setReport(data.config);
-          setQueryCapabilities(data.query_capabilities);
+          setQueryCapabilities(data.query_capabilities ?? undefined);
         }
         setLoading(false);
       })
@@ -764,13 +737,13 @@ export function useReport(reportId: string | undefined): {
           report: data.config,
           name: data.name,
           reportVersion: data,
-          queryCapabilities: data.query_capabilities,
+          queryCapabilities: data.query_capabilities ?? undefined,
         };
         reportCapabilitiesCache.set(reportId, entry);
         setReport(data.config);
         setName(data.name);
         setReportVersion(data);
-        setQueryCapabilities(data.query_capabilities);
+        setQueryCapabilities(data.query_capabilities ?? undefined);
         setLoading(false);
       })
       .catch((err: Error) => {

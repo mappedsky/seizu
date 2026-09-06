@@ -183,3 +183,6 @@ chat-harness-arm.yml
 
 # Scratch frames from scripts/walkthroughs (only the .gif in images/ is kept)
 .walkthroughs/
+
+# Generated mutation-testing sandbox and result cache.
+mutants/

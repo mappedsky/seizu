@@ -29,15 +29,24 @@ test: test_unit test_frontend
 
 .PHONY: test_unit
 test_unit: junit build
-	docker compose run --rm seizu uv run --frozen --no-sync pytest --strict --junitxml=coverage/unit.xml --cov=reporting --cov=seizu_schema --cov-report=html:coverage/cov_html --cov-report=xml:coverage/cov.xml --cov-report=term --no-cov-on-fail tests/unit
+	docker compose run --rm seizu uv run --frozen --no-sync pytest --strict --junitxml=coverage/unit.xml --cov=reporting --cov=seizu_schema --cov=seizu_cli --cov=cartography_sync --cov-fail-under=0 --cov-report=html:coverage/cov_html --cov-report=xml:coverage/cov.xml --cov-report=json:coverage/cov.json --cov-report=term --no-cov-on-fail tests/unit
+	docker compose run --rm seizu scripts/check_unit_coverage.py
+
+.PHONY: test_critical_branches
+test_critical_branches: junit build
+	docker compose run --rm seizu scripts/test_critical_branches.sh
+
+.PHONY: test_mutations
+test_mutations: build
+	docker compose run --rm seizu scripts/test_mutations.sh
 
 .PHONY: test_integration
 test_integration:
-	docker compose run --rm seizu uv run --frozen --no-sync pytest tests/integration -v
+	docker compose run --rm -e TEST_POSTGRES_URL=postgresql://seizu:seizu@postgres:5432/seizu seizu uv run --frozen --no-sync pytest tests/integration -v
 
 .PHONY: test_query_validator_live
 test_query_validator_live: config_setup
-	docker compose run --rm seizu uv run --frozen --no-sync pytest tests/integration/reporting/services/query_validator_test.py -v
+	docker compose run --rm -e HYPOTHESIS_STORAGE_DIRECTORY=/tmp/hypothesis seizu uv run --frozen --no-sync pytest -o cache_dir=/tmp/pytest_cache tests/integration/reporting/services/query_validator_test.py -v
 
 # Verifies every cartography_sync registry flag exists in the pinned image's
 # CLI — run after bumping the Dockerfile.cartography pin.
@@ -150,7 +159,7 @@ schema: generate_openapi
 # Export the OpenAPI spec from the FastAPI app (no backend connections required).
 .PHONY: generate_openapi
 generate_openapi:
-	docker compose run --rm --no-deps seizu uv run --frozen --no-sync python -c "from reporting.app import create_app; import json; app = create_app(); print(json.dumps(app.openapi()))" > schema/openapi.json
+	docker compose run --rm --no-deps -e CHAT_ENABLED=true seizu uv run --frozen --no-sync python -c "from reporting.app import create_app; import json; app = create_app(); print(json.dumps(app.openapi()))" > schema/openapi.json
 
 # Generate a client library from schema/openapi.json using openapi-generator-cli.
 # Usage: make generate_client LANG=go

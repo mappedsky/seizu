@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Box,
   Divider,
@@ -172,10 +172,10 @@ export default function CypherVerticalTable({
   }
 
   function makeTable(data: Record<string, unknown>) {
-    const rows = [];
+    const rows: ReactNode[] = [];
     Object.keys(data).forEach((key) => {
-      const cells = [];
-      let cellData;
+      const cells: ReactNode[] = [];
+      let cellData: ReactNode;
       if (data[key] === undefined || data[key] === null) {
         // return here is inside the forEach, so it's effectively a continue
         return;
@@ -183,7 +183,7 @@ export default function CypherVerticalTable({
       if (Array.isArray(data[key])) {
         // Unique the list prior to iterating over it.
         const uniqueItems = [...new Set(data[key] as unknown[])];
-        const listItems = [];
+        const listItems: ReactNode[] = [];
         uniqueItems.forEach((item, index) => {
           let mungedItem;
           if (typeof item === 'object' && item !== null) {
@@ -246,11 +246,11 @@ export default function CypherVerticalTable({
     );
   }
 
-  const tables = [];
+  const tables: ReactNode[] = [];
   for (let i = 0; i < records.length; i++) {
     const record = records[i];
     const mungedData = flattenRecord(record);
-    const caption = String(mungedData[id]);
+    const caption = String(mungedData[id ?? '']);
     const table = makeTable(mungedData);
     tables.push(
       <Box

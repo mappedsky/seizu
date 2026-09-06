@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from hypothesis import given, settings
@@ -19,6 +18,7 @@ def _mock_explain(query_type: str = "r") -> MagicMock:
 async def _validate_with_mocked_neo4j(query: str, query_type: str = "r"):
     with (
         patch("reporting.services.query_validator._get_async_neo4j_client", return_value=_mock_explain(query_type)),
+        patch("reporting.services.query_validator._get_sync_neo4j_client", return_value=MagicMock()),
         patch("reporting.services.query_validator.SchemaValidator") as schema_validator,
         patch("reporting.services.query_validator.PropertiesValidator") as properties_validator,
     ):
@@ -128,20 +128,20 @@ subquery_wrapper = st.sampled_from(
 
 @settings(max_examples=75)
 @given(separator=separator)
-def test_dangerous_load_csv_variants_are_blocked(separator: str) -> None:
+async def test_dangerous_load_csv_variants_are_blocked(separator: str) -> None:
     query = f"LOAD{separator}CSV FROM 'http://169.254.169.254/latest/meta-data/' AS row RETURN row"
 
-    result = asyncio.run(_validate_with_mocked_neo4j(query))
+    result = await _validate_with_mocked_neo4j(query)
 
     assert result.has_errors
 
 
 @settings(max_examples=75)
 @given(separator=separator)
-def test_dangerous_call_apoc_variants_are_blocked(separator: str) -> None:
+async def test_dangerous_call_apoc_variants_are_blocked(separator: str) -> None:
     query = f"CALL{separator}apoc.load.json('http://169.254.169.254/') YIELD value RETURN value"
 
-    result = asyncio.run(_validate_with_mocked_neo4j(query))
+    result = await _validate_with_mocked_neo4j(query)
 
     assert result.has_errors
 
@@ -153,7 +153,7 @@ def test_dangerous_call_apoc_variants_are_blocked(separator: str) -> None:
     show_keyword=st.sampled_from(["SHOW", r"SH\u004fW"]),
     separator=separator,
 )
-def test_admin_command_variants_are_blocked(
+async def test_admin_command_variants_are_blocked(
     prefix: str,
     suffix: str,
     show_keyword: str,
@@ -161,7 +161,7 @@ def test_admin_command_variants_are_blocked(
 ) -> None:
     query = f"{prefix} {show_keyword}{separator}SETTINGS YIELD name RETURN name {suffix}"
 
-    result = asyncio.run(_validate_with_mocked_neo4j(query))
+    result = await _validate_with_mocked_neo4j(query)
 
     assert result.has_errors
 
@@ -175,7 +175,7 @@ def test_admin_command_variants_are_blocked(
     second_separator=separator,
     following_clause=use_following_clause,
 )
-def test_use_clause_variants_are_blocked(
+async def test_use_clause_variants_are_blocked(
     anchor: tuple[str, str],
     use_keyword: str,
     first_separator: str,
@@ -186,7 +186,7 @@ def test_use_clause_variants_are_blocked(
     prefix, suffix = anchor
     query = f"{prefix}{use_keyword}{first_separator}{graph_reference}{second_separator}{following_clause}{suffix}"
 
-    result = asyncio.run(_validate_with_mocked_neo4j(query))
+    result = await _validate_with_mocked_neo4j(query)
 
     assert result.has_errors
 
@@ -199,7 +199,7 @@ def test_use_clause_variants_are_blocked(
     else_separator=plain_whitespace,
     operator=case_operator,
 )
-def test_case_expressions_with_use_variable_are_allowed(
+async def test_case_expressions_with_use_variable_are_allowed(
     before_use: int,
     alternate: int,
     then_separator: str,
@@ -212,7 +212,7 @@ def test_case_expressions_with_use_variable_are_allowed(
         f"{else_separator}ELSE alt END AS value"
     )
 
-    result = asyncio.run(_validate_with_mocked_neo4j(query))
+    result = await _validate_with_mocked_neo4j(query)
 
     assert not result.has_errors
 
@@ -222,10 +222,10 @@ def test_case_expressions_with_use_variable_are_allowed(
     key_separator=plain_whitespace,
     value=st.integers(min_value=-100, max_value=100),
 )
-def test_map_keys_named_use_are_allowed(key_separator: str, value: int) -> None:
+async def test_map_keys_named_use_are_allowed(key_separator: str, value: int) -> None:
     query = f"RETURN {{use:{key_separator}{value}}} AS item"
 
-    result = asyncio.run(_validate_with_mocked_neo4j(query))
+    result = await _validate_with_mocked_neo4j(query)
 
     assert not result.has_errors
 
@@ -235,14 +235,14 @@ def test_map_keys_named_use_are_allowed(key_separator: str, value: int) -> None:
     wrapper=subquery_wrapper,
     payload=dangerous_subquery_payload,
 )
-def test_dangerous_subquery_payload_variants_are_blocked(
+async def test_dangerous_subquery_payload_variants_are_blocked(
     wrapper: tuple[str, str],
     payload: str,
 ) -> None:
     prefix, suffix = wrapper
     query = f"{prefix}{payload}{suffix}"
 
-    result = asyncio.run(_validate_with_mocked_neo4j(query))
+    result = await _validate_with_mocked_neo4j(query)
 
     assert result.has_errors
 
@@ -252,14 +252,14 @@ def test_dangerous_subquery_payload_variants_are_blocked(
     wrapper=subquery_wrapper,
     payload=write_subquery_payload,
 )
-def test_write_subquery_payload_variants_are_blocked_by_explain(
+async def test_write_subquery_payload_variants_are_blocked_by_explain(
     wrapper: tuple[str, str],
     payload: str,
 ) -> None:
     prefix, suffix = wrapper
     query = f"{prefix}{payload}{suffix}"
 
-    result = asyncio.run(_validate_with_mocked_neo4j(query, query_type="rw"))
+    result = await _validate_with_mocked_neo4j(query, query_type="rw")
 
     assert result.has_errors
 
@@ -269,13 +269,13 @@ def test_write_subquery_payload_variants_are_blocked_by_explain(
     wrapper=subquery_wrapper,
     payload=read_only_subquery_payload,
 )
-def test_read_only_subquery_payload_variants_are_allowed(
+async def test_read_only_subquery_payload_variants_are_allowed(
     wrapper: tuple[str, str],
     payload: str,
 ) -> None:
     prefix, suffix = wrapper
     query = f"{prefix}{payload}{suffix}"
 
-    result = asyncio.run(_validate_with_mocked_neo4j(query))
+    result = await _validate_with_mocked_neo4j(query)
 
     assert not result.has_errors

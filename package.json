@@ -10,8 +10,10 @@
     "build": "tsc --noEmit && vite build",
     "test": "bun test --timeout 30000",
     "type-check": "tsc --noEmit",
-    "test:ci": "bun test --watchAll=false --timeout 30000",
-    "test:type-check": "tsc --noEmit && bun test --watchAll=false --timeout 30000"
+    "test:ci": "bun test --watchAll=false --timeout 30000 --isolate --coverage --reporter=dots",
+    "test:type-check": "tsc --noEmit && bun test --watchAll=false --timeout 30000 --isolate",
+    "openapi:generate": "openapi-typescript schema/openapi.json -o src/api/openapi.generated.ts",
+    "openapi:check": "openapi-typescript schema/openapi.json -o src/api/openapi.generated.ts --check"
   },
   "browserslist": {
     "production": [
@@ -92,6 +94,7 @@
     "fast-check": "^4.8.0",
     "globals": "^17.6.0",
     "markdown-it": "^14.2.0",
+    "openapi-typescript": "^7.13.0",
     "prettier": "^3.8.3",
     "typescript": "^6.0.3",
     "vite": "^8.1.0"

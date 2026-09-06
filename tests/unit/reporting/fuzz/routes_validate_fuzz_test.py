@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 from httpx import ASGITransport, AsyncClient
@@ -53,9 +52,9 @@ async def _post_validate(payload: dict[str, object]) -> int:
     query=st.one_of(st.text(max_size=120), json_value),
     params=st.one_of(st.none(), st.dictionaries(st.text(max_size=12), json_value, max_size=4), json_value),
 )
-def test_validate_endpoint_fuzzed_json_never_500s(query: object, params: object) -> None:
+async def test_validate_endpoint_fuzzed_json_never_500s(query: object, params: object) -> None:
     payload = {"query": query, "params": params}
 
-    status_code = asyncio.run(_post_validate(payload))
+    status_code = await _post_validate(payload)
 
     assert status_code < 500
