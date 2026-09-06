@@ -403,6 +403,7 @@ async def call_tool_for_user(
             confirmation_source=confirmation_source,
             confirmation_session_key=confirmation_session_key,
         ),
+        arguments,
     )
     return ToolCallOutcome(content=content, is_error=is_error)
 
@@ -468,12 +469,15 @@ async def call_tool_for_chat(
             bypass_confirmations=bypass_confirmations,
             external_tool_annotations=external_tool_annotations,
         ),
+        arguments,
     )
     return ChatActionOutcome(text=_text_content_to_string(content), blocked=blocked)
 
 
 async def _guarded(
-    name: str, call: Coroutine[Any, Any, tuple[list[TextContent], ChatBlockReason | None]]
+    name: str,
+    call: Coroutine[Any, Any, tuple[list[TextContent], ChatBlockReason | None]],
+    arguments: dict[str, Any] | None = None,
 ) -> tuple[list[TextContent], ChatBlockReason | None, bool]:
     """Never let a tool call raise out of the runtime; say when one failed.
 
@@ -497,7 +501,11 @@ async def _guarded(
     # built-in, user-defined and external alike. ``outcome`` is a string rather
     # than a flag for the same reason ``stopped_by`` is on a step span: "it
     # failed" and "it was refused" are different questions (AGT-026, AGT-029).
-    with telemetry.span(f"tool {name}", tool=name) as current:
+    with telemetry.span(
+        f"tool {name}",
+        tool=name,
+        arguments=telemetry.content(json.dumps(arguments or {}, default=str)),
+    ) as current:
         try:
             content, blocked = await call
         except _ToolFailure as failure:
@@ -506,14 +514,18 @@ async def _guarded(
                 outcome="error",
                 # A tool's own error text: the rate limit, the quota, the
                 # upstream message. Content, so opt-in.
-                error_text=telemetry.content(json.dumps(failure.payload, default=str), 400),
+                error_text=telemetry.content(json.dumps(failure.payload, default=str)),
             )
             return text_response(failure.payload), None, True
         except Exception as exc:
             logger.exception("Unhandled error calling MCP tool %s", name)
             telemetry.set_attributes(current, outcome="error", error_type=exc.__class__.__name__)
             return text_response({"error": f"Failed to execute tool '{name}'"}), None, True
-        telemetry.set_attributes(current, outcome=blocked.value if blocked is not None else "ok")
+        telemetry.set_attributes(
+            current,
+            outcome=blocked.value if blocked is not None else "ok",
+            result=telemetry.content(_text_content_to_string(content)),
+        )
         return content, blocked, False
 
 
@@ -850,6 +862,9 @@ def _text_content_to_string(content: list[TextContent]) -> str:
 
 
 SKILL_TOOLS_META_KEY = "seizu_tools_required"
+SKILL_ID_META_KEY = "seizu_skill_id"
+SKILL_NAME_META_KEY = "seizu_skill_name"
+SKILL_VERSION_META_KEY = "seizu_skill_version"
 
 
 def declared_tool_names(prompts: list[Prompt], only: set[str] | None = None) -> frozenset[str]:
@@ -928,7 +943,12 @@ async def list_prompts_for_user(
                     name=prompt_name,
                     title=plugin_skill_item.title,
                     description=_skill_prompt_description(plugin_skill_item),
-                    meta={SKILL_TOOLS_META_KEY: tools_required},
+                    meta={
+                        SKILL_TOOLS_META_KEY: tools_required,
+                        SKILL_ID_META_KEY: prompt_name,
+                        SKILL_NAME_META_KEY: plugin_skill_item.title,
+                        SKILL_VERSION_META_KEY: plugin_skill_item.revision,
+                    },
                     arguments=[
                         PromptArgument(
                             name=parameter.name,
@@ -951,7 +971,12 @@ async def list_prompts_for_user(
                     # Carried on the listing so a caller can honour the author's
                     # declaration without a second store read. The attribute is
                     # `meta`, aliased to the wire's `_meta`.
-                    meta={SKILL_TOOLS_META_KEY: list(legacy_skill.tools_required or ())},
+                    meta={
+                        SKILL_TOOLS_META_KEY: list(legacy_skill.tools_required or ()),
+                        SKILL_ID_META_KEY: f"{legacy_skill.skillset_id}__{legacy_skill.skill_id}",
+                        SKILL_NAME_META_KEY: legacy_skill.name,
+                        SKILL_VERSION_META_KEY: legacy_skill.current_version,
+                    },
                     arguments=[
                         PromptArgument(
                             name=p.name,

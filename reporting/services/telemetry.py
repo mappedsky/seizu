@@ -15,6 +15,7 @@ AGT-026.
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from reporting import settings
@@ -28,6 +29,11 @@ _configured = False
 #: Attribute prefix for everything Seizu adds, so a backend can tell our
 #: attributes from the semantic-convention ones.
 _NS = "seizu"
+
+# The primary skill in the current execution scope. A worker usually renders
+# one planned skill and may load more while it runs; the primary identity stays
+# stable so every child span can be grouped into the same population.
+_current_skill: ContextVar[dict[str, Any]] = ContextVar("_current_skill", default={})
 
 
 def configure() -> None:
@@ -96,7 +102,7 @@ def span(name: str, **attributes: Any) -> Iterator[Any]:
         yield None
         return
     with _tracer.start_as_current_span(name) as current:
-        set_attributes(current, **attributes)
+        set_attributes(current, **_current_skill.get(), **attributes)
         try:
             yield current
         except BaseException as exc:
@@ -128,7 +134,7 @@ def set_attributes(current: Any, **attributes: Any) -> None:
             logger.debug("could not set span attribute %s", key)
 
 
-def content(text: str, limit: int = 2000) -> str:
+def content(text: str) -> str:
     """Text for a span, or ``""`` unless recording content is switched on.
 
     Off by default and deliberately: a trace of this system carries graph rows,
@@ -138,7 +144,48 @@ def content(text: str, limit: int = 2000) -> str:
     """
     if not settings.TELEMETRY_RECORD_CONTENT or not text:
         return ""
-    return text[:limit]
+    return text[: max(0, settings.TELEMETRY_CONTENT_MAX_CHARS)]
+
+
+def prompt(text: str) -> str:
+    """Prompt text for a span, controlled by the more sensitive prompt opt-in."""
+    if not settings.TELEMETRY_RECORD_PROMPTS or not text:
+        return ""
+    return text[: max(0, settings.TELEMETRY_CONTENT_MAX_CHARS)]
+
+
+@contextmanager
+def skill_scope(*, skill_id: str = "", skill_name: str = "", skill_version: int = 0) -> Iterator[None]:
+    """Make one skill identity available to this scope's descendant spans."""
+    identity = {
+        "skill_id": skill_id,
+        "skill_name": skill_name,
+        "skill_version": skill_version,
+    }
+    token = _current_skill.set({key: value for key, value in identity.items() if value not in (None, "", 0)})
+    try:
+        yield
+    finally:
+        _current_skill.reset(token)
+
+
+def record_skill(*, skill_id: str = "", skill_name: str = "", skill_version: int = 0) -> None:
+    """Record the first rendered skill in a scope and annotate its active span."""
+    if _current_skill.get():
+        return
+    identity = {
+        "skill_id": skill_id,
+        "skill_name": skill_name,
+        "skill_version": skill_version,
+    }
+    identity = {key: value for key, value in identity.items() if value not in (None, "", 0)}
+    _current_skill.set(identity)
+    set_attributes(current_span(), **identity)
+
+
+def current_skill_attributes() -> dict[str, Any]:
+    """A copy of the primary skill identity accumulated in this scope."""
+    return dict(_current_skill.get())
 
 
 def temporal_interceptors() -> list[Any]:
