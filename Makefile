@@ -46,7 +46,7 @@ test_integration:
 
 .PHONY: test_query_validator_live
 test_query_validator_live: config_setup
-	docker compose run --rm -e HYPOTHESIS_STORAGE_DIRECTORY=/tmp/hypothesis seizu uv run --frozen --no-sync pytest tests/integration/reporting/services/query_validator_test.py -v
+	docker compose run --rm -e HYPOTHESIS_STORAGE_DIRECTORY=/tmp/hypothesis seizu uv run --frozen --no-sync pytest -o cache_dir=/tmp/pytest_cache tests/integration/reporting/services/query_validator_test.py -v
 
 # Verifies every cartography_sync registry flag exists in the pinned image's
 # CLI — run after bumping the Dockerfile.cartography pin.
