@@ -46,7 +46,7 @@ test_integration:
 
 .PHONY: test_query_validator_live
 test_query_validator_live: config_setup
-	docker compose run --rm seizu uv run --frozen --no-sync pytest tests/integration/reporting/services/query_validator_test.py -v
+	docker compose run --rm -e HYPOTHESIS_STORAGE_DIRECTORY=/tmp/hypothesis seizu uv run --frozen --no-sync pytest tests/integration/reporting/services/query_validator_test.py -v
 
 # Verifies every cartography_sync registry flag exists in the pinned image's
 # CLI — run after bumping the Dockerfile.cartography pin.
@@ -159,7 +159,7 @@ schema: generate_openapi
 # Export the OpenAPI spec from the FastAPI app (no backend connections required).
 .PHONY: generate_openapi
 generate_openapi:
-	docker compose run --rm --no-deps seizu uv run --frozen --no-sync python -c "from reporting.app import create_app; import json; app = create_app(); print(json.dumps(app.openapi()))" > schema/openapi.json
+	docker compose run --rm --no-deps -e CHAT_ENABLED=true seizu uv run --frozen --no-sync python -c "from reporting.app import create_app; import json; app = create_app(); print(json.dumps(app.openapi()))" > schema/openapi.json
 
 # Generate a client library from schema/openapi.json using openapi-generator-cli.
 # Usage: make generate_client LANG=go
