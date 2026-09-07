@@ -198,7 +198,7 @@ _MAX_ADVERTISED_UPSTREAM_URLS = 32
 
 
 def _record_upstream_metadata(proxy: ExternalMCPProxy, initialize_result: Any) -> None:
-    """Record portable endpoint aliases advertised during MCP initialize."""
+    """Record portable endpoint aliases advertised during MCP negotiation."""
     if settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE == settings.ExternalPluginURLMatchMode.NONE:
         _advertised_upstream_urls.pop(proxy.name, None)
         return
@@ -327,8 +327,10 @@ async def _transport(
     proxy: ExternalMCPProxy,
     headers: dict[str, str],
     oauth_challenges: list[OAuthChallenge],
+    response_statuses: list[int],
 ) -> AsyncIterator[tuple[Any, Any]]:
     async def capture_oauth_challenge(response: httpx2.Response) -> None:
+        response_statuses[:] = [response.status_code]
         challenge = _gateway_challenge_from_response(response, proxy)
         if challenge is not None:
             oauth_challenges.append(challenge)
@@ -374,6 +376,7 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
     # delegated identity. A fresh context per operation is the confused-deputy
     # boundary when multiple chat turns share a worker process.
     oauth_challenges: list[OAuthChallenge] = []
+    response_statuses: list[int] = []
     pending: list[ExternalMCPElicitation] = []
     interaction_requested = False
 
@@ -388,6 +391,16 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
         return ElicitResult(action="cancel")
 
     acquired_token = None
+
+    def check_discovery_response() -> int | None:
+        if oauth_challenges:
+            # Leave classification and rejected-token invalidation to _session.
+            raise RuntimeError("External MCP discovery authentication failed")
+        status = response_statuses[-1] if response_statuses else None
+        if status is not None and status >= 400 and status not in {400, 404, 405}:
+            raise RuntimeError("External MCP discovery HTTP failure")
+        return status
+
     try:
         if proxy.client_credentials:
             try:
@@ -397,14 +410,19 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
                     raise ExternalMCPGatewayBlocked(proxy, "service_authentication_failed") from None
                 raise ExternalMCPTokenExpired(OAuthChallenge(proxy.name)) from None
         headers = build_headers(proxy, current_user, acquired_token=acquired_token)
-        async with _transport(proxy, headers, oauth_challenges) as streams:
+        async with _transport(proxy, headers, oauth_challenges, response_statuses) as streams:
             async with ClientSession(
                 *streams,
                 read_timeout_seconds=proxy.read_timeout_seconds,
                 elicitation_callback=elicit if proxy.user_authorization else None,
             ) as session:
-                initialize_result = await session.initialize()
-                _record_upstream_metadata(proxy, initialize_result)
+                if proxy.transport == ExternalMCPTransport.STREAMABLE_HTTP and proxy.protocol_mode == "auto":
+                    async with asyncio.timeout(proxy.read_timeout_seconds):
+                        await session.negotiate(check_discovery_response)
+                    negotiated = session.discover_result or session.initialize_result
+                else:
+                    negotiated = await session.initialize()
+                _record_upstream_metadata(proxy, negotiated)
                 yield session
                 if interaction_requested:
                     raise ExternalMCPGatewayBlocked(proxy, "interaction_required", pending)

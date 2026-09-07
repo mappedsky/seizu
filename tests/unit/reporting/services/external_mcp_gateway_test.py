@@ -181,7 +181,7 @@ async def test_detached_owners_get_fresh_transports_and_separate_authority(mocke
     sessions = []
 
     @asynccontextmanager
-    async def transport(config, headers, challenges):
+    async def transport(config, headers, challenges, statuses):
         headers_seen.append(headers)
         yield (None, None)
 
@@ -239,7 +239,7 @@ async def test_rejected_m2m_invalidates_token_without_replaying_tool(mocker):
     calls = 0
 
     @asynccontextmanager
-    async def transport(config, headers, challenges):
+    async def transport(config, headers, challenges, statuses):
         nonlocal calls
         calls += 1
         assert headers["Authorization"] == "Bearer m2m-token"

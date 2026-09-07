@@ -123,6 +123,7 @@ class ExternalMCPProxy(BaseModel):
     # proxy URL remains the only address Seizu connects to.
     upstream_urls: list[str] = Field(default_factory=list)
     transport: ExternalMCPTransport = ExternalMCPTransport.SSE
+    protocol_mode: Literal["auto", "legacy"] = "auto"
     auth_mode: ExternalMCPAuthMode = ExternalMCPAuthMode.HEADER_DELEGATION
     header_mappings: dict[ExternalMCPHeaderSource, str] = Field(default_factory=dict)
     token_env: str | None = None

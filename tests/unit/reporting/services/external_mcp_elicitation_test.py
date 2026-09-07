@@ -23,6 +23,10 @@ async def test_real_streamable_http_session_parses_legacy_error_and_advertises_u
     def handle(request):
         body = json.loads(request.content)
         requests.append(body)
+        if body["method"] == "server/discover":
+            return httpx2.Response(
+                200, json={"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32601, "message": "Method not found"}}
+            )
         if body["method"] == "initialize":
             assert body["params"]["capabilities"]["elicitation"] == {"url": {}}
             result = {
@@ -91,6 +95,10 @@ async def test_real_session_cancels_server_elicitation_and_records_recovery(mock
     def handle(request):
         body = json.loads(request.content)
         calls.append(body)
+        if body.get("method") == "server/discover":
+            return httpx2.Response(
+                200, json={"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32601, "message": "Method not found"}}
+            )
         if body.get("id") == "elicit":
             assert body["result"]["action"] == "cancel"
             answered.set()

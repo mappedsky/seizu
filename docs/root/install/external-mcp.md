@@ -42,6 +42,7 @@ Each object accepts:
 | `name` | Lowercase namespace component. It must be unique and cannot contain `__`. |
 | `url` | Absolute `http` or `https` MCP proxy endpoint. Embedded credentials are rejected. |
 | `transport` | `sse` (the issue-compatible default) or `streamable_http` (recommended for new servers). |
+| `protocol_mode` | `auto` (default): Streamable HTTP tries modern discovery, with legacy handshake fallback. `legacy`: skip discovery and initialize directly. SSE always uses the legacy handshake. |
 | `auth_mode` | `bearer`, `header_delegation`, or `m2m_jwt`. |
 | `header_mappings` | Map a supported identity source to the HTTP header the proxy expects. |
 | `token_env` | Name of the environment variable holding the bearer/M2M credential. The secret is never placed in the JSON. |
@@ -191,10 +192,14 @@ legacy elicitation requests without accepting them; newer input-required results
 are recorded without continuing the operation. The custom `X-Seizu-Auth-Error`
 header is not used.
 
-The current external transports use the SDK's legacy initialization handshake
-(up to 2025-11-25); gateways must support that handshake. The client also handles
-the newer input-required result shape, but does not enable modern-only transport
-negotiation.
+Streamable HTTP tries `server/discover` for the 2026-07-28 stateless protocol
+first. Modern requests carry their protocol version and client capabilities
+without an initialization handshake. Legacy-only servers fall back to
+`initialize`; authentication failures, rate limits, server failures, and timeouts
+stop negotiation without retrying a tool. Set `protocol_mode: legacy` for a
+server that requires initialization before any other request. SSE always uses
+the legacy handshake. Legacy Streamable HTTP servers may be sessionful or
+stateless; a session ID is not required.
 
 The page displays the gateway's explanation and destination host. Opening a link
 is optional; Seizu does not automatically open URLs, accept consent, or resume a
@@ -340,11 +345,11 @@ hour and a refresh token valid for thirty days, so the script stores **both**
 round trip is needed roughly monthly, not hourly. Pass `--force` to authorize
 from scratch.
 
-A Temporal turn holds no browser token and cannot renew one itself
-(AGT-010), so a deployment that needs per-user GitHub authority should give
-the proxy GitHub as its OAuth provider, forward the user's token instead of
-injecting a PAT, and address users with `m2m_jwt` plus `X-Target-User-ID` — the
-shape of the enterprise gateway example below.
+This local profile tests bearer authentication, not the per-user gateway
+contract. A Temporal deployment needing per-user GitHub authority needs a
+gateway that explicitly supports service authentication plus target-user grant
+selection, as in the enterprise gateway example below. Changing an OAuth
+provider alone does not enable that contract.
 
 The make target enables local Authentik and persists
 `MCP_EXTERNAL_ENABLED=true` in `.env`; `make up` then selects both Compose
@@ -405,7 +410,7 @@ the confused-deputy problem this integration is designed to avoid.
 
 ## Discovery cost
 
-Listing a proxy's tools opens a transport, runs an MCP `initialize` and reads a
+Listing a proxy's tools opens a transport, negotiates MCP and reads a
 paginated `tools/list`. One chat turn needs that answer several times — the
 capability listing in the system prompt, the planner's own, and each skill
 render that resolves its declared dependencies — so Seizu discovers each proxy

@@ -1,11 +1,14 @@
-"""Bounded URL elicitation recovery for detached MCP clients (AGT-048)."""
+"""Negotiation and bounded URL recovery for detached MCP clients (AGT-048/049)."""
 
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
 
 from mcp import ClientSession as SDKClientSession
+from mcp.client._probe import negotiate_auto
 from mcp.shared.exceptions import MCPError
 from mcp.types import ClientCapabilities, ElicitationRequiredErrorData, ElicitRequestURLParams
+from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
 from pydantic import ValidationError
 
 from reporting.schema.external_mcp import ExternalMCPElicitation, ExternalMCPProxy
@@ -14,7 +17,36 @@ MAX_ELICITATIONS = 8
 
 
 class ClientSession(SDKClientSession):
-    """Advertise only URL mode; the SDK callback default advertises both modes."""
+    """Constrain SDK negotiation fallback and advertise only URL elicitation."""
+
+    _discovery_guard: Callable[[], int | None] | None = None
+
+    async def negotiate(self, guard: Callable[[], int | None]) -> None:
+        """Negotiate with the SDK policy, without downgrading authentication failures."""
+        self._discovery_guard = guard
+        try:
+            await negotiate_auto(self)
+        finally:
+            self._discovery_guard = None
+
+    async def send_discover(self, version: str) -> dict[str, Any]:
+        try:
+            result = await super().send_discover(version)
+            supported = result.get("supportedVersions")
+            if isinstance(supported, list) and not any(
+                version in supported for version in (*HANDSHAKE_PROTOCOL_VERSIONS, *MODERN_PROTOCOL_VERSIONS)
+            ):
+                raise RuntimeError("External MCP protocol versions are incompatible")
+            return result
+        except MCPError as exc:
+            status = self._discovery_guard() if self._discovery_guard else None
+            # Only protocol-compatibility errors may reach the SDK fallback.
+            if exc.code not in {-32600, -32601, -32022} and not (exc.code == -32603 and status in {400, 405}):
+                raise RuntimeError("External MCP discovery failed") from exc
+            raise
+        finally:
+            if self._discovery_guard is not None:
+                self._discovery_guard()
 
     def _build_capabilities(self, version: str) -> ClientCapabilities:
         capabilities = super()._build_capabilities(version)

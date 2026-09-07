@@ -2835,3 +2835,27 @@ Legacy non-opted-in proxies keep their existing OAuth path.
 Connection observations survive worker restarts (STO-013), including failed
 discovery that hides a skill. Their owner-facing page is gated by `chat:use`, so
 a custom chat-only role can recover without acquiring toolset administration.
+
+## AGT-049 — External Streamable HTTP negotiates modern-first
+
+**Applies to:** `external_mcp`, `external_mcp_elicitation.ClientSession`,
+`ExternalMCPProxy.protocol_mode`
+
+Streamable HTTP uses SDK auto negotiation, trying modern `server/discover`
+before a bounded legacy handshake fallback. SSE remains legacy. Operators may
+force `protocol_mode: legacy`. Both paths create a fresh owner-scoped transport
+per operation and accept metadata from the negotiated result.
+
+**Why:** initializing unconditionally limits the client to the handshake era,
+even when the installed SDK and server support modern stateless requests and
+input-required results. The SDK supplies version selection and request stamping;
+its private auto-negotiation helper is isolated in our session adapter and
+covered by wire-level tests. The adapter restricts fallback to compatibility
+failures: authentication, rate limits, outages, timeouts, and positively disjoint
+version sets must not become attempts to negotiate a different protocol.
+
+We use the session API, not the high-level client's automatic input-required
+continuation driver, so negotiation cannot change the detached recovery and
+no-replay contract in AGT-048. The legacy override accommodates peers that reject
+requests made before initialization without treating their errors as consent to
+downgrade automatically.

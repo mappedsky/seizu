@@ -9,6 +9,7 @@ from reporting.schema.external_mcp import ExternalMCPProxy, parse_external_mcp_p
 @pytest.mark.parametrize(
     "updates",
     [
+        {"protocol_mode": "invalid"},
         {
             "auth_mode": "bearer",
             "token_env": "TOKEN",
