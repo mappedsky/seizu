@@ -199,3 +199,24 @@ because both address live rows and neither is written by hand. `STORE_ID_PATTERN
 in `reporting/schema/ids.py` is that rule, and every path, query and body field
 carrying a store-minted id is validated against it rather than against a locally
 written pattern.
+
+## STO-013 — Gateway connection records are observations, not credentials
+
+**Applies to:** `external_mcp_connections`, migration `0012`
+
+Connection observations are keyed by Seizu user, proxy name, and a fingerprint
+of the complete non-secret proxy configuration. They store a bounded status and
+error code plus a UTC observation timestamp. Upserts reject older observations.
+Only fresh operations change status; cached discovery does not establish a new
+success. The API filters records against currently enabled per-user proxies.
+
+**Why:** a headless discovery failure can hide every tool for a skill before a
+tool-call error reaches the transcript. An in-memory flag would disappear with
+the worker and remain invisible to the web process. The configuration fingerprint
+prevents a renamed endpoint or changed identity mapping from inheriting the old
+gateway's connected status. Timestamp-guarded upserts prevent delayed database
+writes from replacing a newer observation.
+
+No grant, service token, browser token, or raw gateway response is stored. The
+gateway owns authority (AGT-048); these rows only describe the last request.
+Failure to persist a status is logged but cannot replay a successful tool call.

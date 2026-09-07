@@ -96,6 +96,11 @@ function DashboardSidebar({
             icon: Chat,
             title: 'Chat',
           },
+          {
+            href: '/app/chat/connections',
+            icon: Chat,
+            title: 'Chat Connections',
+          },
         ]
       : []),
     {

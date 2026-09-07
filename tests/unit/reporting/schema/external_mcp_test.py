@@ -6,6 +6,63 @@ from pydantic import ValidationError
 from reporting.schema.external_mcp import ExternalMCPProxy, parse_external_mcp_proxies
 
 
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "auth_mode": "bearer",
+            "token_env": "TOKEN",
+            "user_authorization": {"reauthorize_url": "https://gateway.test/accounts"},
+        },
+        {
+            "header_mappings": {"access_token": "X-Token"},
+            "user_authorization": {"reauthorize_url": "https://gateway.test/accounts"},
+        },
+        {
+            "header_mappings": {"email": "x-target-user-id"},
+            "user_authorization": {"reauthorize_url": "https://gateway.test/accounts"},
+        },
+        {"user_authorization": {"reauthorize_url": "javascript:alert(1)"}},
+        {
+            "client_credentials": {
+                "token_url": "https://idp.test/token",
+                "client_id": "seizu",
+                "client_secret_env": "SECRET",
+            }
+        },
+        {
+            "auth_mode": "m2m_jwt",
+            "token_env": "TOKEN",
+            "client_credentials": {
+                "token_url": "https://idp.test/token",
+                "client_id": "seizu",
+                "client_secret_env": "SECRET",
+            },
+        },
+        {
+            "auth_mode": "m2m_jwt",
+            "client_credentials": {
+                "token_url": "https://user:secret@idp.test/token",
+                "client_id": "seizu",
+                "client_secret_env": "SECRET",
+            },
+        },
+        {
+            "auth_mode": "m2m_jwt",
+            "header_mappings": {"subject": "authorization"},
+            "client_credentials": {
+                "token_url": "https://idp.test/token",
+                "client_id": "seizu",
+                "client_secret_env": "SECRET",
+            },
+        },
+    ],
+)
+def test_invalid_gateway_configuration(updates):
+    with pytest.raises(ValueError):
+        ExternalMCPProxy.model_validate({"name": "gateway", "url": "https://gateway.test/mcp", **updates})
+
+
 def test_parse_external_mcp_proxies_accepts_all_auth_modes() -> None:
     proxies = parse_external_mcp_proxies(
         json.dumps(

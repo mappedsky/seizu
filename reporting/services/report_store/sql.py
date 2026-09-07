@@ -83,6 +83,17 @@ from reporting.utils.sql import build_database_url
 logger = logging.getLogger(__name__)
 
 
+class ExternalMCPConnectionRecord(SQLModel, table=True):  # type: ignore[call-arg]
+    __tablename__ = "external_mcp_connections"
+
+    user_id: str = Field(primary_key=True)
+    proxy_name: str = Field(primary_key=True)
+    fingerprint: str = Field(primary_key=True)
+    status: str
+    observed_at: str
+    error_code: str | None = None
+
+
 _engine: AsyncEngine | None = None
 
 # How many times an event-log append re-reads the highest sequence after losing
@@ -953,6 +964,29 @@ def _get_engine() -> AsyncEngine:
 
 class SQLModelReportStore(ReportStore):
     """PostgreSQL implementation configured via ``SQL_DATABASE_*``."""
+
+    async def list_external_mcp_connections(self, user_id: str) -> list[dict[str, Any]]:
+        async with AsyncSession(_get_engine()) as session:
+            records = await session.scalars(
+                select(ExternalMCPConnectionRecord).where(ExternalMCPConnectionRecord.user_id == user_id)
+            )
+            return [record.model_dump() for record in records]
+
+    async def record_external_mcp_connection(self, observation: dict[str, Any]) -> None:
+        record = ExternalMCPConnectionRecord.model_validate(observation)
+        async with AsyncSession(_get_engine()) as session:
+            await session.execute(
+                text(
+                    "INSERT INTO external_mcp_connections "
+                    "(user_id, proxy_name, fingerprint, status, observed_at, error_code) "
+                    "VALUES (:user_id, :proxy_name, :fingerprint, :status, :observed_at, :error_code) "
+                    "ON CONFLICT (user_id, proxy_name, fingerprint) DO UPDATE SET "
+                    "status = excluded.status, observed_at = excluded.observed_at, error_code = excluded.error_code "
+                    "WHERE external_mcp_connections.observed_at < excluded.observed_at"
+                ),
+                record.model_dump(),
+            )
+            await session.commit()
 
     def generate_id(self) -> str:
         return generate_report_id()

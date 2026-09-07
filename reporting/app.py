@@ -20,6 +20,7 @@ from starlette.types import Receive, Scope, Send
 from reporting import settings
 from reporting.routes import auth as auth_routes
 from reporting.routes import chat as chat_routes
+from reporting.routes import chat_connections as chat_connections_routes
 from reporting.routes import config as config_routes
 from reporting.routes import confirmations as confirmations_routes
 from reporting.routes import graph as graph_routes
@@ -365,6 +366,7 @@ def create_app() -> FastAPI:
 
     if settings.CHAT_ENABLED:
         app.include_router(chat_routes.router)
+        app.include_router(chat_connections_routes.router)
         if settings.CHAT_SCHEDULES_ENABLED:
             from reporting.routes import chat_schedules as chat_schedules_routes
 

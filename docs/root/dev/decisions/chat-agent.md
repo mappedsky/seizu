@@ -2785,3 +2785,38 @@ populations needed to improve a skill. Prompt capture is materially more
 sensitive than bounded action evidence, so accepting the latter must not imply
 accepting the former. A shared limit makes the amount exported an operator
 choice instead of a collection of code-site constants.
+
+## AGT-048 — Gateways own upstream user grants; service tokens renew automatically
+
+**Applies to:** `external_mcp`, `external_mcp_tokens`, `chat_connections`,
+`ExternalMCPProxy.client_credentials` / `user_authorization`
+
+Per-user external authority is an explicit gateway contract. Seizu supplies a
+stored run-owner identity over either M2M bearer authentication or trusted mesh
+authentication. The gateway maps that owner to its own upstream grant and must
+never substitute a shared credential when the grant is missing. Shared static
+API tokens remain supported through `bearer` plus `token_env`.
+
+**Why:** Temporal deliberately holds no browser bearer (AGT-008), and Seizu's
+OIDC refresh token is an encrypted browser cookie, not a worker-accessible vault.
+An existing gateway already owns consent, refresh, account linking, and upstream
+policy. Duplicating that store in Seizu would introduce another grant lifecycle
+without proving the upstream account belongs to the asserted user.
+
+M2M client credentials acquire and renew service tokens in process memory;
+existing `token_env` configurations remain compatible. A token acquisition is
+coalesced per configuration and a rejection invalidates only the rejected cached
+token. Calls are not replayed for renewal because a transport failure need not
+prove a tool had no effect. Mesh-authenticated deployments need no second bearer.
+
+**Why explicit error classification:** a service-account 401 is an administrator
+problem, not evidence that the target user needs consent. Opted-in gateways mark
+user-consent failures with `403` and
+`X-Seizu-Auth-Error: user_authorization_required`; an unmarked 401 is a service
+failure and other 403s are permission denials. This is a Seizu gateway extension,
+not standard MCP OAuth. Recovery links come from operator configuration, never
+an arbitrary response redirect. Legacy proxies keep their existing OAuth path.
+
+Connection observations survive worker restarts (STO-013), including failed
+discovery that hides a skill. Their owner-facing page is gated by `chat:use`, so
+a custom chat-only role can recover without acquiring toolset administration.

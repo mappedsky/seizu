@@ -278,6 +278,12 @@ diagnostics rather than raising. Package bounds live at the top of that module.
 
 ### External MCP Proxies (`reporting/services/external_mcp.py`)
 
+`m2m_jwt` accepts automatic `client_credentials` acquisition or existing
+`token_env` credentials; shared API tokens use `bearer`. Per-user gateways opt
+into `user_authorization`, with durable owner-scoped status at
+`/app/chat/connections`; mesh deployments use `header_delegation` without a
+bearer. The gateway owns upstream user grants (AGT-048, STO-013).
+
 `MCP_EXTERNAL_ENABLED` gates both the agent capability and the optional local
 Compose profile (`make external_mcp_enable` / `make external_mcp_disable`). The
 local `external-mcp` profile wires Seizu straight to the PAT adapter — one

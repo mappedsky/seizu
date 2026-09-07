@@ -116,6 +116,27 @@ async def store(test_engine):
 # ---------------------------------------------------------------------------
 
 
+async def test_external_mcp_status_is_owner_scoped_durable_and_monotonic(store):
+    observation = {
+        "user_id": "alice",
+        "proxy_name": "gateway",
+        "fingerprint": "config-a",
+        "status": "authorization_required",
+        "observed_at": "2026-09-07T02:00:00+00:00",
+        "error_code": "authorization_required",
+    }
+    await store.record_external_mcp_connection(observation)
+    await store.record_external_mcp_connection(
+        {**observation, "status": "connected", "observed_at": "2026-09-07T01:00:00+00:00", "error_code": None}
+    )
+    restarted = SQLModelReportStore()
+    assert await restarted.list_external_mcp_connections("alice") == [observation]
+    assert await restarted.list_external_mcp_connections("bob") == []
+    recovered = {**observation, "status": "connected", "observed_at": "2026-09-07T03:00:00+00:00", "error_code": None}
+    await restarted.record_external_mcp_connection(recovered)
+    assert await store.list_external_mcp_connections("alice") == [recovered]
+
+
 async def test_initialize_creates_tables(mocker):
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",

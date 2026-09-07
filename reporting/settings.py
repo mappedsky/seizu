@@ -1155,6 +1155,9 @@ MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
 # docs/root/install/external-mcp.md. Parsing at startup makes malformed security
 # mappings a configuration error rather than silently dropping a proxy.
 MCP_EXTERNAL_ENABLED = bool_env("MCP_EXTERNAL_ENABLED", False)
+# Entries may acquire M2M tokens through client_credentials or use a shared
+# token_env. user_authorization enables per-owner gateway status and recovery;
+# the gateway owns upstream grants (AGT-048).
 _MCP_EXTERNAL_CONFIGURED_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
 MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED else []
 # How a portable plugin's logical MCP dependency (`mcp:<server>/<tool>`) binds to

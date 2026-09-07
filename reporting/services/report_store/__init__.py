@@ -67,6 +67,14 @@ async def initialize() -> None:
     _initialized = True
 
 
+async def list_external_mcp_connections(user_id: str) -> list[dict[str, Any]]:
+    return await get_store().list_external_mcp_connections(user_id)
+
+
+async def record_external_mcp_connection(observation: dict[str, Any]) -> None:
+    await get_store().record_external_mcp_connection(observation)
+
+
 def is_initialized() -> bool:
     """Whether the application store completed its startup migrations."""
     return _initialized

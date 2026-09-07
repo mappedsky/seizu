@@ -164,6 +164,14 @@ class ReportStore(ABC):
     """Application persistence contract and test seam."""
 
     @abstractmethod
+    async def list_external_mcp_connections(self, user_id: str) -> list[dict[str, Any]]:
+        """Return this user's latest gateway observations."""
+
+    @abstractmethod
+    async def record_external_mcp_connection(self, observation: dict[str, Any]) -> None:
+        """Store an observation unless a newer one is already recorded."""
+
+    @abstractmethod
     def generate_id(self) -> str:
         """Return a new UUIDv7 identifier."""
 

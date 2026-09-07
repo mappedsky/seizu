@@ -23,13 +23,14 @@ from mcp.types import PaginatedRequestParams, TextContent, Tool, ToolAnnotations
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.schema.external_mcp import (
+    ConnectionStatus,
     ExternalMCPAuthMode,
     ExternalMCPHeaderSource,
     ExternalMCPProxy,
     ExternalMCPTransport,
 )
 from reporting.schema.mcp_config import ToolItem, ToolsetListItem
-from reporting.services import telemetry
+from reporting.services import external_mcp_connections, external_mcp_tokens, telemetry
 from reporting.services.mcp_builtins.synthetic import params_from_input_schema
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ _RESOURCE_METADATA_RE = re.compile(r"(?:^|[,\s])resource_metadata\s*=\s*(?:\"([^
 class OAuthChallenge:
     proxy_name: str
     resource_metadata: str | None = None
+    status: ConnectionStatus | None = None
 
 
 class ExternalMCPError(RuntimeError):
@@ -62,6 +64,21 @@ class ExternalMCPAuthenticationRequired(ExternalMCPError):
 
 class ExternalMCPTokenExpired(ExternalMCPAuthenticationRequired):
     """A non-interactive proxy credential was rejected."""
+
+
+class ExternalMCPGatewayBlocked(ExternalMCPAuthenticationRequired):
+    """A per-user gateway refused service authentication or user authority."""
+
+    def __init__(self, proxy: ExternalMCPProxy, status: ConnectionStatus) -> None:
+        super().__init__(OAuthChallenge(proxy.name, status=status))
+        self.status = status
+        self.reauthorize_url = proxy.user_authorization.reauthorize_url if proxy.user_authorization else None
+        guidance = {
+            "authorization_required": "Reauthorize your account at the gateway, then check the connection.",
+            "service_authentication_failed": "Ask an administrator to check Seizu's gateway service authentication.",
+            "permission_denied": "The gateway denied access. Check the upstream account's permissions.",
+        }.get(status, "The gateway is unavailable. Check the connection later.")
+        self.args = (f"External MCP proxy '{proxy.name}': {guidance} [Manage connections](/app/chat/connections).",)
 
 
 @dataclass(frozen=True)
@@ -247,7 +264,9 @@ def _identity_value(source: ExternalMCPHeaderSource, current_user: CurrentUser) 
     return rendered
 
 
-def build_headers(proxy: ExternalMCPProxy, current_user: CurrentUser) -> dict[str, str]:
+def build_headers(
+    proxy: ExternalMCPProxy, current_user: CurrentUser, *, acquired_token: str | None = None
+) -> dict[str, str]:
     """Build a new header dictionary for exactly one user and operation."""
     headers: dict[str, str] = {}
     for source, header in proxy.header_mappings.items():
@@ -258,7 +277,11 @@ def build_headers(proxy: ExternalMCPProxy, current_user: CurrentUser) -> dict[st
             value = f"Bearer {value}"
         headers[header] = value
 
-    raw_service_token = os.environ.get(proxy.token_env, "") if proxy.token_env else ""
+    raw_service_token = (
+        acquired_token
+        if acquired_token is not None
+        else (os.environ.get(proxy.token_env, "") if proxy.token_env else "")
+    )
     if "\r" in raw_service_token or "\n" in raw_service_token:
         raise ExternalMCPError(f"Token environment variable for proxy '{proxy.name}' is not a valid bearer token")
     service_token = raw_service_token.strip()
@@ -266,9 +289,14 @@ def build_headers(proxy: ExternalMCPProxy, current_user: CurrentUser) -> dict[st
         headers["Authorization"] = f"Bearer {service_token}"
     if proxy.auth_mode == ExternalMCPAuthMode.M2M_JWT:
         if not service_token:
+            if proxy.user_authorization:
+                raise ExternalMCPGatewayBlocked(proxy, "service_authentication_failed")
             raise ExternalMCPAuthenticationRequired(OAuthChallenge(proxy.name))
+    if proxy.auth_mode == ExternalMCPAuthMode.M2M_JWT or proxy.user_authorization:
         if ExternalMCPHeaderSource.USER_ID not in proxy.header_mappings:
-            headers["X-Target-User-ID"] = current_user.user.user_id
+            headers["X-Target-User-ID"] = _identity_value(ExternalMCPHeaderSource.USER_ID, current_user) or ""
+        if not current_user.user.user_id.strip():
+            raise ExternalMCPError("Target user identity is missing")
     return headers
 
 
@@ -278,20 +306,34 @@ async def _transport(
     headers: dict[str, str],
     oauth_challenges: list[OAuthChallenge],
 ) -> AsyncIterator[tuple[Any, Any]]:
+    async def capture_oauth_challenge(response: httpx2.Response) -> None:
+        challenge = _gateway_challenge_from_response(response, proxy)
+        if challenge is not None:
+            oauth_challenges.append(challenge)
+
+    def client_factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx2.Timeout | None = None,
+        auth: httpx2.Auth | None = None,
+    ) -> httpx2.AsyncClient:
+        return httpx2.AsyncClient(
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+            follow_redirects=False,
+            event_hooks={"response": [capture_oauth_challenge]},
+        )
+
     if proxy.transport == ExternalMCPTransport.SSE:
         async with sse_client(
             proxy.url,
             headers=headers,
             timeout=proxy.connect_timeout_seconds,
             sse_read_timeout=proxy.read_timeout_seconds,
+            httpx_client_factory=client_factory,
         ) as streams:
             yield streams
         return
-
-    async def capture_oauth_challenge(response: httpx2.Response) -> None:
-        challenge = _oauth_challenge_from_response(response, proxy.name)
-        if challenge is not None:
-            oauth_challenges.append(challenge)
 
     timeout = httpx2.Timeout(proxy.connect_timeout_seconds, read=proxy.read_timeout_seconds)
     async with httpx2.AsyncClient(
@@ -309,15 +351,29 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
     # Never cache this session or its transport: its headers carry one user's
     # delegated identity. A fresh context per operation is the confused-deputy
     # boundary when multiple chat turns share a worker process.
-    headers = build_headers(proxy, current_user)
     oauth_challenges: list[OAuthChallenge] = []
+    acquired_token = None
     try:
+        if proxy.client_credentials:
+            try:
+                acquired_token = await external_mcp_tokens.service_token(proxy)
+            except external_mcp_tokens.ServiceCredentialError:
+                if proxy.user_authorization:
+                    raise ExternalMCPGatewayBlocked(proxy, "service_authentication_failed") from None
+                raise ExternalMCPTokenExpired(OAuthChallenge(proxy.name)) from None
+        headers = build_headers(proxy, current_user, acquired_token=acquired_token)
         async with _transport(proxy, headers, oauth_challenges) as streams:
             async with ClientSession(*streams, read_timeout_seconds=proxy.read_timeout_seconds) as session:
                 initialize_result = await session.initialize()
                 _record_upstream_metadata(proxy, initialize_result)
                 yield session
+    except ExternalMCPGatewayBlocked as exc:
+        invalidate_discovery_cache(current_user)
+        await external_mcp_connections.observe(proxy, current_user, exc.status)
+        raise
     except ExternalMCPAuthenticationRequired:
+        invalidate_discovery_cache(current_user)
+        await external_mcp_connections.observe(proxy, current_user, "authorization_required")
         raise
     except BaseException as exc:
         # StreamableHTTP turns non-2xx responses into an MCPError delivered on
@@ -325,6 +381,15 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
         # the challenge captured by the underlying HTTP client's response hook.
         challenge = oauth_challenges[-1] if oauth_challenges else _oauth_challenge(exc, proxy.name)
         if challenge is not None:
+            invalidate_discovery_cache(current_user)
+            if challenge.status == "service_authentication_failed" or (
+                challenge.status is None and proxy.auth_mode == ExternalMCPAuthMode.M2M_JWT
+            ):
+                external_mcp_tokens.invalidate_service_token(proxy, acquired_token)
+            if proxy.user_authorization:
+                status = challenge.status or "service_authentication_failed"
+                await external_mcp_connections.observe(proxy, current_user, status)
+                raise ExternalMCPGatewayBlocked(proxy, status) from None
             error_type = (
                 ExternalMCPTokenExpired
                 if proxy.auth_mode == ExternalMCPAuthMode.M2M_JWT
@@ -332,8 +397,26 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
             )
             raise error_type(challenge) from exc
         if isinstance(exc, Exception):
-            raise ExternalMCPError(f"External MCP proxy '{proxy.name}' request failed") from exc
+            await external_mcp_connections.observe(proxy, current_user, "unavailable")
+            raise ExternalMCPError(f"External MCP proxy '{proxy.name}' request failed") from None
         raise
+    else:
+        await external_mcp_connections.observe(proxy, current_user, "connected")
+
+
+def _gateway_challenge_from_response(response: Any, proxy: ExternalMCPProxy) -> OAuthChallenge | None:
+    if proxy.user_authorization:
+        if response.status_code == 401:
+            return OAuthChallenge(proxy.name, status="service_authentication_failed")
+        if response.status_code == 403:
+            status: ConnectionStatus = (
+                "authorization_required"
+                if response.headers.get("X-Seizu-Auth-Error") == "user_authorization_required"
+                else "permission_denied"
+            )
+            return OAuthChallenge(proxy.name, status=status)
+        return None
+    return _oauth_challenge_from_response(response, proxy.name)
 
 
 def _oauth_challenge_from_response(response: Any, proxy_name: str) -> OAuthChallenge | None:
@@ -551,14 +634,15 @@ async def list_tools_for_user(
             # refused, so it must not answer the next call.
             invalidate_discovery_cache(current_user)
             metadata = exc.challenge.resource_metadata
-            detail = f" Authentication metadata: {metadata}" if metadata else ""
+            detail = (
+                str(exc)
+                if isinstance(exc, ExternalMCPGatewayBlocked)
+                else (f" Authentication metadata: {metadata}" if metadata else "")
+            )
             tools.append(
                 Tool(
                     name=namespaced_tool_name(proxy.name, AUTHENTICATE_TOOL_NAME),
-                    description=(
-                        f"Authenticate the current user with external MCP proxy {proxy.name} before using its tools."
-                        f"{detail}"
-                    ),
+                    description=(f"Check access to external MCP proxy {proxy.name} before using its tools. {detail}"),
                     input_schema={"type": "object", "properties": {}, "additionalProperties": False},
                 )
             )
@@ -577,14 +661,15 @@ async def list_tool_items_for_proxy(proxy: ExternalMCPProxy, current_user: Curre
         tools = await list_proxy_tools(proxy, current_user)
     except ExternalMCPAuthenticationRequired as exc:
         metadata = exc.challenge.resource_metadata
-        detail = f" Authentication metadata: {metadata}" if metadata else ""
+        detail = (
+            str(exc)
+            if isinstance(exc, ExternalMCPGatewayBlocked)
+            else (f" Authentication metadata: {metadata}" if metadata else "")
+        )
         tools = [
             Tool(
                 name=namespaced_tool_name(proxy.name, AUTHENTICATE_TOOL_NAME),
-                description=(
-                    f"Authenticate the current user with external MCP proxy {proxy.name} before using its tools."
-                    f"{detail}"
-                ),
+                description=(f"Check access to external MCP proxy {proxy.name} before using its tools. {detail}"),
                 input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             )
         ]
@@ -602,6 +687,11 @@ def authentication_payload(exc: ExternalMCPAuthenticationRequired) -> dict[str, 
         payload["error"] += f". Authentication metadata: {exc.challenge.resource_metadata}"
     if isinstance(exc, ExternalMCPTokenExpired):
         payload["token_expired"] = True
+    if isinstance(exc, ExternalMCPGatewayBlocked):
+        payload["connection_status"] = exc.status
+        payload["connections_url"] = "/app/chat/connections"
+        if exc.status == "authorization_required":
+            payload["reauthorize_url"] = exc.reauthorize_url
     return payload
 
 

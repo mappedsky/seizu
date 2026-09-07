@@ -3,7 +3,7 @@
 import json
 import re
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -36,6 +36,69 @@ _ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _HEADER_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 
+def _endpoint(value: str) -> str:
+    parsed = urlparse(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+    ):
+        raise ValueError("must be an http(s) URL without embedded credentials or a fragment")
+    return value
+
+
+class ExternalMCPClientCredentials(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token_url: str
+    client_id: str = Field(min_length=1)
+    client_secret_env: str
+    scope: str | None = None
+    audience: str | None = None
+    token_endpoint_auth_method: Literal["client_secret_basic", "client_secret_post"] = "client_secret_basic"
+
+    _valid_url = field_validator("token_url")(_endpoint)
+
+    @field_validator("client_secret_env")
+    @classmethod
+    def valid_secret_env(cls, value: str) -> str:
+        if not _ENV_RE.fullmatch(value):
+            raise ValueError("must be an uppercase environment-variable name")
+        return value
+
+
+class ExternalMCPUserAuthorization(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reauthorize_url: str
+
+    _valid_url = field_validator("reauthorize_url")(_endpoint)
+
+
+ConnectionStatus = Literal[
+    "unknown",
+    "connected",
+    "authorization_required",
+    "service_authentication_failed",
+    "permission_denied",
+    "unavailable",
+]
+
+
+class ExternalMCPConnection(BaseModel):
+    proxy_name: str
+    status: ConnectionStatus = "unknown"
+    observed_at: str | None = None
+    error_code: ConnectionStatus | None = None
+    reauthorize_url: str | None = None
+
+
+class ExternalMCPConnectionsResponse(BaseModel):
+    connections: list[ExternalMCPConnection]
+
+
 class ExternalMCPProxy(BaseModel):
     """One operator-configured external MCP proxy.
 
@@ -55,6 +118,8 @@ class ExternalMCPProxy(BaseModel):
     auth_mode: ExternalMCPAuthMode = ExternalMCPAuthMode.HEADER_DELEGATION
     header_mappings: dict[ExternalMCPHeaderSource, str] = Field(default_factory=dict)
     token_env: str | None = None
+    client_credentials: ExternalMCPClientCredentials | None = None
+    user_authorization: ExternalMCPUserAuthorization | None = None
     require_confirmation: bool = True
     enabled: bool = True
     connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
@@ -113,10 +178,23 @@ class ExternalMCPProxy(BaseModel):
         if self.auth_mode == ExternalMCPAuthMode.BEARER and not self.token_env:
             if ExternalMCPHeaderSource.ACCESS_TOKEN not in mapped:
                 raise ValueError("bearer auth requires token_env or an access_token header mapping")
-        if self.auth_mode == ExternalMCPAuthMode.M2M_JWT and not self.token_env:
-            raise ValueError("m2m_jwt auth requires token_env")
-        if self.token_env and "authorization" in mapped_headers:
-            raise ValueError("Authorization cannot be a header mapping when token_env supplies it")
+        if self.client_credentials and (self.auth_mode != ExternalMCPAuthMode.M2M_JWT or self.token_env):
+            raise ValueError("client_credentials requires m2m_jwt and is mutually exclusive with token_env")
+        if self.auth_mode == ExternalMCPAuthMode.M2M_JWT and not (self.token_env or self.client_credentials):
+            raise ValueError("m2m_jwt auth requires token_env or client_credentials")
+        if (self.token_env or self.client_credentials) and "authorization" in mapped_headers:
+            raise ValueError("Authorization cannot be a header mapping when service credentials supply it")
+        if self.user_authorization:
+            if self.auth_mode == ExternalMCPAuthMode.BEARER or ExternalMCPHeaderSource.ACCESS_TOKEN in mapped:
+                raise ValueError("user_authorization requires M2M or trusted header delegation without browser tokens")
+            if self.auth_mode == ExternalMCPAuthMode.HEADER_DELEGATION and (
+                self.token_env or "authorization" in mapped_headers
+            ):
+                raise ValueError("per-user header_delegation uses mesh authentication without Authorization")
+        if self.user_authorization or self.auth_mode == ExternalMCPAuthMode.M2M_JWT:
+            for source, header in self.header_mappings.items():
+                if header.casefold() == "x-target-user-id" and source != ExternalMCPHeaderSource.USER_ID:
+                    raise ValueError("X-Target-User-ID may only carry user_id")
         return self
 
 
