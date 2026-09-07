@@ -7,7 +7,7 @@
 
 ## What is Seizu?
 
-[Seizu (星図)](https://mappedsky.github.io/seizu/) is a star chart for your security graph: a React + Python frontend for Neo4j data, built to visualize, analyze, and automate security graphs built from tooling like [Cartography](https://github.com/cartography-cncf/cartography), [Starbase](https://github.com/JupiterOne/starbase), etc.
+[Seizu (星図)](https://mappedsky.com/seizu/) is a star chart for your security graph: a React + Python frontend for Neo4j data, built to visualize, analyze, and automate security graphs built from tooling like [Cartography](https://github.com/cartography-cncf/cartography), [Starbase](https://github.com/JupiterOne/starbase), etc.
 
 Seizu includes:
 
@@ -24,12 +24,12 @@ Seizu includes:
 
 ## Getting started
 
-Seizu has a [quickstart guide](https://mappedsky.github.io/seizu/install/quickstart.html), which can be used for evaluation, or development.
+Seizu has a [quickstart guide](https://mappedsky.com/seizu/install/quickstart.html), which can be used for evaluation, or development.
 
 ## Documentation
 
-* [Quickstart](https://mappedsky.github.io/seizu/install/quickstart.html)
-* [Installation documentation](https://mappedsky.github.io/seizu/install/backend.html)
-* [Dashboard configuration](https://mappedsky.github.io/seizu/install/dashboard.html)
-* [Scheduled query documentation](https://mappedsky.github.io/seizu/install/scheduled-queries.html)
-* [Basic development documentation](https://mappedsky.github.io/seizu/dev/dependencies.html)
+* [Quickstart](https://mappedsky.com/seizu/install/quickstart.html)
+* [Installation documentation](https://mappedsky.com/seizu/install/backend.html)
+* [Dashboard configuration](https://mappedsky.com/seizu/install/dashboard.html)
+* [Scheduled query documentation](https://mappedsky.com/seizu/install/scheduled-queries.html)
+* [Basic development documentation](https://mappedsky.com/seizu/dev/dependencies.html)
