@@ -4,7 +4,7 @@ Seizu (星図)
 What is Seizu?
 --------------
 
-`Seizu (星図) <https://mappedsky.github.io/seizu/>`_ is a react/mui frontend and python backend for various forms of reporting of Neo4j graph data.
+`Seizu (星図) <https://mappedsky.com/seizu/>`_ is a react/mui frontend and python backend for various forms of reporting of Neo4j graph data.
 It is well suited for building reporting for tools like `cartography <https://github.com/lyft/cartography>`_ and `starbase <https://github.com/JupiterOne/starbase>`_
 
 Seizu includes:
@@ -20,29 +20,29 @@ Seizu includes:
 Getting started
 ---------------
 
-Seizu has a `quickstart guide <https://mappedsky.github.io/seizu/install/quickstart.html>`_, which can be used for evaluation, or development.
+Seizu has a `quickstart guide <https://mappedsky.com/seizu/install/quickstart.html>`_, which can be used for evaluation, or development.
 
 Documentation
 -------------
 
-* `Installation documentation <https://mappedsky.github.io/seizu/install/backend.html>`_
-* `Upgrade guide <https://mappedsky.github.io/seizu/install/upgrading.html>`_
-* `Dashboard configuration <https://mappedsky.github.io/seizu/install/dashboard.html>`_
-* `Spaces documentation <https://mappedsky.github.io/seizu/install/spaces.html>`_
-* `CLI documentation <https://mappedsky.github.io/seizu/install/cli.html>`_
-* `Security guidance <https://mappedsky.github.io/seizu/install/security.html>`_
-* `Query Console <https://mappedsky.github.io/seizu/install/query-console.html>`_
-* `Chat assistant documentation <https://mappedsky.github.io/seizu/install/chat.html>`_
-* `Workflow documentation <https://mappedsky.github.io/seizu/install/workflows.html>`_
-* `Scheduled chat documentation <https://mappedsky.github.io/seizu/install/chat-schedules.html>`_
-* `Built-in workflow documentation <https://mappedsky.github.io/seizu/install/built-in-workflows.html>`_
-* `Scheduled cartography sync documentation <https://mappedsky.github.io/seizu/install/cartography-sync.html>`_
-* `Sandbox delegation documentation <https://mappedsky.github.io/seizu/install/sandbox.html>`_
-* `MCP Toolsets documentation <https://mappedsky.github.io/seizu/install/mcp-toolsets.html>`_
-* `MCP Skillsets documentation <https://mappedsky.github.io/seizu/install/mcp-skillsets.html>`_
-* `External MCP proxy documentation <https://mappedsky.github.io/seizu/install/external-mcp.html>`_
-* `Basic development documentation <https://mappedsky.github.io/seizu/dev/dependencies.html>`_
-* `Decision log <https://mappedsky.github.io/seizu/dev/decisions/index.html>`_ — why the code is the way it is, per product area
+* `Installation documentation <https://mappedsky.com/seizu/install/backend.html>`_
+* `Upgrade guide <https://mappedsky.com/seizu/install/upgrading.html>`_
+* `Dashboard configuration <https://mappedsky.com/seizu/install/dashboard.html>`_
+* `Spaces documentation <https://mappedsky.com/seizu/install/spaces.html>`_
+* `CLI documentation <https://mappedsky.com/seizu/install/cli.html>`_
+* `Security guidance <https://mappedsky.com/seizu/install/security.html>`_
+* `Query Console <https://mappedsky.com/seizu/install/query-console.html>`_
+* `Chat assistant documentation <https://mappedsky.com/seizu/install/chat.html>`_
+* `Workflow documentation <https://mappedsky.com/seizu/install/workflows.html>`_
+* `Scheduled chat documentation <https://mappedsky.com/seizu/install/chat-schedules.html>`_
+* `Built-in workflow documentation <https://mappedsky.com/seizu/install/built-in-workflows.html>`_
+* `Scheduled cartography sync documentation <https://mappedsky.com/seizu/install/cartography-sync.html>`_
+* `Sandbox delegation documentation <https://mappedsky.com/seizu/install/sandbox.html>`_
+* `MCP Toolsets documentation <https://mappedsky.com/seizu/install/mcp-toolsets.html>`_
+* `MCP Skillsets documentation <https://mappedsky.com/seizu/install/mcp-skillsets.html>`_
+* `External MCP proxy documentation <https://mappedsky.com/seizu/install/external-mcp.html>`_
+* `Basic development documentation <https://mappedsky.com/seizu/dev/dependencies.html>`_
+* `Decision log <https://mappedsky.com/seizu/dev/decisions/index.html>`_ — why the code is the way it is, per product area
 
 .. toctree::
     :caption: Installation & Configuration

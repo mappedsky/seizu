@@ -42,6 +42,7 @@ extensions = [
     "sphinx.ext.ifconfig",
     "sphinx.ext.githubpages",
     "myst_parser",
+    "sphinx_sitemap",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -128,6 +129,17 @@ todo_include_todos = False
 
 # -- Options for HTML output ----------------------------------------------
 
+# The canonical base URL the docs are served from (GitHub Pages behind the
+# mappedsky.com custom domain). `sphinx_sitemap` needs it to build absolute
+# <loc> entries, and Sphinx emits <link rel="canonical"> on every page from
+# it. Keep the trailing slash — the site is served under the /seizu/ path.
+html_baseurl = "https://mappedsky.com/seizu/"
+
+# sphinx_sitemap: write generated/docs/sitemap.xml on every build. One entry
+# per page, no per-language alternates (the site is English-only).
+sitemap_url_scheme = "{link}"
+sitemap_locales = [None]
+
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 html_theme = "shibuya"
@@ -171,8 +183,9 @@ html_css_files = ["seizu-theme.css"]
 
 # Add any extra paths that contain custom files (such as robots.txt or
 # .htaccess) here, relative to this directory. These files are copied
-# directly to the root of the documentation.
-# html_extra_path = []
+# directly to the root of the documentation. `robots.txt` points crawlers
+# (and Google Search Console) at the generated sitemap.
+html_extra_path = ["robots.txt"]
 
 # If not None, a 'Last updated on:' timestamp is inserted at every page
 # bottom, using the given strftime format.

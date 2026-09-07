@@ -2,7 +2,7 @@
 
 ## Code of conduct
 
-This project is governed by the [code of conduct](https://mappedsky.github.io/seizu/dev/code-of-conduct.html). All contributors and participants agree to abide by its terms.
+This project is governed by the [code of conduct](https://mappedsky.com/seizu/dev/code-of-conduct.html). All contributors and participants agree to abide by its terms.
 
 ## Contributing code
 
