@@ -30,6 +30,7 @@ Seizu has a [quickstart guide](https://mappedsky.com/seizu/install/quickstart.ht
 
 * [Quickstart](https://mappedsky.com/seizu/install/quickstart.html)
 * [Installation documentation](https://mappedsky.com/seizu/install/backend.html)
+* [Kubernetes (Helm) installation](https://mappedsky.com/seizu/install/helm.html)
 * [Dashboard configuration](https://mappedsky.com/seizu/install/dashboard.html)
 * [Scheduled query documentation](https://mappedsky.com/seizu/install/scheduled-queries.html)
 * [Basic development documentation](https://mappedsky.com/seizu/dev/dependencies.html)
