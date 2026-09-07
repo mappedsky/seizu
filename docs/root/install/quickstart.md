@@ -20,6 +20,10 @@ make up
 
 The backend API (and MCP server) is accessible at: http://localhost:8080
 
+For a real deployment rather than an evaluation, see
+[Backend Installation & Configuration](backend.html) or, on Kubernetes, the Helm
+charts at [Kubernetes (Helm)](helm.html).
+
 ## Running on a VM or remote host
 
 If the docker-compose stack is running on a virtual machine or remote host rather than your local machine, you must forward the relevant ports over SSH before the UI and MCP clients can reach the stack. Only ports 3000 and 8080 are exposed to the host by the default compose configuration:

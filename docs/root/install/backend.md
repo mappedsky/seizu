@@ -4,6 +4,14 @@
 
 If you're just wanting to quickly evaluate or demo Seizu, please see the [quickstart documentation](quickstart.html).
 
+## Installation on Kubernetes (Helm)
+
+For Kubernetes deployments, use the Helm charts at
+[`mappedsky/mappedsky-helm-charts`](https://github.com/mappedsky/mappedsky-helm-charts).
+They deploy the web/API process and, optionally, the Temporal and Cartography
+workers, mapping the settings below to structured values. See
+[Kubernetes (Helm)](helm.html).
+
 ## Installation using docker image
 
 ```bash

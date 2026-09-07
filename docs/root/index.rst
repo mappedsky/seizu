@@ -26,6 +26,7 @@ Documentation
 -------------
 
 * `Installation documentation <https://mappedsky.com/seizu/install/backend.html>`_
+* `Kubernetes (Helm) installation <https://mappedsky.com/seizu/install/helm.html>`_
 * `Upgrade guide <https://mappedsky.com/seizu/install/upgrading.html>`_
 * `Dashboard configuration <https://mappedsky.com/seizu/install/dashboard.html>`_
 * `Spaces documentation <https://mappedsky.com/seizu/install/spaces.html>`_
@@ -50,6 +51,7 @@ Documentation
 
     install/quickstart
     install/backend
+    install/helm
     install/upgrading
     install/dashboard
     install/spaces
