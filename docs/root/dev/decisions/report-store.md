@@ -220,3 +220,13 @@ writes from replacing a newer observation.
 No grant, service token, browser token, or raw gateway response is stored. The
 gateway owns authority (AGT-048); these rows only describe the last request.
 Failure to persist a status is logged but cannot replay a successful tool call.
+
+URL elicitation recovery (migration `0013`) adds up to eight validated URLs,
+opaque elicitation IDs, and bounded plain-text explanations to an observation.
+These are owner-only UI data, never model context or logs. URLs are hidden after
+one hour and replaced on the next observation; the gateway must independently
+expire its nonce and authenticate the browser. This bounds exposure in the UI
+without assuming protocol URLs carry an expiry. Database copies/backups may
+retain old recovery URLs, so these must never themselves authorize account
+linking or carry access/refresh tokens. The configuration fingerprint and URL
+origin validation apply again at read time.

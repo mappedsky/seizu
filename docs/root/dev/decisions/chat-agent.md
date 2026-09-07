@@ -2810,12 +2810,27 @@ token. Calls are not replayed for renewal because a transport failure need not
 prove a tool had no effect. Mesh-authenticated deployments need no second bearer.
 
 **Why explicit error classification:** a service-account 401 is an administrator
-problem, not evidence that the target user needs consent. Opted-in gateways mark
-user-consent failures with `403` and
-`X-Seizu-Auth-Error: user_authorization_required`; an unmarked 401 is a service
-failure and other 403s are permission denials. This is a Seizu gateway extension,
-not standard MCP OAuth. Recovery links come from operator configuration, never
-an arbitrary response redirect. Legacy proxies keep their existing OAuth path.
+problem, not evidence that the target user needs consent. HTTP 401 is a service
+failure and 403 is a permission denial. The initial custom `X-Seizu-Auth-Error`
+contract is replaced by standard MCP URL elicitation: `elicitation/create` and
+the 2025-11-25 `-32042` error, plus 2026-07-28 `InputRequiredResult` requests.
+The SDK's capability builder is narrowed to URL-only because its callback API
+otherwise advertises form support that this client does not provide.
+
+Detached workers cancel legacy callback requests and do not continue modern
+input-required results. Neither response represents human consent. Recovery is
+manual on Chat Connections; no tool is automatically replayed and completion
+notifications cannot establish a grant or resume a finished run. URL elicitation
+can also request payments or other interactions, so its status is generically
+`interaction_required`, not an assertion that the user needs OAuth consent.
+
+Recovery URLs are bounded and restricted to the operator-configured account
+page's origin, revalidated on read, and never included in model diagnostics.
+The owner sees the gateway's plain-text explanation and target host before
+choosing whether to navigate. This permits nonce-bearing protocol URLs without
+making arbitrary server redirects trusted destinations. Gateways must validate
+browser identity independently and must not put credentials in URLs/messages.
+Legacy non-opted-in proxies keep their existing OAuth path.
 
 Connection observations survive worker restarts (STO-013), including failed
 discovery that hides a skill. Their owner-facing page is gated by `chat:use`, so

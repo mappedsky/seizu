@@ -55,8 +55,43 @@ async def test_connection_migration_upgrades_previous_head(tmp_path):
             await conn.execute(sa.text("INSERT INTO alembic_version VALUES ('0011_model_profile_reasoning')"))
         await run_schema_migrations(engine)
         columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("external_mcp_connections")})
-        assert columns == {"user_id", "proxy_name", "fingerprint", "status", "observed_at", "error_code"}
+        assert columns == {
+            "user_id",
+            "proxy_name",
+            "fingerprint",
+            "status",
+            "observed_at",
+            "error_code",
+            "elicitations_json",
+        }
         await run_schema_migrations(engine)
+    finally:
+        await engine.dispose()
+
+
+async def test_elicitation_migration_preserves_existing_connection(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'elicitation-upgrade.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
+            await conn.execute(sa.text("INSERT INTO alembic_version VALUES ('0012_external_mcp_connections')"))
+            await conn.execute(
+                sa.text(
+                    "CREATE TABLE external_mcp_connections (user_id VARCHAR, proxy_name VARCHAR, fingerprint VARCHAR, "
+                    "status VARCHAR, observed_at VARCHAR, error_code VARCHAR)"
+                )
+            )
+            await conn.execute(
+                sa.text(
+                    "INSERT INTO external_mcp_connections "
+                    "VALUES ('owner', 'gateway', 'config', 'connected', 'now', NULL)"
+                )
+            )
+        await run_schema_migrations(engine)
+        await run_schema_migrations(engine)
+        async with engine.connect() as conn:
+            row = (await conn.execute(sa.text("SELECT status, elicitations_json FROM external_mcp_connections"))).one()
+            assert row == ("connected", None)
     finally:
         await engine.dispose()
 

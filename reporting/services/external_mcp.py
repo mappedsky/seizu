@@ -15,22 +15,37 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx2
-from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import PaginatedRequestParams, TextContent, Tool, ToolAnnotations
+from mcp.types import (
+    ElicitRequest,
+    ElicitRequestURLParams,
+    ElicitResult,
+    InputRequiredResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+    ToolAnnotations,
+)
 
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.schema.external_mcp import (
     ConnectionStatus,
     ExternalMCPAuthMode,
+    ExternalMCPElicitation,
     ExternalMCPHeaderSource,
     ExternalMCPProxy,
     ExternalMCPTransport,
 )
 from reporting.schema.mcp_config import ToolItem, ToolsetListItem
 from reporting.services import external_mcp_connections, external_mcp_tokens, telemetry
+from reporting.services.external_mcp_elicitation import (
+    MAX_ELICITATIONS,
+    ClientSession,
+    required_elicitations,
+    safe_elicitation,
+)
 from reporting.services.mcp_builtins.synthetic import params_from_input_schema
 
 logger = logging.getLogger(__name__)
@@ -69,12 +84,19 @@ class ExternalMCPTokenExpired(ExternalMCPAuthenticationRequired):
 class ExternalMCPGatewayBlocked(ExternalMCPAuthenticationRequired):
     """A per-user gateway refused service authentication or user authority."""
 
-    def __init__(self, proxy: ExternalMCPProxy, status: ConnectionStatus) -> None:
+    def __init__(
+        self,
+        proxy: ExternalMCPProxy,
+        status: ConnectionStatus,
+        elicitations: list[ExternalMCPElicitation] | None = None,
+    ) -> None:
         super().__init__(OAuthChallenge(proxy.name, status=status))
         self.status = status
+        self.elicitations = elicitations or []
         self.reauthorize_url = proxy.user_authorization.reauthorize_url if proxy.user_authorization else None
         guidance = {
             "authorization_required": "Reauthorize your account at the gateway, then check the connection.",
+            "interaction_required": "The gateway requires user interaction. Review it on Chat Connections, then retry.",
             "service_authentication_failed": "Ask an administrator to check Seizu's gateway service authentication.",
             "permission_denied": "The gateway denied access. Check the upstream account's permissions.",
         }.get(status, "The gateway is unavailable. Check the connection later.")
@@ -352,6 +374,19 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
     # delegated identity. A fresh context per operation is the confused-deputy
     # boundary when multiple chat turns share a worker process.
     oauth_challenges: list[OAuthChallenge] = []
+    pending: list[ExternalMCPElicitation] = []
+    interaction_requested = False
+
+    async def elicit(context: Any, params: Any) -> ElicitResult:
+        nonlocal interaction_requested
+        if isinstance(params, ElicitRequestURLParams):
+            interaction_requested = True
+            item = safe_elicitation(proxy, params)
+            if item is not None and item not in pending and len(pending) < MAX_ELICITATIONS:
+                pending.append(item)
+        # Detached turns have no user present to accept or provide form data.
+        return ElicitResult(action="cancel")
+
     acquired_token = None
     try:
         if proxy.client_credentials:
@@ -363,19 +398,45 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
                 raise ExternalMCPTokenExpired(OAuthChallenge(proxy.name)) from None
         headers = build_headers(proxy, current_user, acquired_token=acquired_token)
         async with _transport(proxy, headers, oauth_challenges) as streams:
-            async with ClientSession(*streams, read_timeout_seconds=proxy.read_timeout_seconds) as session:
+            async with ClientSession(
+                *streams,
+                read_timeout_seconds=proxy.read_timeout_seconds,
+                elicitation_callback=elicit if proxy.user_authorization else None,
+            ) as session:
                 initialize_result = await session.initialize()
                 _record_upstream_metadata(proxy, initialize_result)
                 yield session
+                if interaction_requested:
+                    raise ExternalMCPGatewayBlocked(proxy, "interaction_required", pending)
     except ExternalMCPGatewayBlocked as exc:
         invalidate_discovery_cache(current_user)
-        await external_mcp_connections.observe(proxy, current_user, exc.status)
+        await external_mcp_connections.observe(proxy, current_user, exc.status, elicitations=exc.elicitations)
         raise
     except ExternalMCPAuthenticationRequired:
         invalidate_discovery_cache(current_user)
         await external_mcp_connections.observe(proxy, current_user, "authorization_required")
         raise
     except BaseException as exc:
+        blocked = _gateway_blocked(exc)
+        if blocked is not None:
+            invalidate_discovery_cache(current_user)
+            await external_mcp_connections.observe(
+                proxy, current_user, blocked.status, elicitations=blocked.elicitations
+            )
+            if not isinstance(exc, Exception):
+                raise
+            raise blocked from None
+        required = required_elicitations(exc) if proxy.user_authorization else None
+        if required is not None or interaction_requested:
+            for params in required or []:
+                item = safe_elicitation(proxy, params)
+                if item is not None and item not in pending and len(pending) < MAX_ELICITATIONS:
+                    pending.append(item)
+            invalidate_discovery_cache(current_user)
+            await external_mcp_connections.observe(proxy, current_user, "interaction_required", elicitations=pending)
+            if not isinstance(exc, Exception):
+                raise
+            raise ExternalMCPGatewayBlocked(proxy, "interaction_required", pending) from None
         # StreamableHTTP turns non-2xx responses into an MCPError delivered on
         # its message stream. That exception has no response attached, so keep
         # the challenge captured by the underlying HTTP client's response hook.
@@ -404,17 +465,22 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
         await external_mcp_connections.observe(proxy, current_user, "connected")
 
 
+def _gateway_blocked(exc: BaseException) -> ExternalMCPGatewayBlocked | None:
+    if isinstance(exc, ExternalMCPGatewayBlocked):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for child in exc.exceptions:
+            if (blocked := _gateway_blocked(child)) is not None:
+                return blocked
+    return None
+
+
 def _gateway_challenge_from_response(response: Any, proxy: ExternalMCPProxy) -> OAuthChallenge | None:
     if proxy.user_authorization:
         if response.status_code == 401:
             return OAuthChallenge(proxy.name, status="service_authentication_failed")
         if response.status_code == 403:
-            status: ConnectionStatus = (
-                "authorization_required"
-                if response.headers.get("X-Seizu-Auth-Error") == "user_authorization_required"
-                else "permission_denied"
-            )
-            return OAuthChallenge(proxy.name, status=status)
+            return OAuthChallenge(proxy.name, status="permission_denied")
         return None
     return _oauth_challenge_from_response(response, proxy.name)
 
@@ -690,6 +756,9 @@ def authentication_payload(exc: ExternalMCPAuthenticationRequired) -> dict[str, 
     if isinstance(exc, ExternalMCPGatewayBlocked):
         payload["connection_status"] = exc.status
         payload["connections_url"] = "/app/chat/connections"
+        if exc.status == "interaction_required":
+            payload["authentication_required"] = False
+            payload["interaction_required"] = True
         if exc.status == "authorization_required":
             payload["reauthorize_url"] = exc.reauthorize_url
     return payload
@@ -771,7 +840,18 @@ async def _call_tool_once(
                 # synthetic tool is stale and the user can retry discovery.
                 await session.list_tools()
                 return ExternalToolResult(json.dumps({"authenticated": True, "proxy": proxy.name}))
-            result = await session.call_tool(remote_name, arguments)
+            result = await session.call_tool(remote_name, arguments, allow_input_required=True)
+            if isinstance(result, InputRequiredResult):
+                if not proxy.user_authorization:
+                    raise ExternalMCPError("External MCP server requested unsupported user interaction")
+                pending = []
+                for request in list((result.input_requests or {}).values())[:MAX_ELICITATIONS]:
+                    if isinstance(request, ElicitRequest) and isinstance(request.params, ElicitRequestURLParams):
+                        recovery = safe_elicitation(proxy, request.params)
+                        if recovery is not None:
+                            pending.append(recovery)
+                # No automatic continuation or replay of the original operation.
+                raise ExternalMCPGatewayBlocked(proxy, "interaction_required", pending)
     except ExternalMCPAuthenticationRequired:
         raise
 

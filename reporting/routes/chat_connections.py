@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from reporting import settings
 from reporting.authnz import CurrentUser, require_permission
@@ -15,8 +15,10 @@ router = APIRouter()
 
 @router.get("/api/v1/chat/connections", response_model=ExternalMCPConnectionsResponse)
 async def list_connections(
+    response: Response,
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> ExternalMCPConnectionsResponse:
+    response.headers["Cache-Control"] = "private, no-store"
     return ExternalMCPConnectionsResponse(
         connections=await external_mcp_connections.list_connections(settings.MCP_EXTERNAL_PROXIES, current)
     )
@@ -25,8 +27,10 @@ async def list_connections(
 @router.post("/api/v1/chat/connections/{proxy_name}/check", response_model=ExternalMCPConnection)
 async def check_connection(
     proxy_name: str,
+    response: Response,
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> ExternalMCPConnection:
+    response.headers["Cache-Control"] = "private, no-store"
     proxy = next(
         (p for p in settings.MCP_EXTERNAL_PROXIES if p.name == proxy_name and p.enabled and p.user_authorization),
         None,

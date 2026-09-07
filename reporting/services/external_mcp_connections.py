@@ -3,11 +3,19 @@
 import hashlib
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+from mcp.types import ElicitRequestURLParams
 
 from reporting.authnz import CurrentUser
-from reporting.schema.external_mcp import ConnectionStatus, ExternalMCPConnection, ExternalMCPProxy
+from reporting.schema.external_mcp import (
+    ConnectionStatus,
+    ExternalMCPConnection,
+    ExternalMCPElicitation,
+    ExternalMCPProxy,
+)
 from reporting.services import report_store
+from reporting.services.external_mcp_elicitation import MAX_ELICITATIONS, safe_elicitation
 
 logger = logging.getLogger(__name__)
 
@@ -16,8 +24,14 @@ def fingerprint(proxy: ExternalMCPProxy) -> str:
     return hashlib.sha256(json.dumps(proxy.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
 
 
-async def observe(proxy: ExternalMCPProxy, user: CurrentUser, status: ConnectionStatus) -> None:
-    """Record only a bounded outcome; storage failure never repeats an operation."""
+async def observe(
+    proxy: ExternalMCPProxy,
+    user: CurrentUser,
+    status: ConnectionStatus,
+    *,
+    elicitations: list[ExternalMCPElicitation] | None = None,
+) -> None:
+    """Record bounded status and recovery data; storage failure never repeats an operation."""
     if not proxy.user_authorization:
         return
     observation = {
@@ -27,6 +41,9 @@ async def observe(proxy: ExternalMCPProxy, user: CurrentUser, status: Connection
         "status": status,
         "observed_at": datetime.now(UTC).isoformat(),
         "error_code": None if status == "connected" else status,
+        "elicitations_json": json.dumps([item.model_dump() for item in (elicitations or [])[:MAX_ELICITATIONS]])
+        if status == "interaction_required"
+        else None,
     }
     try:
         await report_store.record_external_mcp_connection(observation)
@@ -49,6 +66,25 @@ async def list_connections(proxies: list[ExternalMCPProxy], user: CurrentUser) -
                 observed_at=row.get("observed_at"),
                 error_code=row.get("error_code"),
                 reauthorize_url=proxy.user_authorization.reauthorize_url,
+                elicitations=_recovery_links(proxy, row),
             )
         )
     return result
+
+
+def _recovery_links(proxy: ExternalMCPProxy, row: dict) -> list[ExternalMCPElicitation]:
+    """Revalidate stored URLs and hide them after one hour; status remains visible."""
+    try:
+        if row.get("status") != "interaction_required":
+            return []
+        observed = datetime.fromisoformat(row["observed_at"])
+        if datetime.now(UTC) - observed > timedelta(hours=1):
+            return []
+        values = json.loads(row.get("elicitations_json") or "[]")
+        if not isinstance(values, list) or len(values) > MAX_ELICITATIONS:
+            return []
+        return [
+            safe for value in values if (safe := safe_elicitation(proxy, ElicitRequestURLParams(**value))) is not None
+        ]
+    except (KeyError, TypeError, ValueError):
+        return []

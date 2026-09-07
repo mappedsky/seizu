@@ -282,7 +282,9 @@ diagnostics rather than raising. Package bounds live at the top of that module.
 `token_env` credentials; shared API tokens use `bearer`. Per-user gateways opt
 into `user_authorization`, with durable owner-scoped status at
 `/app/chat/connections`; mesh deployments use `header_delegation` without a
-bearer. The gateway owns upstream user grants (AGT-048, STO-013).
+bearer. Standard URL elicitation exposes bounded, owner-only recovery links;
+detached runs never accept consent or automatically replay the operation.
+The gateway owns upstream user grants (AGT-048, STO-013).
 
 `MCP_EXTERNAL_ENABLED` gates both the agent capability and the optional local
 Compose profile (`make external_mcp_enable` / `make external_mcp_disable`). The

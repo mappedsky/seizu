@@ -173,19 +173,43 @@ fall back to a shared or broader credential. The account-management page must
 authenticate the browser user independently; a supplied user ID cannot authorize
 account linking. Reject missing authority before dispatching any upstream action.
 
-Seizu recognizes the following **Seizu gateway extension**, not a standard MCP
-OAuth exchange:
+Seizu supports standard MCP [URL-mode elicitation](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation)
+for out-of-band user interaction. The target-user header remains a deployment
+contract, separate from MCP's service authentication.
 
 | Gateway response | Status | Recovery |
 | --- | --- | --- |
-| `403` with `X-Seizu-Auth-Error: user_authorization_required` | Reauthorization required | Owner completes consent at the configured account page. |
+| URL `elicitation/create`, `-32042` (2025-11-25), or URL requests in `InputRequiredResult` (2026-07-28) | User interaction required | Owner reviews the gateway's request and opens an approved recovery URL. |
 | `401` | Service authentication failed | Administrator checks the service credential or mesh policy. |
-| Other `403` | Access denied | Check upstream permissions and gateway policy. |
+| `403`, including OAuth `insufficient_scope` | Access denied | Check service scopes, upstream permissions, and gateway policy. |
 | Network/protocol failure | Unavailable | Check gateway availability and retry. |
 
 Open **Chat Connections** in the navigation to see the latest observation and
-last-check time for each per-user gateway. **Reauthorize** opens only the
-operator-configured account page. After consent, **Check connection** performs
+last-check time for each per-user gateway. URL elicitation is advertised only for
+opted-in proxies, and form elicitation is not supported. Detached runs cancel
+legacy elicitation requests without accepting them; newer input-required results
+are recorded without continuing the operation. The custom `X-Seizu-Auth-Error`
+header is not used.
+
+The current external transports use the SDK's legacy initialization handshake
+(up to 2025-11-25); gateways must support that handshake. The client also handles
+the newer input-required result shape, but does not enable modern-only transport
+negotiation.
+
+The page displays the gateway's explanation and destination host. Opening a link
+is optional; Seizu does not automatically open URLs, accept consent, or resume a
+run on completion notifications. Elicitation may request actions other than OAuth:
+review the request before proceeding. URLs must have the same scheme, host, and
+effective port as `user_authorization.reauthorize_url`, with no embedded
+credentials, fragment, whitespace, or backslashes. Up to eight links are stored;
+URLs are limited to 4096 characters, IDs to 256, and explanations to 1000.
+Links are hidden after one hour; retry discovery or the original request for a
+fresh link. A gateway may expire a link sooner or invalidate it when the MCP
+request is cancelled. The configured **Account page** remains available for
+account management independently of an MCP session. Use HTTPS outside local development. Gateways must not include tokens
+or secrets in URLs or explanations, and must expire recovery nonces themselves.
+
+After completing the interaction, **Check connection** performs
 fresh tool discovery; it does not call a tool or resume an earlier run. Retry the
 interactive request or let the next scheduled run execute. Connection failures
 also include a connection-page link in chat tool diagnostics.
@@ -193,8 +217,9 @@ also include a connection-page link in chat tool diagnostics.
 Status is persisted per user and proxy configuration, including failures during
 discovery that make a skill unavailable. It survives worker restarts. A successful
 fresh request clears a failure; cached discovery does not. Changed configuration
-starts with an unknown status. Records contain no tokens or raw upstream responses
-and do not prove access to every tool.
+starts with an unknown status. Records contain bounded recovery links and
+explanations but no tokens or raw upstream responses. They do not prove access to
+every tool; a tool-specific interaction may require retrying the original request.
 
 The gateway owns upstream OAuth callbacks, encryption, refresh, revocation, and
 account linking. Seizu stores no upstream grants and does not implement the

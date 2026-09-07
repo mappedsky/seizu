@@ -92,6 +92,7 @@ class ExternalMCPConnectionRecord(SQLModel, table=True):  # type: ignore[call-ar
     status: str
     observed_at: str
     error_code: str | None = None
+    elicitations_json: str | None = None
 
 
 _engine: AsyncEngine | None = None
@@ -978,10 +979,12 @@ class SQLModelReportStore(ReportStore):
             await session.execute(
                 text(
                     "INSERT INTO external_mcp_connections "
-                    "(user_id, proxy_name, fingerprint, status, observed_at, error_code) "
-                    "VALUES (:user_id, :proxy_name, :fingerprint, :status, :observed_at, :error_code) "
+                    "(user_id, proxy_name, fingerprint, status, observed_at, error_code, elicitations_json) "
+                    "VALUES (:user_id, :proxy_name, :fingerprint, :status, :observed_at, "
+                    ":error_code, :elicitations_json) "
                     "ON CONFLICT (user_id, proxy_name, fingerprint) DO UPDATE SET "
-                    "status = excluded.status, observed_at = excluded.observed_at, error_code = excluded.error_code "
+                    "status = excluded.status, observed_at = excluded.observed_at, error_code = excluded.error_code, "
+                    "elicitations_json = excluded.elicitations_json "
                     "WHERE external_mcp_connections.observed_at < excluded.observed_at"
                 ),
                 record.model_dump(),

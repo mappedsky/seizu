@@ -38,6 +38,7 @@ async def test_list_uses_authenticated_owner_and_omits_private_configuration(set
     async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
         response = await client.get("/api/v1/chat/connections?user_id=someone-else")
     assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "private, no-store"
     assert response.json()["connections"] == [
         {
             "proxy_name": "gateway",
@@ -45,6 +46,7 @@ async def test_list_uses_authenticated_owner_and_omits_private_configuration(set
             "observed_at": None,
             "error_code": None,
             "reauthorize_url": "https://gateway.test/accounts",
+            "elicitations": [],
         }
     ]
     report_store.list_external_mcp_connections.assert_awaited_once_with("owner")

@@ -2812,18 +2812,29 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            status: "unknown" | "connected" | "authorization_required" | "service_authentication_failed" | "permission_denied" | "unavailable";
+            status: "unknown" | "connected" | "authorization_required" | "interaction_required" | "service_authentication_failed" | "permission_denied" | "unavailable";
             /** Observed At */
             observed_at?: string | null;
             /** Error Code */
-            error_code?: ("unknown" | "connected" | "authorization_required" | "service_authentication_failed" | "permission_denied" | "unavailable") | null;
+            error_code?: ("unknown" | "connected" | "authorization_required" | "interaction_required" | "service_authentication_failed" | "permission_denied" | "unavailable") | null;
             /** Reauthorize Url */
             reauthorize_url?: string | null;
+            /** Elicitations */
+            elicitations?: components["schemas"]["ExternalMCPElicitation"][];
         };
         /** ExternalMCPConnectionsResponse */
         ExternalMCPConnectionsResponse: {
             /** Connections */
             connections: components["schemas"]["ExternalMCPConnection"][];
+        };
+        /** ExternalMCPElicitation */
+        ExternalMCPElicitation: {
+            /** Elicitation Id */
+            elicitation_id?: string | null;
+            /** Url */
+            url: string;
+            /** Message */
+            message: string;
         };
         /** GraphIndex */
         GraphIndex: {

@@ -81,10 +81,17 @@ ConnectionStatus = Literal[
     "unknown",
     "connected",
     "authorization_required",
+    "interaction_required",
     "service_authentication_failed",
     "permission_denied",
     "unavailable",
 ]
+
+
+class ExternalMCPElicitation(BaseModel):
+    elicitation_id: str | None = Field(default=None, max_length=256)
+    url: str = Field(max_length=4096)
+    message: str = Field(max_length=1000)
 
 
 class ExternalMCPConnection(BaseModel):
@@ -93,6 +100,7 @@ class ExternalMCPConnection(BaseModel):
     observed_at: str | None = None
     error_code: ConnectionStatus | None = None
     reauthorize_url: str | None = None
+    elicitations: list[ExternalMCPElicitation] = Field(default_factory=list)
 
 
 class ExternalMCPConnectionsResponse(BaseModel):

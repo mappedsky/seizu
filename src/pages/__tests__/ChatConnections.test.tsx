@@ -140,4 +140,57 @@ describe('Chat connections', () => {
     renderPage(null);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('shows the gateway explanation and destination without automatically navigating', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        connections: [
+          {
+            ...connection,
+            status: 'interaction_required',
+            elicitations: [
+              {
+                elicitation_id: 'opaque',
+                url: 'https://gateway.test/connect?nonce=private',
+                message: '<script>Connect your account</script>',
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    renderPage();
+    const link = await screen.findByRole('link', { name: 'Open gateway.test' });
+    expect(link).toHaveAttribute(
+      'href',
+      'https://gateway.test/connect?nonce=private',
+    );
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(
+      screen.getByText('<script>Connect your account</script>'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('link', { name: 'Reauthorize' }),
+    ).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('explains how to recover when elicitation links have expired or were rejected', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        connections: [
+          { ...connection, status: 'interaction_required', elicitations: [] },
+        ],
+      }),
+    });
+    renderPage();
+    expect(
+      await screen.findByText(/No current approved link/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('link', { name: /Open gateway/ }),
+    ).not.toBeInTheDocument();
+  });
 });

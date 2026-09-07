@@ -13,6 +13,7 @@ const labels: Record<ConnectionStatus, string> = {
   unknown: 'Not checked',
   connected: 'Connected',
   authorization_required: 'Reauthorization required',
+  interaction_required: 'User interaction required',
   service_authentication_failed: 'Service authentication failed',
   permission_denied: 'Access denied',
   unavailable: 'Unavailable',
@@ -86,6 +87,47 @@ export default function ChatConnections() {
                 </Typography>
               )}
               <Stack direction="row" spacing={2} sx={{ mt: 2 }}>
+                {connection.status === 'interaction_required' && (
+                  <Stack spacing={1}>
+                    <Typography>
+                      The gateway requested an external interaction. Review the
+                      destination before opening it. Nothing has been accepted
+                      automatically. After completing it, retry your request.
+                    </Typography>
+                    {(connection.elicitations ?? []).map(
+                      (elicitation, index) => (
+                        <Stack key={index}>
+                          <Typography>{elicitation.message}</Typography>
+                          <Button
+                            component="a"
+                            href={elicitation.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            Open {new URL(elicitation.url).host}
+                          </Button>
+                        </Stack>
+                      ),
+                    )}
+                    {!connection.elicitations?.length && (
+                      <Typography>
+                        No current approved link is available. Check the
+                        connection or retry the request to obtain a fresh link.
+                      </Typography>
+                    )}
+                    {connection.reauthorize_url && (
+                      <Button
+                        component="a"
+                        href={connection.reauthorize_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Account page ({new URL(connection.reauthorize_url).host}
+                        )
+                      </Button>
+                    )}
+                  </Stack>
+                )}
                 {connection.status === 'authorization_required' &&
                   connection.reauthorize_url && (
                     <Button

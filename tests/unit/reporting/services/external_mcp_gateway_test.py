@@ -143,7 +143,7 @@ async def test_token_endpoint_failure_has_no_redirect_or_retry(mocker, failure):
     "code,marker,status",
     [
         (401, None, "service_authentication_failed"),
-        (403, "user_authorization_required", "authorization_required"),
+        (403, "user_authorization_required", "permission_denied"),
         (403, None, "permission_denied"),
     ],
 )

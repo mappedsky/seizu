@@ -6,6 +6,7 @@ export type ConnectionStatus =
   | 'unknown'
   | 'connected'
   | 'authorization_required'
+  | 'interaction_required'
   | 'service_authentication_failed'
   | 'permission_denied'
   | 'unavailable';
@@ -16,6 +17,11 @@ export interface ChatConnection {
   observed_at: string | null;
   error_code: ConnectionStatus | null;
   reauthorize_url: string | null;
+  elicitations?: {
+    elicitation_id: string | null;
+    url: string;
+    message: string;
+  }[];
 }
 
 export function useChatConnections(enabled: boolean) {
