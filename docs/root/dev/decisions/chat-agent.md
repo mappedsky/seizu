@@ -2903,3 +2903,25 @@ declaration explicitly.
 
 **Don't:** turn a form response into a permission grant or bypass flag, or
 replace upstream account authorization URL elicitation (AGT-048) with a form.
+
+## AGT-051 — Keep HTTP connections alive between MCP requests
+
+**Applies to:** `gunicorn.conf`, MCP Streamable HTTP clients
+
+Gunicorn uses a five-second HTTP keep-alive interval with UvicornWorker.
+Legacy MCP clients still initialize normally, independently of the modern
+protocol and form-elicitation capability gates.
+
+**Why:** with `keepalive = 0`, Codex 0.153.4 received Seizu's legacy
+`initialize` response, then repeatedly failed sending
+`notifications/initialized` with a closed transport. Separate curl requests
+returned 200 and 202, concealing the connection-reuse failure. The same native
+Codex client, with `mcp_2026_07_28` explicitly disabled, completed initialization
+and listed all 105 tools against the same application with `--keep-alive 5`.
+This is an HTTP connection-lifetime issue, not a failure to negotiate an older
+MCP revision. After applying the change to the normal endpoint, native Codex
+discovered all 105 tools with both `2025-06-18` (flag disabled) and `2026-07-28`
+(flag enabled). The in-process ASGI tests do not exercise TCP connection reuse.
+
+**Don't:** disable keep-alive to make MCP stateless. Protocol session state
+and HTTP connection reuse are independent.
