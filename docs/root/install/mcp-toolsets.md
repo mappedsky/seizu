@@ -8,6 +8,24 @@ LLM agents such as Claude can connect to this endpoint and call tools that run r
 Tools are grouped into **toolsets**. Each toolset contains one or more **tools**, where every tool is a parameterised Cypher query.
 Both toolsets and tools maintain a full version history so changes can be audited and reverted.
 
+## Action confirmations
+
+Built-in tools that require approval can show a confirmation form directly in
+an MCP client using protocol `2026-07-28` and advertising `elicitation.form`
+(an empty `elicitation: {}` also supports forms). The form shows the tool,
+action, resource, and arguments. Select **Approve this action** and submit to
+continue; declining or cancelling does not execute the action.
+
+The server returns `InputRequiredResult` with an `elicitation/create` form.
+The client continues the original call with the returned `requestState` and
+the user's response in `inputResponses`. Approval remains scoped to the caller,
+session, tool, target, and exact arguments, expires after
+`ACTION_CONFIRMATION_TTL_SECONDS`, and is consumed once.
+
+Older clients and clients without form support receive a Seizu confirmation
+URL. Approve or deny in the browser, then retry the call. Upstream account
+authorization and recovery continue to use URL interactions.
+
 ## Managing Toolsets
 
 Navigate to **MCP Toolsets** in the sidebar to view all toolsets.

@@ -8,6 +8,7 @@ The session manager lifespan is managed by the FastAPI app's lifespan context.
 """
 
 import contextvars
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -19,8 +20,12 @@ from mcp.server.streamable_http_manager import StreamableHTTPASGIApp, Streamable
 from mcp.types import (
     CallToolRequestParams,
     CallToolResult,
+    ElicitRequest,
+    ElicitRequestFormParams,
+    ElicitResult,
     GetPromptRequestParams,
     GetPromptResult,
+    InputRequiredResult,
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
@@ -28,6 +33,7 @@ from mcp.types import (
     PaginatedRequestParams,
     ReadResourceRequestParams,
     ReadResourceResult,
+    TextContent,
 )
 from starlette.requests import Request
 from starlette.responses import JSONResponse as StarletteJSONResponse
@@ -35,7 +41,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from reporting import settings
 from reporting.authnz import CurrentUser, validate_bearer_token
-from reporting.services import mcp_runtime, report_store
+from reporting.schema.confirmations import ActionConfirmation
+from reporting.services import action_confirmations, mcp_runtime, report_store
 from reporting.services.action_confirmations import bearer_session_key
 
 reporting_neo4j = mcp_runtime.reporting_neo4j
@@ -66,8 +73,8 @@ _mcp_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVar("_
 # ---------------------------------------------------------------------------
 
 
-# The handlers ignore their ServerRequestContext: everything they need about the
-# caller (identity, permissions, confirmation session) is set by
+# Everything the handlers need about the caller (identity, permissions,
+# confirmation session) is set by
 # _MCPAuthMiddleware in the ContextVars above, which the SDK's per-request task
 # inherits. Keeping them off the context object means the same runtime call works
 # unchanged from the chat agent, which has no MCP request at all.
@@ -81,7 +88,54 @@ async def _handle_list_tools(ctx: ServerRequestContext[Any], params: PaginatedRe
     return ListToolsResult(tools=tools)
 
 
-async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequestParams) -> CallToolResult:
+async def _handle_call_tool(
+    ctx: ServerRequestContext[Any], params: CallToolRequestParams
+) -> CallToolResult | InputRequiredResult:
+    capabilities = (params.meta or {}).get("io.modelcontextprotocol/clientCapabilities", {})
+    elicitation = capabilities.get("elicitation") if isinstance(capabilities, dict) else None
+    forms_supported = (
+        ctx.protocol_version == "2026-07-28"
+        and isinstance(elicitation, dict)
+        and (elicitation == {} or isinstance(elicitation.get("form"), dict))
+    )
+    response_error: str | None = None
+
+    async def respond(confirmation: ActionConfirmation) -> bool:
+        nonlocal response_error
+        # The runtime resolved this record using the current caller, session,
+        # tool, target and argument hash, after validating permissions (AGT-050).
+        if params.request_state != confirmation.confirmation_id:
+            response_error = "Confirmation does not match this action. Request confirmation again."
+            return False
+        response = (params.input_responses or {}).get(confirmation.confirmation_id)
+        if not isinstance(response, ElicitResult):
+            response_error = "A confirmation response is required."
+            return False
+        if response.action == "cancel":
+            response_error = "Action confirmation was cancelled. No action was executed."
+            return False
+        if response.action == "accept" and (
+            response.content is None or type(response.content.get("confirm")) is not bool
+        ):
+            response_error = "Confirmation requires an explicit boolean response."
+            return False
+        approved = response.action == "accept" and response.content is not None and response.content["confirm"] is True
+        decided = await action_confirmations.decide_confirmation(
+            confirmation_id=confirmation.confirmation_id,
+            user_id=confirmation.user_id,
+            decision="approved" if approved else "denied",
+        )
+        if decided is None or decided.status not in {"approved", "denied", "executed"}:
+            response_error = "Confirmation is no longer available. Request confirmation again."
+            return False
+        return True
+
+    continuing = params.request_state is not None or params.input_responses is not None
+    if continuing and not forms_supported:
+        return CallToolResult(
+            content=[TextContent(type="text", text="Form confirmation requires MCP 2026-07-28 and form capability.")],
+            is_error=True,
+        )
     result = await mcp_runtime.call_tool_for_user(
         _mcp_current_user.get(),
         params.name,
@@ -89,7 +143,36 @@ async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequ
         permissions=_mcp_permissions.get(),
         confirmation_source="mcp",
         confirmation_session_key=_mcp_session_key.get(),
+        confirmation_responder=respond if continuing else None,
     )
+    if response_error is not None:
+        return CallToolResult(content=[TextContent(type="text", text=response_error)], is_error=True)
+    if forms_supported and result.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED:
+        confirmation = json.loads(result.content[0].text)
+        if confirmation["status"] == "pending":
+            confirmation_id = confirmation["confirmation_id"]
+            return InputRequiredResult(
+                request_state=confirmation_id,
+                input_requests={
+                    confirmation_id: ElicitRequest(
+                        params=ElicitRequestFormParams(
+                            message=(
+                                f"Approve {confirmation['tool_name']}?\n"
+                                f"Action: {confirmation['action']}\n"
+                                f"Resource: {confirmation['resource_type']}/{confirmation['resource_id']}\n"
+                                f"Arguments:\n{json.dumps(confirmation['arguments'], indent=2)}"
+                            ),
+                            requested_schema={
+                                "type": "object",
+                                "properties": {
+                                    "confirm": {"type": "boolean", "title": "Approve this action", "default": False}
+                                },
+                                "required": ["confirm"],
+                            },
+                        )
+                    )
+                },
+            )
     # The runtime validates arguments against the tool's advertised schema and
     # never raises, because MCP 2.0 no longer wraps a raised handler exception
     # into an is_error result the way v1 did — it would surface as a JSON-RPC

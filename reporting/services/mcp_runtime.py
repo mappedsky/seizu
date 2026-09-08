@@ -3,7 +3,7 @@
 import base64
 import json
 import logging
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -30,7 +30,7 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
-from reporting.schema.confirmations import ActionConfirmationTarget, ConfirmationSource
+from reporting.schema.confirmations import ActionConfirmation, ActionConfirmationTarget, ConfirmationSource
 from reporting.schema.mcp_config import render_skill_parts
 from reporting.services import action_confirmations, external_mcp, report_store, reporting_neo4j, telemetry
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
@@ -46,6 +46,20 @@ from reporting.services.result_limits import (
 )
 
 logger = logging.getLogger(__name__)
+
+ConfirmationResponder = Callable[[ActionConfirmation], Awaitable[bool]]
+
+
+async def _ensure_tool_confirmation(
+    *, respond: ConfirmationResponder | None = None, **kwargs: Any
+) -> ActionConfirmation | None:
+    """Resolve the gate; a responder returns True when the decision must be re-read."""
+    confirmation = await action_confirmations.ensure_confirmation(**kwargs)
+    if confirmation is not None and confirmation.status == "pending" and respond is not None:
+        if await respond(confirmation):
+            # Consume approval through the ordinary atomic execution claim.
+            return await action_confirmations.ensure_confirmation(**kwargs)
+    return confirmation
 
 
 class ChatBlockReason(StrEnum):
@@ -78,6 +92,7 @@ class ToolCallOutcome:
 
     content: list[TextContent]
     is_error: bool = False
+    blocked: ChatBlockReason | None = None
 
 
 @dataclass(frozen=True)
@@ -387,9 +402,15 @@ async def call_tool_for_user(
     result_max_bytes: int | None = None,
     confirmation_source: ConfirmationSource | None = None,
     confirmation_session_key: str | None = None,
+    confirmation_responder: ConfirmationResponder | None = None,
 ) -> ToolCallOutcome:
-    """MCP-shaped tool call. Use ``call_tool_for_chat`` from the chat agent."""
-    content, _blocked, is_error = await _guarded(
+    """MCP-shaped tool call. Use ``call_tool_for_chat`` from the chat agent.
+
+    ``confirmation_responder`` may decide a pending confirmation and return
+    True to re-read and claim it. It runs after permissions and argument
+    validation, and cannot bypass the confirmation's execution claim.
+    """
+    content, blocked, is_error = await _guarded(
         name,
         _call_tool_core(
             current_user,
@@ -402,10 +423,11 @@ async def call_tool_for_user(
             result_max_bytes=result_max_bytes,
             confirmation_source=confirmation_source,
             confirmation_session_key=confirmation_session_key,
+            confirmation_responder=confirmation_responder,
         ),
         arguments,
     )
-    return ToolCallOutcome(content=content, is_error=is_error)
+    return ToolCallOutcome(content=content, is_error=is_error, blocked=blocked)
 
 
 async def call_tool_for_chat(
@@ -542,6 +564,7 @@ async def _call_tool_core(
     result_max_bytes: int | None = None,
     confirmation_source: ConfirmationSource | None = None,
     confirmation_session_key: str | None = None,
+    confirmation_responder: ConfirmationResponder | None = None,
     confirmation_batch_id: str | None = None,
     bypass_confirmations: bool = False,
     confirmation_pre_approved: bool = False,
@@ -605,7 +628,8 @@ async def _call_tool_core(
                     {"error": f"Tool '{name}' requires a session key for confirmation"}
                 ), ChatBlockReason.PERMISSION_DENIED
             assert confirmation_source is not None
-            confirmation = await action_confirmations.ensure_confirmation(
+            confirmation = await _ensure_tool_confirmation(
+                respond=confirmation_responder,
                 user_id=current_user.user.user_id,
                 source=confirmation_source,
                 session_key=confirmation_session_key,
@@ -725,7 +749,8 @@ async def _call_tool_core(
                 ), ChatBlockReason.PERMISSION_DENIED
             target = await builtin.confirmation(args, current_user)
             if target is not None:
-                confirmation = await action_confirmations.ensure_confirmation(
+                confirmation = await _ensure_tool_confirmation(
+                    respond=confirmation_responder,
                     user_id=current_user.user.user_id,
                     source=confirmation_source,
                     session_key=confirmation_session_key,

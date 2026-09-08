@@ -19,10 +19,10 @@ def _request_context() -> Any:
     """A stand-in for the ``ServerRequestContext`` the SDK would build.
 
     Seizu's handlers read the caller's identity and permissions from the
-    ContextVars that ``_MCPAuthMiddleware`` sets and never touch the context
-    argument, so tests need no live ``ServerSession`` to reach them.
+    ContextVars that ``_MCPAuthMiddleware`` sets. This context represents a
+    legacy caller without form elicitation; HTTP tests exercise modern clients.
     """
-    return MagicMock()
+    return MagicMock(protocol_version="2025-11-25")
 
 
 async def dispatch(server: Server[Any], method: str, params: Any) -> Any:

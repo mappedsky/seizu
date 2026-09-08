@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +20,216 @@ from reporting.services.mcp_server import (
     _oauth_registration_handler,
 )
 from tests.unit.reporting.services import mcp_dispatch
+
+
+@pytest.fixture
+def confirmation_store():
+    """Exercise the confirmation service with owner-scoped, atomic store operations."""
+    from reporting.services import action_confirmations
+
+    records = {}
+
+    async def create(record):
+        records[record.confirmation_id] = record
+        return record
+
+    async def get(confirmation_id, user_id):
+        record = records.get(confirmation_id)
+        return record if record and record.user_id == user_id else None
+
+    async def find(**scope):
+        statuses = scope.pop("statuses", ("approved", "denied"))
+        return next(
+            (
+                r
+                for r in records.values()
+                if r.status in statuses
+                and not action_confirmations.is_expired(r)
+                and all(getattr(r, key) == value for key, value in scope.items())
+            ),
+            None,
+        )
+
+    async def decide(*, confirmation_id, user_id, decision):
+        record = await get(confirmation_id, user_id)
+        if record and record.status == "pending" and not action_confirmations.is_expired(record):
+            records[confirmation_id] = record.model_copy(update={"status": decision, "decided_by": user_id})
+            return records[confirmation_id]
+        return None
+
+    async def claim(confirmation_id, user_id):
+        record = await get(confirmation_id, user_id)
+        if record and record.status == "approved" and not action_confirmations.is_expired(record):
+            records[confirmation_id] = record.model_copy(update={"status": "executed"})
+            return records[confirmation_id]
+        return None
+
+    with (
+        patch.object(mcp_module.report_store, "create_action_confirmation", side_effect=create),
+        patch.object(mcp_module.report_store, "get_action_confirmation", side_effect=get),
+        patch.object(mcp_module.report_store, "find_action_confirmation_grant", side_effect=find),
+        patch.object(mcp_module.report_store, "decide_action_confirmation", side_effect=decide) as decisions,
+        patch.object(mcp_module.report_store, "claim_action_confirmation_for_execution", side_effect=claim),
+        patch.object(mcp_module.report_store, "pin_report", return_value=True) as execute,
+    ):
+        yield records, decisions, execute
+
+
+async def _call_confirmation_tool(client, *, capability=None, continuation=None, arguments=None):
+    params = {
+        "name": "reports__pin",
+        "arguments": arguments or {"report_id": "r1", "pinned": True},
+        "_meta": {
+            **_MODERN_META,
+            "io.modelcontextprotocol/clientCapabilities": capability or {"elicitation": {"form": {}}},
+        },
+        **(continuation or {}),
+    }
+    response = await client.post(
+        "/api/v1/mcp",
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": _MODERN_VERSION,
+            "MCP-Method": "tools/call",
+            "MCP-Name": "reports__pin",
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params},
+    )
+    assert response.status_code == 200
+    return response.json()["result"]
+
+
+def _confirmation_response(result, response):
+    return {"requestState": result["requestState"], "inputResponses": {result["requestState"]: response}}
+
+
+async def test_form_confirmation_accepts_and_claims_once_over_http(confirmation_store):
+    records, decisions, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        requested = await _call_confirmation_tool(client)
+        assert requested["resultType"] == "input_required"
+        form = requested["inputRequests"][requested["requestState"]]
+        assert form["method"] == "elicitation/create"
+        assert form["params"]["mode"] == "form"
+        assert '"report_id": "r1"' in form["params"]["message"]
+        assert form["params"]["requestedSchema"]["properties"]["confirm"]["default"] is False
+        execute.assert_not_awaited()
+        continuation = _confirmation_response(requested, {"action": "accept", "content": {"confirm": True}})
+        result = await _call_confirmation_tool(client, continuation=continuation)
+        assert result["isError"] is False
+        assert json.loads(result["content"][0]["text"])["pinned"] is True
+        await _call_confirmation_tool(client, continuation=continuation)
+    execute.assert_awaited_once()
+    decisions.assert_awaited_once()
+    record = records[requested["requestState"]]
+    assert record.status == "executed"
+    assert record.decided_by == "u1"
+
+
+@pytest.mark.parametrize(
+    "response,status",
+    [
+        ({"action": "decline"}, "denied"),
+        ({"action": "accept", "content": {"confirm": False}}, "denied"),
+        ({"action": "cancel"}, "pending"),
+        ({"action": "accept"}, "pending"),
+        ({"action": "accept", "content": {"confirm": "true"}}, "pending"),
+        ({"action": "accept", "content": {"confirm": 1}}, "pending"),
+    ],
+)
+async def test_form_confirmation_does_not_execute_without_approval(confirmation_store, response, status):
+    records, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        requested = await _call_confirmation_tool(client)
+        result = await _call_confirmation_tool(client, continuation=_confirmation_response(requested, response))
+        assert result.get("resultType") != "input_required"
+    assert records[requested["requestState"]].status == status
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", ["expired_decision", "failed_claim", "missing_response"])
+async def test_form_confirmation_requires_a_live_claim(confirmation_store, failure):
+    _, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        requested = await _call_confirmation_tool(client)
+        continuation = _confirmation_response(requested, {"action": "accept", "content": {"confirm": True}})
+        with contextlib.ExitStack() as stack:
+            if failure == "expired_decision":
+                stack.enter_context(
+                    patch.object(mcp_module.action_confirmations, "decide_confirmation", return_value=None)
+                )
+            elif failure == "failed_claim":
+                stack.enter_context(
+                    patch.object(mcp_module.report_store, "claim_action_confirmation_for_execution", return_value=None)
+                )
+            else:
+                continuation["inputResponses"] = {}
+            result = await _call_confirmation_tool(client, continuation=continuation)
+        assert result.get("resultType") != "input_required"
+    execute.assert_not_awaited()
+
+
+async def test_legacy_confirmation_retains_browser_url(confirmation_store):
+    _, decisions, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        response = await client.post(
+            "/api/v1/mcp",
+            headers={"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-11-25"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "reports__pin", "arguments": {"report_id": "r1", "pinned": True}},
+            },
+        )
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["confirmation_required"] is True
+    assert "/app/confirmations/" in payload["confirmation_url"]
+    decisions.assert_not_awaited()
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("change", ["arguments", "state", "owner", "session", "expiry", "permissions"])
+async def test_form_confirmation_rejects_changed_scope(confirmation_store, change):
+    records, decisions, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        requested = await _call_confirmation_tool(client)
+        record = records[requested["requestState"]]
+        continuation = _confirmation_response(requested, {"action": "accept", "content": {"confirm": True}})
+        arguments = None
+        if change == "arguments":
+            arguments = {"report_id": "r1", "pinned": False}
+        elif change == "state":
+            continuation["requestState"] = "unrelated"
+        elif change == "owner":
+            records[record.confirmation_id] = record.model_copy(update={"user_id": "someone-else"})
+        elif change == "session":
+            records[record.confirmation_id] = record.model_copy(update={"session_key": "another-session"})
+        elif change == "expiry":
+            records[record.confirmation_id] = record.model_copy(
+                update={"expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()}
+            )
+        with contextlib.ExitStack() as stack:
+            if change == "permissions":
+                stack.enter_context(patch("reporting.authnz.permissions.ALL_PERMISSIONS", frozenset({"reports:read"})))
+            await _call_confirmation_tool(client, continuation=continuation, arguments=arguments)
+    execute.assert_not_awaited()
+    decisions.assert_not_awaited()
+
+
+@pytest.mark.parametrize("elicitation,expected_form", [({}, True), ({"url": {}}, False), (None, False)])
+async def test_form_confirmation_capability_negotiation(confirmation_store, elicitation, expected_form):
+    _, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        result = await _call_confirmation_tool(client, capability={"elicitation": elicitation})
+    if expected_form:
+        assert result["resultType"] == "input_required"
+    else:
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["confirmation_required"] is True
+        assert "/app/confirmations/" in payload["confirmation_url"]
+    execute.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # Helpers

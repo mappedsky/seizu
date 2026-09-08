@@ -2872,3 +2872,29 @@ continuation driver, so negotiation cannot change the detached recovery and
 no-replay contract in AGT-048. The legacy override accommodates peers that reject
 requests made before initialization without treating their errors as consent to
 downgrade automatically.
+
+## AGT-050 — MCP forms decide existing action confirmations
+
+**Applies to:** `mcp_server._handle_call_tool`, `mcp_runtime._ensure_tool_confirmation`
+
+MCP 2026-07-28 clients advertising form elicitation receive an
+`InputRequiredResult` for pending Seizu action approvals. The confirmation ID
+is the continuation state and input-response key. The runtime resolves the
+confirmation after current permission and argument validation, using the
+existing caller/session/tool/target/argument-hash scope. Only a matching
+continuation with an explicit boolean approval can approve the record. Decline
+or false denies it; cancel leaves it pending. Execution consumes the ordinary
+atomic grant. Other clients retain the browser URL flow.
+
+**Why:** these approvals need a decision, not credentials, so a client form
+removes the browser round trip. The modern input-required flow works with our
+stateless HTTP transport; legacy server-to-client callbacks require a
+back-channel that this deployment does not retain. Reusing confirmation records
+preserves ownership, expiry, decision attribution, and the execution claim;
+trusting a bare accept response or setting `confirmation_pre_approved` would
+discard those checks. The SDK's capability checker tests elicitation presence
+but does not distinguish form from URL support, so the transport checks the
+per-request mode declaration explicitly.
+
+**Don't:** turn a form response into a permission grant or bypass flag, or
+replace upstream account authorization URL elicitation (AGT-048) with a form.
