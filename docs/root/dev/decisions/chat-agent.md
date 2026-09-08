@@ -2799,17 +2799,22 @@ and exposed a server-scoped CSRF incompatibility. Transport success therefore
 does not establish per-user grant isolation. Shared-token external access is
 outside this experimental designation.
 
-Per-user external authority is an explicit gateway contract. Seizu supplies a
-stored run-owner identity over either M2M bearer authentication or trusted mesh
-authentication. The gateway maps that owner to its own upstream grant and must
-never substitute a shared credential when the grant is missing. Shared static
-API tokens remain supported through `bearer` plus `token_env`.
+Per-user external authority is an explicit gateway contract. By default Seizu
+supplies the stored run owner's durable OIDC `(issuer, subject)` pair, never its
+local user ID, over either M2M bearer authentication or trusted mesh
+authentication. A gateway may instead map a nonempty identity-provider claim
+such as email into a target header. The gateway maps that identity to its own
+upstream grant and must never substitute a shared credential when the grant is
+missing. Shared static API tokens remain supported through `bearer` plus
+`token_env`.
 
 **Why:** Temporal deliberately holds no browser bearer (AGT-008), and Seizu's
 OIDC refresh token is an encrypted browser cookie, not a worker-accessible vault.
 An existing gateway already owns consent, refresh, account linking, and upstream
-policy. Duplicating that store in Seizu would introduce another grant lifecycle
-without proving the upstream account belongs to the asserted user.
+policy. Its user directory cannot identify a Seizu-local ID; the durable OIDC
+pair is the identity boundary (AUTH-001). Duplicating that store in Seizu would
+introduce another grant lifecycle without proving the upstream account belongs
+to the asserted user.
 
 M2M client credentials acquire and renew service tokens in process memory;
 existing `token_env` configurations remain compatible. A token acquisition is

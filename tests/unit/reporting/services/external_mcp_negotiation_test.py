@@ -102,13 +102,14 @@ def wire(mocker):
 
 async def test_modern_requests_carry_identity_and_capabilities_without_handshake(wire):
     _, requests = wire
-    result = await external_mcp.call_tool(proxy(), "read", {}, user("alice"))
+    result = await external_mcp.call_tool(proxy(), "read", {}, user("seizu-alice", sub="idp-alice"))
     assert result.text == "success"
     assert requests[0][0]["method"] == "server/discover"
     assert all(body["method"] not in {"initialize", "notifications/initialized"} for body, _ in requests)
     for body, headers in requests:
         assert headers["mcp-protocol-version"] == "2026-07-28"
-        assert headers["x-target-user-id"] == "alice"
+        assert headers["x-target-user-id"] == "idp-alice"
+        assert headers["x-target-user-issuer"] == "https://idp.test"
         assert "mcp-session-id" not in headers
         assert body["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]["elicitation"] == {"url": {}}
 

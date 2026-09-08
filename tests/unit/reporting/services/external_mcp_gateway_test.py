@@ -29,9 +29,9 @@ def proxy(**updates):
     )
 
 
-def user(user_id="owner"):
+def user(user_id="owner", *, sub=None):
     return CurrentUser(
-        user=User(user_id=user_id, sub=user_id, iss="https://idp.test", created_at="now", last_login="now"),
+        user=User(user_id=user_id, sub=sub or user_id, iss="https://idp.test", created_at="now", last_login="now"),
         jwt_claims={},
         permissions=frozenset(),
     )
@@ -164,13 +164,14 @@ async def test_actual_transport_auth_failures_are_distinct_and_persisted(mocker,
         ),
     )
     with pytest.raises(external_mcp.ExternalMCPGatewayBlocked) as caught:
-        await external_mcp.list_proxy_tools(proxy(transport=transport), user())
+        await external_mcp.list_proxy_tools(proxy(transport=transport), user("seizu-owner", sub="idp-owner"))
     assert caught.value.status == status
-    assert requests[0].headers["X-Target-User-ID"] == "owner"
+    assert requests[0].headers["X-Target-User-ID"] == "idp-owner"
+    assert requests[0].headers["X-Target-User-Issuer"] == "https://idp.test"
     assert "authorization" not in requests[0].headers
     observation = external_mcp_connections.report_store.record_external_mcp_connection.call_args.args[0]
     assert observation["status"] == status
-    assert observation["user_id"] == "owner"
+    assert observation["user_id"] == "seizu-owner"
     payload = external_mcp.authentication_payload(caught.value)
     assert payload["connections_url"] == "/app/chat/connections"
     assert ("reauthorize_url" in payload) == (status == "authorization_required")
@@ -201,10 +202,11 @@ async def test_detached_owners_get_fresh_transports_and_separate_authority(mocke
     mocker.patch.object(external_mcp, "_transport", transport)
     mocker.patch.object(external_mcp, "ClientSession", side_effect=session_factory)
     for target in ["alice", "bob"]:
-        tools = await external_mcp.discover_proxy_tools(proxy(), user(target))
-        assert tools[0].name == f"ext__gateway__read_{target}"
-        result = await external_mcp.call_tool(proxy(), f"read_{target}", {}, user(target))
-        assert result.text == target
+        subject = f"idp-{target}"
+        tools = await external_mcp.discover_proxy_tools(proxy(), user(target, sub=subject))
+        assert tools[0].name == f"ext__gateway__read_{subject}"
+        result = await external_mcp.call_tool(proxy(), f"read_{subject}", {}, user(target, sub=subject))
+        assert result.text == subject
     assert len(sessions) == 4
     assert len({id(headers) for headers in headers_seen}) == 4
     assert all("Authorization" not in headers for headers in headers_seen)

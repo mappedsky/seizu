@@ -56,6 +56,8 @@ EXTERNAL_TOOLSET_PREFIX = "__external_"
 _SYNTHETIC_SUFFIX = "__"
 _EPOCH = "1970-01-01T00:00:00+00:00"
 _PLUGIN_EXTENSION_NAMESPACE = "com.mappedsky.seizu"
+_TARGET_USER_ID_HEADER = "X-Target-User-ID"
+_TARGET_USER_ISSUER_HEADER = "X-Target-User-Issuer"
 _advertised_upstream_urls: dict[str, frozenset[str]] = {}
 _RESOURCE_METADATA_RE = re.compile(r"(?:^|[,\s])resource_metadata\s*=\s*(?:\"([^\"]+)\"|([^,\s]+))", re.I)
 
@@ -315,10 +317,18 @@ def build_headers(
                 raise ExternalMCPGatewayBlocked(proxy, "service_authentication_failed")
             raise ExternalMCPAuthenticationRequired(OAuthChallenge(proxy.name))
     if proxy.auth_mode == ExternalMCPAuthMode.M2M_JWT or proxy.user_authorization:
-        if ExternalMCPHeaderSource.USER_ID not in proxy.header_mappings:
-            headers["X-Target-User-ID"] = _identity_value(ExternalMCPHeaderSource.USER_ID, current_user) or ""
-        if not current_user.user.user_id.strip():
-            raise ExternalMCPError("Target user identity is missing")
+        mapped_headers = {header.casefold() for header in proxy.header_mappings.values()}
+        if _TARGET_USER_ID_HEADER.casefold() not in mapped_headers:
+            headers[_TARGET_USER_ID_HEADER] = _identity_value(ExternalMCPHeaderSource.SUBJECT, current_user) or ""
+        if _TARGET_USER_ISSUER_HEADER.casefold() not in mapped_headers:
+            headers[_TARGET_USER_ISSUER_HEADER] = _identity_value(ExternalMCPHeaderSource.ISSUER, current_user) or ""
+        target_headers = {_TARGET_USER_ID_HEADER.casefold(), _TARGET_USER_ISSUER_HEADER.casefold()}
+        for source, header in proxy.header_mappings.items():
+            if header.casefold() in target_headers and not _identity_value(source, current_user):
+                raise ExternalMCPError(f"Target identity header {header} is missing")
+        for header, value in headers.items():
+            if header.casefold() in target_headers and not value.strip():
+                raise ExternalMCPError(f"Target identity header {header} is missing")
     return headers
 
 

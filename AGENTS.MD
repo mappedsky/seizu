@@ -320,8 +320,9 @@ then the proxy's `require_confirmation` fallback (default true). Bypass still
 requires `chat:bypass_permissions` and is audit-logged. RFC 9728 401 challenges
 surface as a structured authentication block, and M2M 401s have a distinct
 `ExternalMCPTokenExpired` exception before chat normalization. Interactive
-Temporal turns do not persist the browser bearer token, so use M2M plus a target
-user header (or trusted header delegation) for detached/headless execution.
+Temporal turns do not persist the browser bearer token, so use M2M plus target
+OIDC subject and issuer headers (or trusted header delegation) for
+detached/headless execution; never delegate Seizu's local user ID (AGT-048).
 Decisions: [`AGT-010`](docs/root/dev/decisions/chat-agent.md). Docs:
 `docs/root/install/external-mcp.md`.
 

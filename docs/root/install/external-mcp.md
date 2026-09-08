@@ -26,7 +26,7 @@ Temporal worker.
 
 ```text
 MCP_EXTERNAL_ENABLED=true
-MCP_EXTERNAL_PROXIES=[{"name":"drive","url":"https://mcp-proxy.example/mcp/drive","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"user_id":"X-Target-User-ID","email":"X-Target-Email"}}]
+MCP_EXTERNAL_PROXIES=[{"name":"drive","url":"https://mcp-proxy.example/mcp/drive","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"subject":"X-Target-User-ID","issuer":"X-Target-User-Issuer","email":"X-Target-Email"}}]
 MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE=none
 # Reuse a proxy's discovered tool listing across turns, per user (0 = off).
 MCP_EXTERNAL_DISCOVERY_TTL_SECONDS=0
@@ -63,13 +63,18 @@ Supported header sources are `user_id`, `subject`, `issuer`, `email`,
 present when the caller supplied an ephemeral token in the current process. A
 Temporal turn reconstructs identity from the Seizu user record and deliberately
 does not persist the browser's bearer token, so detached interactive turns and
-headless runs should use `m2m_jwt` plus `user_id` (or trusted identity-header
-delegation) instead.
+headless runs should use `m2m_jwt` plus the durable OIDC `(issuer, subject)`
+identity pair (or trusted identity-header delegation) instead.
 
 `m2m_jwt` adds `Authorization: Bearer <service-token>` and defaults the target
-identity to `X-Target-User-ID` when no explicit `user_id` mapping exists. `bearer` sends
-the configured token in `Authorization`. `header_delegation` sends only the
-mapped identity values.
+identity to `X-Target-User-ID: <subject>` and
+`X-Target-User-Issuer: <issuer>` unless those header names are explicitly
+mapped. A mapping may instead use an identity-provider claim such as `email`,
+for example `{"email":"X-Target-User-ID"}`. Every configured target identity
+header must have a nonempty value for the user or Seizu rejects the operation
+before contacting the gateway. `bearer` sends the configured token in
+`Authorization`.
+`header_delegation` sends only the mapped identity values.
 
 Every discovery and tool call creates a fresh client transport and fresh header
 dictionary for that user. A connection carrying one user's headers is never
@@ -174,10 +179,10 @@ before relying on delegated access. Configuration and recovery behavior may chan
 
 Setting `user_authorization` opts into this contract for `m2m_jwt` or
 `header_delegation`. The gateway must authenticate Seizu and authorize its ability
-to delegate before trusting `X-Target-User-ID` (or the configured `user_id` header).
-The header carries the run owner's stored Seizu user ID, distinct from their
-identity-provider subject. Optional `issuer`/`subject` mappings can assist account
-linking without rewriting those identifiers.
+to delegate before trusting `X-Target-User-ID` (or the configured subject header).
+The default target headers carry the run owner's identity-provider `(issuer,
+subject)` pair, never Seizu's internal user ID. Configure both values as a pair
+when the gateway uses different header names.
 
 The gateway maps that owner to its account, selects and renews the user's upstream
 grant, and enforces the grant's permissions. Missing users or grants must never
@@ -250,7 +255,7 @@ When the mesh already authenticates Seizu to the gateway, use:
 MCP_EXTERNAL_PROXIES=[{"name":"corp","url":"http://mcp-gateway.platform.svc.cluster.local/mcp","transport":"streamable_http","auth_mode":"header_delegation","user_authorization":{"reauthorize_url":"https://gateway.example/accounts"}}]
 ```
 
-Seizu sends the target-user header without `Authorization`. Configure strict
+Seizu sends the target-user subject and issuer headers without `Authorization`. Configure strict
 mTLS at the gateway and allow only the Seizu web and Temporal-worker workload
 identities to assert target users. For Istio, use `PeerAuthentication` with
 `STRICT` and an `AuthorizationPolicy` allowing the specific service-account
@@ -403,19 +408,19 @@ header before proxying to MCP. The Seizu side is vendor-neutral:
 
 ```text
 MCP_EXTERNAL_ENABLED=true
-MCP_EXTERNAL_PROXIES=[{"name":"corp","url":"https://gateway.example/mcp","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"user_id":"X-Target-User-ID","issuer":"X-Target-Issuer"},"require_confirmation":true}]
+MCP_EXTERNAL_PROXIES=[{"name":"corp","url":"https://gateway.example/mcp","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"subject":"X-Target-User-ID","issuer":"X-Target-User-Issuer"},"require_confirmation":true}]
 MCP_EXTERNAL_PROXY_TOKEN=<gateway-audience-service-jwt>
 ```
 
 Configure the gateway to:
 
 1. Validate the bearer token's signature, issuer, audience, expiry, and required scope.
-2. Trust `X-Target-User-ID` only after that validation and remove any client-supplied copy before policy evaluation.
-3. Bind authorization and downstream credentials to the pair of service identity and target user.
+2. Trust `X-Target-User-ID` and `X-Target-User-Issuer` only after that validation and remove any client-supplied copies before policy evaluation.
+3. Bind authorization and downstream credentials to the service identity and target `(issuer, subject)` pair.
 4. Return an RFC 9728 `WWW-Authenticate` challenge on missing, expired, or insufficient credentials.
 5. Preserve streaming responses and apply timeouts longer than Seizu's configured MCP read timeout.
 
-The gateway must not treat `X-Target-User-ID` alone as authentication. That
+The gateway must not treat the target identity headers alone as authentication. That
 would allow any caller able to reach it to select another tenant and recreate
 the confused-deputy problem this integration is designed to avoid.
 

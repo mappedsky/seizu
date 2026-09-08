@@ -202,8 +202,11 @@ class ExternalMCPProxy(BaseModel):
                 raise ValueError("per-user header_delegation uses mesh authentication without Authorization")
         if self.user_authorization or self.auth_mode == ExternalMCPAuthMode.M2M_JWT:
             for source, header in self.header_mappings.items():
-                if header.casefold() == "x-target-user-id" and source != ExternalMCPHeaderSource.USER_ID:
-                    raise ValueError("X-Target-User-ID may only carry user_id")
+                if header.casefold() in {"x-target-user-id", "x-target-user-issuer"} and source in {
+                    ExternalMCPHeaderSource.USER_ID,
+                    ExternalMCPHeaderSource.ACCESS_TOKEN,
+                }:
+                    raise ValueError(f"{header} may only carry an identity-provider claim")
         return self
 
 
