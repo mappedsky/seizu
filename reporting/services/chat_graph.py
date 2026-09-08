@@ -3227,8 +3227,8 @@ def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
     authentication = [result for result in results if result.blocked == ChatBlockReason.AUTHENTICATION_REQUIRED]
     if authentication:
         lines = [
-            "An external MCP proxy requires authentication before Seizu can use the requested tool. "
-            "Authenticate with the proxy, then retry this request."
+            "An external MCP proxy blocked access to the requested tool. "
+            "Follow the connection guidance below, then retry this request."
         ]
         for result in authentication:
             lines.append(f"- {_blocked_tool_call_body(result.content)}")

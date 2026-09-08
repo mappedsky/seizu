@@ -278,6 +278,18 @@ diagnostics rather than raising. Package bounds live at the top of that module.
 
 ### External MCP Proxies (`reporting/services/external_mcp.py`)
 
+`m2m_jwt` accepts automatic `client_credentials` acquisition or existing
+`token_env` credentials; shared API tokens use `bearer`. Per-user gateways opt
+into `user_authorization`, with durable owner-scoped status at
+`/app/chat/connections`; mesh deployments use `header_delegation` without a
+bearer. Standard URL elicitation exposes bounded, owner-only recovery links;
+detached runs never accept consent or automatically replay the operation.
+The gateway owns upstream user grants (AGT-048, STO-013).
+Per-user delegation and recovery are experimental; validation is tracked in #312
+(AGT-048). Shared-token external access is not covered by that designation.
+Streamable HTTP negotiates modern-first with legacy fallback; `protocol_mode:
+legacy` skips discovery. SSE always initializes (AGT-049).
+
 `MCP_EXTERNAL_ENABLED` gates both the agent capability and the optional local
 Compose profile (`make external_mcp_enable` / `make external_mcp_disable`). The
 local `external-mcp` profile wires Seizu straight to the PAT adapter — one
@@ -308,8 +320,9 @@ then the proxy's `require_confirmation` fallback (default true). Bypass still
 requires `chat:bypass_permissions` and is audit-logged. RFC 9728 401 challenges
 surface as a structured authentication block, and M2M 401s have a distinct
 `ExternalMCPTokenExpired` exception before chat normalization. Interactive
-Temporal turns do not persist the browser bearer token, so use M2M plus a target
-user header (or trusted header delegation) for detached/headless execution.
+Temporal turns do not persist the browser bearer token, so use M2M plus target
+OIDC subject and issuer headers (or trusted header delegation) for
+detached/headless execution; never delegate Seizu's local user ID (AGT-048).
 Decisions: [`AGT-010`](docs/root/dev/decisions/chat-agent.md). Docs:
 `docs/root/install/external-mcp.md`.
 

@@ -53,9 +53,25 @@ def test_build_headers_are_fresh_and_user_scoped(monkeypatch) -> None:
     assert first == {
         "Authorization": "Bearer service-jwt",
         "X-External-Subject": "provider-subject",
-        "X-Target-User-ID": "user-1",
+        "X-Target-User-ID": "provider-subject",
+        "X-Target-User-Issuer": "https://issuer.example",
     }
     assert first is not second
+
+
+def test_build_headers_allows_an_email_target_identity_and_rejects_a_missing_claim(monkeypatch) -> None:
+    proxy = _proxy(
+        auth_mode="m2m_jwt",
+        token_env="MCP_SERVICE_TOKEN",
+        header_mappings={"email": "X-Target-User-ID"},
+    )
+    monkeypatch.setenv("MCP_SERVICE_TOKEN", "service-jwt")
+    assert external_mcp.build_headers(proxy, _user())["X-Target-User-ID"] == "user@example.com"
+
+    current_user = _user()
+    current_user.user.email = None
+    with pytest.raises(external_mcp.ExternalMCPError, match="X-Target-User-ID is missing"):
+        external_mcp.build_headers(proxy, current_user)
 
 
 def test_build_headers_formats_a_delegated_access_token() -> None:

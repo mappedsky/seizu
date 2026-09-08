@@ -34,6 +34,7 @@ import Plugins from 'src/pages/Plugins';
 import PluginEditor from 'src/pages/PluginEditor';
 import PluginHistory from 'src/pages/PluginHistory';
 import ModelProfiles from 'src/pages/ModelProfiles';
+import ChatConnections from 'src/pages/ChatConnections';
 
 function LegacyWorkflowRedirect({ history = false }: { history?: boolean }) {
   const { id } = useParams();
@@ -67,6 +68,7 @@ const routes = [
       // were separate element instances, so asking a question unmounted the
       // page mid-navigation: the session was created and the question it was
       // created for went with the discarded state.
+      { path: 'chat/connections', element: <ChatConnections /> },
       { path: 'chat/:threadId?', element: <ChatInterface /> },
       {
         path: 'confirmations/batch/:batchId',

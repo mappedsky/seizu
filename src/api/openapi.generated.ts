@@ -2073,6 +2073,40 @@ export interface paths {
         patch: operations["update_chat_session_api_v1_chat_sessions__thread_id__patch"];
         trace?: never;
     };
+    "/api/v1/chat/connections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Connections */
+        get: operations["list_connections_api_v1_chat_connections_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chat/connections/{proxy_name}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check Connection */
+        post: operations["check_connection_api_v1_chat_connections__proxy_name__check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/chat/schedules": {
         parameters: {
             query?: never;
@@ -2768,6 +2802,39 @@ export interface components {
              * @enum {string}
              */
             reasoning_effort: "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+        };
+        /** ExternalMCPConnection */
+        ExternalMCPConnection: {
+            /** Proxy Name */
+            proxy_name: string;
+            /**
+             * Status
+             * @default unknown
+             * @enum {string}
+             */
+            status: "unknown" | "connected" | "authorization_required" | "interaction_required" | "service_authentication_failed" | "permission_denied" | "unavailable";
+            /** Observed At */
+            observed_at?: string | null;
+            /** Error Code */
+            error_code?: ("unknown" | "connected" | "authorization_required" | "interaction_required" | "service_authentication_failed" | "permission_denied" | "unavailable") | null;
+            /** Reauthorize Url */
+            reauthorize_url?: string | null;
+            /** Elicitations */
+            elicitations?: components["schemas"]["ExternalMCPElicitation"][];
+        };
+        /** ExternalMCPConnectionsResponse */
+        ExternalMCPConnectionsResponse: {
+            /** Connections */
+            connections: components["schemas"]["ExternalMCPConnection"][];
+        };
+        /** ExternalMCPElicitation */
+        ExternalMCPElicitation: {
+            /** Elicitation Id */
+            elicitation_id?: string | null;
+            /** Url */
+            url: string;
+            /** Message */
+            message: string;
         };
         /** GraphIndex */
         GraphIndex: {
@@ -9210,6 +9277,57 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ChatSessionItem"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_connections_api_v1_chat_connections_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalMCPConnectionsResponse"];
+                };
+            };
+        };
+    };
+    check_connection_api_v1_chat_connections__proxy_name__check_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                proxy_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalMCPConnection"];
                 };
             };
             /** @description Validation Error */

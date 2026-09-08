@@ -1,5 +1,11 @@
 # External MCP proxies
 
+Per-user gateway delegation and recovery (`user_authorization`) are
+**experimental**. Use only in controlled deployments after validating the
+gateway's identity mapping and per-user authorization. See the
+[validation checklist](https://github.com/mappedsky/seizu/issues/312).
+This designation does not apply to ordinary shared-token external MCP access.
+
 Seizu's chat agent can discover and call tools on external MCP servers through
 an identity-aware proxy. The proxy remains responsible for authenticating to
 the external service, storing or rotating its credentials, and enforcing its
@@ -20,7 +26,7 @@ Temporal worker.
 
 ```text
 MCP_EXTERNAL_ENABLED=true
-MCP_EXTERNAL_PROXIES=[{"name":"drive","url":"https://mcp-proxy.example/mcp/drive","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"user_id":"X-Target-User-ID","email":"X-Target-Email"}}]
+MCP_EXTERNAL_PROXIES=[{"name":"drive","url":"https://mcp-proxy.example/mcp/drive","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"subject":"X-Target-User-ID","issuer":"X-Target-User-Issuer","email":"X-Target-Email"}}]
 MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE=none
 # Reuse a proxy's discovered tool listing across turns, per user (0 = off).
 MCP_EXTERNAL_DISCOVERY_TTL_SECONDS=0
@@ -42,9 +48,12 @@ Each object accepts:
 | `name` | Lowercase namespace component. It must be unique and cannot contain `__`. |
 | `url` | Absolute `http` or `https` MCP proxy endpoint. Embedded credentials are rejected. |
 | `transport` | `sse` (the issue-compatible default) or `streamable_http` (recommended for new servers). |
+| `protocol_mode` | `auto` (default): Streamable HTTP tries modern discovery, with legacy handshake fallback. `legacy`: skip discovery and initialize directly. SSE always uses the legacy handshake. |
 | `auth_mode` | `bearer`, `header_delegation`, or `m2m_jwt`. |
 | `header_mappings` | Map a supported identity source to the HTTP header the proxy expects. |
 | `token_env` | Name of the environment variable holding the bearer/M2M credential. The secret is never placed in the JSON. |
+| `client_credentials` | Automatic service-token acquisition for `m2m_jwt`; mutually exclusive with `token_env`. See below. |
+| `user_authorization` | Experimental: opt into per-user gateway access and durable status; contains the gateway's browser-facing `reauthorize_url`. |
 | `require_confirmation` | Fallback when a tool's annotations do not give clear confirmation guidance; default `true`. |
 | `enabled` | Disable one entry without deleting it; default `true`. |
 | `connect_timeout_seconds` / `read_timeout_seconds` | Per-operation HTTP bounds; defaults 10/300 seconds. |
@@ -54,13 +63,18 @@ Supported header sources are `user_id`, `subject`, `issuer`, `email`,
 present when the caller supplied an ephemeral token in the current process. A
 Temporal turn reconstructs identity from the Seizu user record and deliberately
 does not persist the browser's bearer token, so detached interactive turns and
-headless runs should use `m2m_jwt` plus `user_id` (or trusted identity-header
-delegation) instead.
+headless runs should use `m2m_jwt` plus the durable OIDC `(issuer, subject)`
+identity pair (or trusted identity-header delegation) instead.
 
-`m2m_jwt` adds `Authorization: Bearer <token_env>` and defaults the target
-identity to `X-Target-User-ID` when no mapping uses that header. `bearer` sends
-the configured token in `Authorization`. `header_delegation` sends only the
-mapped identity values.
+`m2m_jwt` adds `Authorization: Bearer <service-token>` and defaults the target
+identity to `X-Target-User-ID: <subject>` and
+`X-Target-User-Issuer: <issuer>` unless those header names are explicitly
+mapped. A mapping may instead use an identity-provider claim such as `email`,
+for example `{"email":"X-Target-User-ID"}`. Every configured target identity
+header must have a nonempty value for the user or Seizu rejects the operation
+before contacting the gateway. `bearer` sends the configured token in
+`Authorization`.
+`header_delegation` sends only the mapped identity values.
 
 Every discovery and tool call creates a fresh client transport and fresh header
 dictionary for that user. A connection carrying one user's headers is never
@@ -106,10 +120,150 @@ crashing the turn. The chat response includes the protected-resource metadata
 URL when the proxy supplied one. Complete consent with the proxy, then retry the
 request.
 
-For an unattended M2M call, a 401 becomes a distinct expired-token condition
+For a legacy unattended M2M call, a 401 becomes a distinct expired-token condition
 before the chat boundary normalizes it. Rotate the credential in `token_env` and
-restart the worker. Seizu never falls back from a rejected M2M token to another
+restart the worker, or use automatic client credentials. Proxies opting into
+`user_authorization` use the gateway contract below. Seizu never falls back from a rejected M2M token to another
 user or a broader process identity.
+
+## Shared API tokens
+
+Use `bearer` with `token_env` for MCP servers that accept a static API token or
+PAT. Every caller acts as that token's upstream account, with access bounded by
+the token's permissions and Seizu's tool controls. This is shared access; it
+does not provide per-user upstream authority.
+
+```text
+MCP_EXTERNAL_PROXIES=[{"name":"monitoring","url":"https://mcp.example/mcp","transport":"streamable_http","auth_mode":"bearer","token_env":"MCP_EXTERNAL_PROXY_TOKEN"}]
+```
+
+Operators manage static-token replacement and revocation. Restart web and worker
+processes after changing their environment. Existing M2M `token_env` configurations
+remain supported; automatic client credentials are recommended for short-lived
+service tokens.
+
+## Automatically renewed M2M tokens
+
+```text
+MCP_EXTERNAL_PROXIES=[{"name":"corp","url":"https://gateway.example/mcp","transport":"streamable_http","auth_mode":"m2m_jwt","client_credentials":{"token_url":"https://idp.example/oauth/token","client_id":"seizu","client_secret_env":"MCP_EXTERNAL_CLIENT_SECRET","scope":"mcp","audience":"mcp-gateway"},"user_authorization":{"reauthorize_url":"https://gateway.example/accounts"}}]
+MCP_EXTERNAL_CLIENT_SECRET=<service-client-secret>
+```
+
+The web process and every Temporal worker need the same proxy configuration and
+named secret. Compose forwards `MCP_EXTERNAL_CLIENT_SECRET`; inject any custom
+secret names into both services too.
+
+`client_credentials` requires `token_url`, `client_id`, and `client_secret_env`.
+`scope` and `audience` are optional; omit them if the issuer does not accept them.
+`token_endpoint_auth_method` defaults to `client_secret_basic`; it also supports
+`client_secret_post`. The issuer must return a nonempty Bearer access token and
+positive `expires_in`. Use HTTPS unless a trusted mesh protects the connection.
+
+Seizu uses the [OAuth client-credentials grant](https://www.rfc-editor.org/rfc/rfc6749#section-4.4),
+caches service tokens only in process memory, and acquires a replacement before
+expiry. Concurrent requests within a process share acquisition. Administrators
+rotate the client secret according to issuer policy; bearer expiry needs no
+manual action. Browser OIDC settings and upstream user grants are independent.
+
+Token requests use `connect_timeout_seconds`, do not follow redirects, and do not
+retry automatically. A rejected cached token is discarded for the next operation.
+Failed tool calls are not replayed for credential renewal; retry the request
+after resolving its connection failure.
+
+## Per-user gateway contract and recovery
+
+This contract is experimental. A successful connection check or tool call does
+not establish that the gateway selected the correct user's upstream grant.
+Complete the [per-user validation checklist](https://github.com/mappedsky/seizu/issues/312)
+before relying on delegated access. Configuration and recovery behavior may change.
+
+Setting `user_authorization` opts into this contract for `m2m_jwt` or
+`header_delegation`. The gateway must authenticate Seizu and authorize its ability
+to delegate before trusting `X-Target-User-ID` (or the configured subject header).
+The default target headers carry the run owner's identity-provider `(issuer,
+subject)` pair, never Seizu's internal user ID. Configure both values as a pair
+when the gateway uses different header names.
+
+The gateway maps that owner to its account, selects and renews the user's upstream
+grant, and enforces the grant's permissions. Missing users or grants must never
+fall back to a shared or broader credential. The account-management page must
+authenticate the browser user independently; a supplied user ID cannot authorize
+account linking. Reject missing authority before dispatching any upstream action.
+
+Seizu supports standard MCP [URL-mode elicitation](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation)
+for out-of-band user interaction. The target-user header remains a deployment
+contract, separate from MCP's service authentication.
+
+| Gateway response | Status | Recovery |
+| --- | --- | --- |
+| URL `elicitation/create`, `-32042` (2025-11-25), or URL requests in `InputRequiredResult` (2026-07-28) | User interaction required | Owner reviews the gateway's request and opens an approved recovery URL. |
+| `401` | Service authentication failed | Administrator checks the service credential or mesh policy. |
+| `403`, including OAuth `insufficient_scope` | Access denied | Check service scopes, upstream permissions, and gateway policy. |
+| Network/protocol failure | Unavailable | Check gateway availability and retry. |
+
+Open **Chat Connections** in the navigation to see the latest observation and
+last-check time for each per-user gateway. URL elicitation is advertised only for
+opted-in proxies, and form elicitation is not supported. Detached runs cancel
+legacy elicitation requests without accepting them; newer input-required results
+are recorded without continuing the operation. The custom `X-Seizu-Auth-Error`
+header is not used.
+
+Streamable HTTP tries `server/discover` for the 2026-07-28 stateless protocol
+first. Modern requests carry their protocol version and client capabilities
+without an initialization handshake. Legacy-only servers fall back to
+`initialize`; authentication failures, rate limits, server failures, and timeouts
+stop negotiation without retrying a tool. Set `protocol_mode: legacy` for a
+server that requires initialization before any other request. SSE always uses
+the legacy handshake. Legacy Streamable HTTP servers may be sessionful or
+stateless; a session ID is not required.
+
+The page displays the gateway's explanation and destination host. Opening a link
+is optional; Seizu does not automatically open URLs, accept consent, or resume a
+run on completion notifications. Elicitation may request actions other than OAuth:
+review the request before proceeding. URLs must have the same scheme, host, and
+effective port as `user_authorization.reauthorize_url`, with no embedded
+credentials, fragment, whitespace, or backslashes. Up to eight links are stored;
+URLs are limited to 4096 characters, IDs to 256, and explanations to 1000.
+Links are hidden after one hour; retry discovery or the original request for a
+fresh link. A gateway may expire a link sooner or invalidate it when the MCP
+request is cancelled. The configured **Account page** remains available for
+account management independently of an MCP session. Use HTTPS outside local development. Gateways must not include tokens
+or secrets in URLs or explanations, and must expire recovery nonces themselves.
+
+After completing the interaction, **Check connection** performs
+fresh tool discovery; it does not call a tool or resume an earlier run. Retry the
+interactive request or let the next scheduled run execute. Connection failures
+also include a connection-page link in chat tool diagnostics.
+
+Status is persisted per user and proxy configuration, including failures during
+discovery that make a skill unavailable. It survives worker restarts. A successful
+fresh request clears a failure; cached discovery does not. Changed configuration
+starts with an unknown status. Records contain bounded recovery links and
+explanations but no tokens or raw upstream responses. They do not prove access to
+every tool; a tool-specific interaction may require retrying the original request.
+
+The gateway owns upstream OAuth callbacks, encryption, refresh, revocation, and
+account linking. Seizu stores no upstream grants and does not implement the
+gateway's consent flow. Verify this contract against your gateway before enabling
+it; a shared PAT adapter does not meet it.
+
+## Kubernetes with service-mesh authentication
+
+When the mesh already authenticates Seizu to the gateway, use:
+
+```text
+MCP_EXTERNAL_PROXIES=[{"name":"corp","url":"http://mcp-gateway.platform.svc.cluster.local/mcp","transport":"streamable_http","auth_mode":"header_delegation","user_authorization":{"reauthorize_url":"https://gateway.example/accounts"}}]
+```
+
+Seizu sends the target-user subject and issuer headers without `Authorization`. Configure strict
+mTLS at the gateway and allow only the Seizu web and Temporal-worker workload
+identities to assert target users. For Istio, use `PeerAuthentication` with
+`STRICT` and an `AuthorizationPolicy` allowing the specific service-account
+principals; see [Istio security](https://istio.io/latest/docs/concepts/security/).
+Network reachability or encryption alone does not authorize delegation. Reject
+direct unauthenticated traffic and prevent external clients from supplying
+trusted target-user headers. The mesh manages certificate issuance and rotation;
+Seizu needs no additional bearer token.
 
 ## Lightweight local development
 
@@ -207,11 +361,11 @@ hour and a refresh token valid for thirty days, so the script stores **both**
 round trip is needed roughly monthly, not hourly. Pass `--force` to authorize
 from scratch.
 
-A Temporal turn holds no browser token and cannot renew one itself
-(AGT-010), so a deployment that needs per-user GitHub authority should give
-the proxy GitHub as its OAuth provider, forward the user's token instead of
-injecting a PAT, and address users with `m2m_jwt` plus `X-Target-User-ID` — the
-shape of the enterprise gateway example below.
+This local profile tests bearer authentication, not the per-user gateway
+contract. A Temporal deployment needing per-user GitHub authority needs a
+gateway that explicitly supports service authentication plus target-user grant
+selection, as in the enterprise gateway example below. Changing an OAuth
+provider alone does not enable that contract.
 
 The make target enables local Authentik and persists
 `MCP_EXTERNAL_ENABLED=true` in `.env`; `make up` then selects both Compose
@@ -254,25 +408,25 @@ header before proxying to MCP. The Seizu side is vendor-neutral:
 
 ```text
 MCP_EXTERNAL_ENABLED=true
-MCP_EXTERNAL_PROXIES=[{"name":"corp","url":"https://gateway.example/mcp","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"user_id":"X-Target-User-ID","issuer":"X-Target-Issuer"},"require_confirmation":true}]
+MCP_EXTERNAL_PROXIES=[{"name":"corp","url":"https://gateway.example/mcp","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"subject":"X-Target-User-ID","issuer":"X-Target-User-Issuer"},"require_confirmation":true}]
 MCP_EXTERNAL_PROXY_TOKEN=<gateway-audience-service-jwt>
 ```
 
 Configure the gateway to:
 
 1. Validate the bearer token's signature, issuer, audience, expiry, and required scope.
-2. Trust `X-Target-User-ID` only after that validation and remove any client-supplied copy before policy evaluation.
-3. Bind authorization and downstream credentials to the pair of service identity and target user.
+2. Trust `X-Target-User-ID` and `X-Target-User-Issuer` only after that validation and remove any client-supplied copies before policy evaluation.
+3. Bind authorization and downstream credentials to the service identity and target `(issuer, subject)` pair.
 4. Return an RFC 9728 `WWW-Authenticate` challenge on missing, expired, or insufficient credentials.
 5. Preserve streaming responses and apply timeouts longer than Seizu's configured MCP read timeout.
 
-The gateway must not treat `X-Target-User-ID` alone as authentication. That
+The gateway must not treat the target identity headers alone as authentication. That
 would allow any caller able to reach it to select another tenant and recreate
 the confused-deputy problem this integration is designed to avoid.
 
 ## Discovery cost
 
-Listing a proxy's tools opens a transport, runs an MCP `initialize` and reads a
+Listing a proxy's tools opens a transport, negotiates MCP and reads a
 paginated `tools/list`. One chat turn needs that answer several times — the
 capability listing in the system prompt, the planner's own, and each skill
 render that resolves its declared dependencies — so Seizu discovers each proxy
