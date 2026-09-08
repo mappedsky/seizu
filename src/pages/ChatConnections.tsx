@@ -39,6 +39,11 @@ export default function ChatConnections() {
       <Typography variant="h1" sx={{ mb: 2 }}>
         Chat connections
       </Typography>
+      <Alert severity="warning" sx={{ mb: 2 }}>
+        Experimental: per-user gateway delegation and recovery. Administrators
+        must validate the gateway’s identity mapping and per-user access before
+        relying on it. A connected status does not verify user isolation.
+      </Alert>
       <Typography color="text.secondary" sx={{ mb: 3 }}>
         Your accounts connected through external gateways. Status reflects the
         latest check or request; individual tools may require additional

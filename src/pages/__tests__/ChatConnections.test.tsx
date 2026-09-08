@@ -67,6 +67,11 @@ describe('Chat connections', () => {
   it('shows the gateway link and checks recovery with authenticated CSRF protection', async () => {
     renderPage();
     expect(
+      screen.getByText(
+        /Experimental: per-user gateway delegation and recovery/,
+      ),
+    ).toBeInTheDocument();
+    expect(
       await screen.findByRole('link', { name: 'Reauthorize' }),
     ).toHaveAttribute('href', 'https://gateway.test/accounts');
     fetchMock.mockResolvedValueOnce({

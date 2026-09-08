@@ -285,6 +285,8 @@ into `user_authorization`, with durable owner-scoped status at
 bearer. Standard URL elicitation exposes bounded, owner-only recovery links;
 detached runs never accept consent or automatically replay the operation.
 The gateway owns upstream user grants (AGT-048, STO-013).
+Per-user delegation and recovery are experimental; validation is tracked in #312
+(AGT-048). Shared-token external access is not covered by that designation.
 Streamable HTTP negotiates modern-first with legacy fallback; `protocol_mode:
 legacy` skips discovery. SSE always initializes (AGT-049).
 

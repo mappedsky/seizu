@@ -2791,6 +2791,14 @@ choice instead of a collection of code-site constants.
 **Applies to:** `external_mcp`, `external_mcp_tokens`, `chat_connections`,
 `ExternalMCPProxy.client_credentials` / `user_authorization`
 
+Per-user delegation and recovery are experimental pending the end-to-end
+validation in [#312](https://github.com/mappedsky/seizu/issues/312). ContextForge
+v1.0.9 transport tests passed, but bearer-plus-target-header requests retained
+the bearer owner's authority; trusted-header mode needed email identity mapping
+and exposed a server-scoped CSRF incompatibility. Transport success therefore
+does not establish per-user grant isolation. Shared-token external access is
+outside this experimental designation.
+
 Per-user external authority is an explicit gateway contract. Seizu supplies a
 stored run-owner identity over either M2M bearer authentication or trusted mesh
 authentication. The gateway maps that owner to its own upstream grant and must

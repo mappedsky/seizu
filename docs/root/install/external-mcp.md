@@ -1,5 +1,11 @@
 # External MCP proxies
 
+Per-user gateway delegation and recovery (`user_authorization`) are
+**experimental**. Use only in controlled deployments after validating the
+gateway's identity mapping and per-user authorization. See the
+[validation checklist](https://github.com/mappedsky/seizu/issues/312).
+This designation does not apply to ordinary shared-token external MCP access.
+
 Seizu's chat agent can discover and call tools on external MCP servers through
 an identity-aware proxy. The proxy remains responsible for authenticating to
 the external service, storing or rotating its credentials, and enforcing its
@@ -47,7 +53,7 @@ Each object accepts:
 | `header_mappings` | Map a supported identity source to the HTTP header the proxy expects. |
 | `token_env` | Name of the environment variable holding the bearer/M2M credential. The secret is never placed in the JSON. |
 | `client_credentials` | Automatic service-token acquisition for `m2m_jwt`; mutually exclusive with `token_env`. See below. |
-| `user_authorization` | Opt into per-user gateway access and durable status; contains the gateway's browser-facing `reauthorize_url`. |
+| `user_authorization` | Experimental: opt into per-user gateway access and durable status; contains the gateway's browser-facing `reauthorize_url`. |
 | `require_confirmation` | Fallback when a tool's annotations do not give clear confirmation guidance; default `true`. |
 | `enabled` | Disable one entry without deleting it; default `true`. |
 | `connect_timeout_seconds` / `read_timeout_seconds` | Per-operation HTTP bounds; defaults 10/300 seconds. |
@@ -160,6 +166,11 @@ Failed tool calls are not replayed for credential renewal; retry the request
 after resolving its connection failure.
 
 ## Per-user gateway contract and recovery
+
+This contract is experimental. A successful connection check or tool call does
+not establish that the gateway selected the correct user's upstream grant.
+Complete the [per-user validation checklist](https://github.com/mappedsky/seizu/issues/312)
+before relying on delegated access. Configuration and recovery behavior may change.
 
 Setting `user_authorization` opts into this contract for `m2m_jwt` or
 `header_delegation`. The gateway must authenticate Seizu and authorize its ability
