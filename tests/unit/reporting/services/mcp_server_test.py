@@ -112,9 +112,12 @@ async def test_form_confirmation_accepts_and_claims_once_over_http(confirmation_
         assert form["method"] == "elicitation/create"
         assert form["params"]["mode"] == "form"
         assert '"report_id": "r1"' in form["params"]["message"]
-        assert form["params"]["requestedSchema"]["properties"]["confirm"]["default"] is False
+        assert form["params"]["requestedSchema"]["properties"] == {}
+        # The three actions have different durability, so the form says which is which.
+        assert "Decline refuses it for the rest of the confirmation window" in form["params"]["message"]
+        assert "Cancel leaves it undecided" in form["params"]["message"]
         execute.assert_not_awaited()
-        continuation = _confirmation_response(requested, {"action": "accept", "content": {"confirm": True}})
+        continuation = _confirmation_response(requested, {"action": "accept"})
         result = await _call_confirmation_tool(client, continuation=continuation)
         assert result["isError"] is False
         assert json.loads(result["content"][0]["text"])["pinned"] is True
@@ -130,11 +133,7 @@ async def test_form_confirmation_accepts_and_claims_once_over_http(confirmation_
     "response,status",
     [
         ({"action": "decline"}, "denied"),
-        ({"action": "accept", "content": {"confirm": False}}, "denied"),
         ({"action": "cancel"}, "pending"),
-        ({"action": "accept"}, "pending"),
-        ({"action": "accept", "content": {"confirm": "true"}}, "pending"),
-        ({"action": "accept", "content": {"confirm": 1}}, "pending"),
     ],
 )
 async def test_form_confirmation_does_not_execute_without_approval(confirmation_store, response, status):
@@ -147,12 +146,43 @@ async def test_form_confirmation_does_not_execute_without_approval(confirmation_
     execute.assert_not_awaited()
 
 
+async def test_form_confirmation_distinguishes_a_stale_record_from_a_mismatch(confirmation_store):
+    """An expired record is invisible to the resolver, so its id is stale, not wrong."""
+    records, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        requested = await _call_confirmation_tool(client)
+        stale = requested["requestState"]
+        records[stale] = records[stale].model_copy(update={"expires_at": "2000-01-01T00:00:00+00:00"})
+        result = await _call_confirmation_tool(
+            client, continuation=_confirmation_response(requested, {"action": "accept"})
+        )
+    assert result["isError"] is True
+    assert "no longer available" in result["content"][0]["text"]
+    execute.assert_not_awaited()
+
+
+async def test_form_confirmation_rejects_a_response_for_another_confirmation(confirmation_store):
+    _, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        await _call_confirmation_tool(client)
+        result = await _call_confirmation_tool(
+            client,
+            continuation={
+                "requestState": "not-a-confirmation",
+                "inputResponses": {"not-a-confirmation": {"action": "accept"}},
+            },
+        )
+    assert result["isError"] is True
+    assert "does not match this action" in result["content"][0]["text"]
+    execute.assert_not_awaited()
+
+
 @pytest.mark.parametrize("failure", ["expired_decision", "failed_claim", "missing_response"])
 async def test_form_confirmation_requires_a_live_claim(confirmation_store, failure):
     _, _, execute = confirmation_store
     async with _mcp_http_client() as client:
         requested = await _call_confirmation_tool(client)
-        continuation = _confirmation_response(requested, {"action": "accept", "content": {"confirm": True}})
+        continuation = _confirmation_response(requested, {"action": "accept"})
         with contextlib.ExitStack() as stack:
             if failure == "expired_decision":
                 stack.enter_context(
@@ -195,7 +225,7 @@ async def test_form_confirmation_rejects_changed_scope(confirmation_store, chang
     async with _mcp_http_client() as client:
         requested = await _call_confirmation_tool(client)
         record = records[requested["requestState"]]
-        continuation = _confirmation_response(requested, {"action": "accept", "content": {"confirm": True}})
+        continuation = _confirmation_response(requested, {"action": "accept"})
         arguments = None
         if change == "arguments":
             arguments = {"report_id": "r1", "pinned": False}

@@ -2881,10 +2881,11 @@ MCP 2026-07-28 clients advertising form elicitation receive an
 `InputRequiredResult` for pending Seizu action approvals. The confirmation ID
 is the continuation state and input-response key. The runtime resolves the
 confirmation after current permission and argument validation, using the
-existing caller/session/tool/target/argument-hash scope. Only a matching
-continuation with an explicit boolean approval can approve the record. Decline
-or false denies it; cancel leaves it pending. Execution consumes the ordinary
-atomic grant. Other clients retain the browser URL flow.
+existing caller/session/tool/target/argument-hash scope. The form carries no
+fields: the elicitation action is the decision, so a matching continuation
+that accepts approves the record, decline denies it, and cancel leaves it
+pending. Execution consumes the ordinary atomic grant. Other clients retain
+the browser URL flow.
 
 **Why:** these approvals need a decision, not credentials, so a client form
 removes the browser round trip. The modern input-required flow works with our
@@ -2892,9 +2893,13 @@ stateless HTTP transport; legacy server-to-client callbacks require a
 back-channel that this deployment does not retain. Reusing confirmation records
 preserves ownership, expiry, decision attribution, and the execution claim;
 trusting a bare accept response or setting `confirmation_pre_approved` would
-discard those checks. The SDK's capability checker tests elicitation presence
-but does not distinguish form from URL support, so the transport checks the
-per-request mode declaration explicitly.
+discard those checks. A required `confirm` boolean defaulting to false was
+tried and removed: it restates the accept/decline the protocol already
+carries, and a client that submits the form without toggling it silently
+denies the action and then holds the denial for the confirmation window. The
+SDK's capability checker tests elicitation presence but does not distinguish
+form from URL support, so the transport checks the per-request mode
+declaration explicitly.
 
 **Don't:** turn a form response into a permission grant or bypass flag, or
 replace upstream account authorization URL elicitation (AGT-048) with a form.

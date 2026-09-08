@@ -105,7 +105,18 @@ async def _handle_call_tool(
         # The runtime resolved this record using the current caller, session,
         # tool, target and argument hash, after validating permissions (AGT-050).
         if params.request_state != confirmation.confirmation_id:
-            response_error = "Confirmation does not match this action. Request confirmation again."
+            # An expired record is invisible to the resolver above, which then
+            # returns a fresh one, so a response naming the expired record is
+            # stale rather than addressed to the wrong action.
+            prior = (
+                await report_store.get_action_confirmation(params.request_state, confirmation.user_id)
+                if params.request_state is not None
+                else None
+            )
+            if prior is not None and (prior.status == "expired" or action_confirmations.is_expired(prior)):
+                response_error = "Confirmation is no longer available. Request confirmation again."
+            else:
+                response_error = "Confirmation does not match this action. Request confirmation again."
             return False
         response = (params.input_responses or {}).get(confirmation.confirmation_id)
         if not isinstance(response, ElicitResult):
@@ -114,12 +125,9 @@ async def _handle_call_tool(
         if response.action == "cancel":
             response_error = "Action confirmation was cancelled. No action was executed."
             return False
-        if response.action == "accept" and (
-            response.content is None or type(response.content.get("confirm")) is not bool
-        ):
-            response_error = "Confirmation requires an explicit boolean response."
-            return False
-        approved = response.action == "accept" and response.content is not None and response.content["confirm"] is True
+        # The elicitation action is the decision: the form carries no fields, so
+        # accept approves and decline denies (AGT-050).
+        approved = response.action == "accept"
         decided = await action_confirmations.decide_confirmation(
             confirmation_id=confirmation.confirmation_id,
             user_id=confirmation.user_id,
@@ -160,15 +168,12 @@ async def _handle_call_tool(
                                 f"Approve {confirmation['tool_name']}?\n"
                                 f"Action: {confirmation['action']}\n"
                                 f"Resource: {confirmation['resource_type']}/{confirmation['resource_id']}\n"
-                                f"Arguments:\n{json.dumps(confirmation['arguments'], indent=2)}"
+                                f"Arguments:\n{json.dumps(confirmation['arguments'], indent=2)}\n\n"
+                                "Accept approves this action. Decline refuses it for the rest of the "
+                                "confirmation window, so the same call cannot be retried until it "
+                                "expires. Cancel leaves it undecided and can be asked again."
                             ),
-                            requested_schema={
-                                "type": "object",
-                                "properties": {
-                                    "confirm": {"type": "boolean", "title": "Approve this action", "default": False}
-                                },
-                                "required": ["confirm"],
-                            },
+                            requested_schema={"type": "object", "properties": {}},
                         )
                     )
                 },
