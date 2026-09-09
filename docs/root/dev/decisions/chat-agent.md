@@ -2958,3 +2958,21 @@ rather than degrading it.
 
 **Don't:** let a `url`-mode response decide a record, or treat a missing client
 capability as licence to downgrade the mode.
+
+## AGT-052 — Modern URL elicitation has a Codex compatibility gap
+
+**Applies to:** `mcp_server._elicitation_params`
+
+Keep the SDK's protocol-version serialization for URL elicitation. Codex
+0.153.4's modern URL path is not validated as compatible with Seizu.
+
+**Why:** a native Codex call failed with `Unexpected response type` before
+displaying the URL. The captured Seizu response contained a URL elicitation
+inside `InputRequiredResult`; Codex's generated schema requires `elicitationId`,
+while the installed Python SDK marks it as removed at MCP 2026-07-28 and strips
+it on serialization. Adding the field to the request object was tested and did
+not put it on the wire. The report remained present and its confirmation stayed
+pending. This is distinct from the working form flow and from capability-based
+fallback: Codex advertises URL support, so Seizu offers the configured URL mode.
+
+**Don't:** downgrade to form elicitation to work around a URL-client failure.
