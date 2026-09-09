@@ -23,6 +23,13 @@ from tests.unit.reporting.services import mcp_dispatch
 
 
 @pytest.fixture
+def form_mode():
+    """The existing suite covers the in-client form flow."""
+    with patch.object(mcp_module.settings, "MCP_CONFIRMATION_ELICITATION_MODE", "form"):
+        yield
+
+
+@pytest.fixture
 def confirmation_store():
     """Exercise the confirmation service with owner-scoped, atomic store operations."""
     from reporting.services import action_confirmations
@@ -103,7 +110,7 @@ def _confirmation_response(result, response):
     return {"requestState": result["requestState"], "inputResponses": {result["requestState"]: response}}
 
 
-async def test_form_confirmation_accepts_and_claims_once_over_http(confirmation_store):
+async def test_form_confirmation_accepts_and_claims_once_over_http(form_mode, confirmation_store):
     records, decisions, execute = confirmation_store
     async with _mcp_http_client() as client:
         requested = await _call_confirmation_tool(client)
@@ -136,7 +143,7 @@ async def test_form_confirmation_accepts_and_claims_once_over_http(confirmation_
         ({"action": "cancel"}, "pending"),
     ],
 )
-async def test_form_confirmation_does_not_execute_without_approval(confirmation_store, response, status):
+async def test_form_confirmation_does_not_execute_without_approval(form_mode, confirmation_store, response, status):
     records, _, execute = confirmation_store
     async with _mcp_http_client() as client:
         requested = await _call_confirmation_tool(client)
@@ -146,7 +153,7 @@ async def test_form_confirmation_does_not_execute_without_approval(confirmation_
     execute.assert_not_awaited()
 
 
-async def test_form_confirmation_distinguishes_a_stale_record_from_a_mismatch(confirmation_store):
+async def test_form_confirmation_distinguishes_a_stale_record_from_a_mismatch(form_mode, confirmation_store):
     """An expired record is invisible to the resolver, so its id is stale, not wrong."""
     records, _, execute = confirmation_store
     async with _mcp_http_client() as client:
@@ -161,7 +168,7 @@ async def test_form_confirmation_distinguishes_a_stale_record_from_a_mismatch(co
     execute.assert_not_awaited()
 
 
-async def test_form_confirmation_rejects_a_response_for_another_confirmation(confirmation_store):
+async def test_form_confirmation_rejects_a_response_for_another_confirmation(form_mode, confirmation_store):
     _, _, execute = confirmation_store
     async with _mcp_http_client() as client:
         await _call_confirmation_tool(client)
@@ -178,7 +185,7 @@ async def test_form_confirmation_rejects_a_response_for_another_confirmation(con
 
 
 @pytest.mark.parametrize("failure", ["expired_decision", "failed_claim", "missing_response"])
-async def test_form_confirmation_requires_a_live_claim(confirmation_store, failure):
+async def test_form_confirmation_requires_a_live_claim(form_mode, confirmation_store, failure):
     _, _, execute = confirmation_store
     async with _mcp_http_client() as client:
         requested = await _call_confirmation_tool(client)
@@ -199,7 +206,7 @@ async def test_form_confirmation_requires_a_live_claim(confirmation_store, failu
     execute.assert_not_awaited()
 
 
-async def test_legacy_confirmation_retains_browser_url(confirmation_store):
+async def test_legacy_confirmation_retains_browser_url(form_mode, confirmation_store):
     _, decisions, execute = confirmation_store
     async with _mcp_http_client() as client:
         response = await client.post(
@@ -220,7 +227,7 @@ async def test_legacy_confirmation_retains_browser_url(confirmation_store):
 
 
 @pytest.mark.parametrize("change", ["arguments", "state", "owner", "session", "expiry", "permissions"])
-async def test_form_confirmation_rejects_changed_scope(confirmation_store, change):
+async def test_form_confirmation_rejects_changed_scope(form_mode, confirmation_store, change):
     records, decisions, execute = confirmation_store
     async with _mcp_http_client() as client:
         requested = await _call_confirmation_tool(client)
@@ -247,8 +254,98 @@ async def test_form_confirmation_rejects_changed_scope(confirmation_store, chang
     decisions.assert_not_awaited()
 
 
+# URL mode needs the capability named: a bare {} is form-only.
+_URL_CAPABLE = {"elicitation": {"url": {}}}
+_BOTH_CAPABLE = {"elicitation": {"form": {}, "url": {}}}
+
+
+@pytest.fixture
+def url_mode():
+    with patch.object(mcp_module.settings, "MCP_CONFIRMATION_ELICITATION_MODE", "url"):
+        yield
+
+
+async def test_url_confirmation_points_at_the_confirmation_page(url_mode, confirmation_store):
+    _, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        requested = await _call_confirmation_tool(client, capability=_URL_CAPABLE)
+        form = requested["inputRequests"][requested["requestState"]]
+    assert form["params"]["mode"] == "url"
+    assert "/app/confirmations/" in form["params"]["url"]
+    assert requested["requestState"] == form["params"]["url"].rsplit("/", 1)[-1]
+    execute.assert_not_awaited()
+
+
+async def test_url_confirmation_ignores_an_approval_the_client_invented(url_mode, confirmation_store):
+    """The client cannot decide a URL confirmation: only Seizu's own UI can."""
+    records, decisions, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        requested = await _call_confirmation_tool(client, capability=_URL_CAPABLE)
+        result = await _call_confirmation_tool(
+            client, capability=_URL_CAPABLE, continuation=_confirmation_response(requested, {"action": "accept"})
+        )
+    assert json.loads(result["content"][0]["text"])["status"] == "pending"
+    assert records[requested["requestState"]].status == "pending"
+    decisions.assert_not_awaited()
+    execute.assert_not_awaited()
+
+
+async def test_url_confirmation_executes_once_approved_in_seizu(url_mode, confirmation_store):
+    records, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        requested = await _call_confirmation_tool(client, capability=_URL_CAPABLE)
+        approved = records[requested["requestState"]].model_copy(update={"status": "approved"})
+        records[requested["requestState"]] = approved
+        result = await _call_confirmation_tool(
+            client, capability=_URL_CAPABLE, continuation=_confirmation_response(requested, {"action": "accept"})
+        )
+    assert result["isError"] is False
+    assert json.loads(result["content"][0]["text"])["pinned"] is True
+    execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "permissions,expected_mode",
+    [
+        (frozenset({"reports:read", "reports:write", "chat:bypass_permissions"}), "form"),
+        (frozenset({"reports:read", "reports:write"}), "url"),
+    ],
+)
+async def test_permission_mode_follows_the_bypass_permission(confirmation_store, permissions, expected_mode):
+    _, _, execute = confirmation_store
+    with (
+        patch.object(mcp_module.settings, "MCP_CONFIRMATION_ELICITATION_MODE", "permission"),
+        patch("reporting.authnz.permissions.ALL_PERMISSIONS", permissions),
+    ):
+        async with _mcp_http_client() as client:
+            requested = await _call_confirmation_tool(client, capability=_BOTH_CAPABLE)
+    assert requested["inputRequests"][requested["requestState"]]["params"]["mode"] == expected_mode
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("capability", [{"elicitation": {"form": {}}}, {"elicitation": {}}])
+async def test_configured_url_mode_is_never_downgraded_to_a_form(url_mode, confirmation_store, capability):
+    """An operator requiring the URL flow must not get a client-answerable dialog."""
+    _, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        result = await _call_confirmation_tool(client, capability=capability)
+    assert result.get("resultType") != "input_required"
+    assert json.loads(result["content"][0]["text"])["confirmation_required"] is True
+    execute.assert_not_awaited()
+
+
+async def test_elicitation_can_be_turned_off(confirmation_store):
+    _, _, execute = confirmation_store
+    with patch.object(mcp_module.settings, "MCP_CONFIRMATION_ELICITATION_MODE", "off"):
+        async with _mcp_http_client() as client:
+            result = await _call_confirmation_tool(client)
+    assert result.get("resultType") != "input_required"
+    assert "/app/confirmations/" in json.loads(result["content"][0]["text"])["confirmation_url"]
+    execute.assert_not_awaited()
+
+
 @pytest.mark.parametrize("elicitation,expected_form", [({}, True), ({"url": {}}, False), (None, False)])
-async def test_form_confirmation_capability_negotiation(confirmation_store, elicitation, expected_form):
+async def test_form_confirmation_capability_negotiation(form_mode, confirmation_store, elicitation, expected_form):
     _, _, execute = confirmation_store
     async with _mcp_http_client() as client:
         result = await _call_confirmation_tool(client, capability={"elicitation": elicitation})

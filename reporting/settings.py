@@ -1112,6 +1112,21 @@ MCP_TOOL_RESULT_MAX_BYTES = int_env("MCP_TOOL_RESULT_MAX_BYTES", 25_000_000)
 # Maximum lifetime for an approved or denied mutating-action confirmation.
 ACTION_CONFIRMATION_TTL_SECONDS = int_env("ACTION_CONFIRMATION_TTL_SECONDS", 1800)
 
+# How an MCP client is asked to approve a mutating action.
+#   url  - the client shows a link to Seizu's confirmation page and the person
+#          decides there, signed in as themselves. The client cannot approve on
+#          their behalf, so this is the default.
+#   form - the client renders an in-client dialog and reports the decision back.
+#          One round trip fewer, but the approval is only as trustworthy as the
+#          client, which may answer without asking anyone (AGT-051).
+#   permission - form for callers holding chat:bypass_permissions, url for the
+#          rest. A caller already trusted to skip confirmations is trusted to
+#          answer one in its own client.
+#   off  - never elicit; return the confirmation payload and its URL as content.
+# A client that cannot do the configured mode gets "off" behavior rather than
+# the other mode.
+MCP_CONFIRMATION_ELICITATION_MODE = str_env("MCP_CONFIRMATION_ELICITATION_MODE", "url")
+
 # How long a finished chat turn's event log stays replayable. This is the window
 # a client has to reconnect and replay a turn; it is not conversation history
 # (that lives in the checkpoint), so it can be short.

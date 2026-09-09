@@ -2925,3 +2925,36 @@ discovered all 105 tools with both `2025-06-18` (flag disabled) and `2026-07-28`
 
 **Don't:** disable keep-alive to make MCP stateless. Protocol session state
 and HTTP connection reuse are independent.
+
+## AGT-051 — Confirmation elicitation mode is an operator's choice, defaulting to URL
+
+**Applies to:** `mcp_server._elicitation_mode`, `_elicitation_params`,
+`settings.MCP_CONFIRMATION_ELICITATION_MODE`
+
+`MCP_CONFIRMATION_ELICITATION_MODE` selects how an MCP client collects approval
+for a mutating action: `url` (default) points the client at Seizu's own
+confirmation page, `form` (AGT-050) renders a dialog in the client, `permission`
+picks `form` for callers holding `chat:bypass_permissions` and `url` for the
+rest, and `off` returns the payload as content. In `url` mode the client's
+response never carries a decision — the responder re-reads the record rather
+than writing one, so a continuation that claims approval without one gets the
+pending confirmation back. A client that cannot do the configured mode receives
+content, never the other mode. Only a first attempt elicits; a continuation that
+arrives unapproved is answered with the payload.
+
+**Why:** the protocol has no way to show that a person saw a form. The client
+reports the decision, so a client that answers automatically approves every
+action its caller is otherwise permitted to take, which is exactly what the
+confirmation exists to prevent — and an operator running clients it does not
+control cannot detect the difference. Deciding in Seizu costs a round trip and
+removes the client from the trust path entirely, so it is the default; `form`
+stays available where the client is trusted, and `permission` reuses the
+judgement a deployment already made about who may skip confirmations. Falling
+back from `url` to `form` when a client lacks URL support would let any client
+opt itself into the weaker flow, so the fallback is content instead. A bare
+`elicitation: {}` counts as form support but not URL support: Claude Code 2.1.263
+advertises it and then rejects a URL request outright, which fails the call
+rather than degrading it.
+
+**Don't:** let a `url`-mode response decide a record, or treat a missing client
+capability as licence to downgrade the mode.

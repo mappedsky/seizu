@@ -22,6 +22,7 @@ from mcp.types import (
     CallToolResult,
     ElicitRequest,
     ElicitRequestFormParams,
+    ElicitRequestURLParams,
     ElicitResult,
     GetPromptRequestParams,
     GetPromptResult,
@@ -41,6 +42,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from reporting import settings
 from reporting.authnz import CurrentUser, validate_bearer_token
+from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.services import action_confirmations, mcp_runtime, report_store
 from reporting.services.action_confirmations import bearer_session_key
@@ -91,12 +93,10 @@ async def _handle_list_tools(ctx: ServerRequestContext[Any], params: PaginatedRe
 async def _handle_call_tool(
     ctx: ServerRequestContext[Any], params: CallToolRequestParams
 ) -> CallToolResult | InputRequiredResult:
-    capabilities = (params.meta or {}).get("io.modelcontextprotocol/clientCapabilities", {})
-    elicitation = capabilities.get("elicitation") if isinstance(capabilities, dict) else None
-    forms_supported = (
-        ctx.protocol_version == "2026-07-28"
-        and isinstance(elicitation, dict)
-        and (elicitation == {} or isinstance(elicitation.get("form"), dict))
+    mode = _elicitation_mode(
+        ctx.protocol_version,
+        (params.meta or {}).get("io.modelcontextprotocol/clientCapabilities"),
+        _mcp_permissions.get(),
     )
     response_error: str | None = None
 
@@ -125,6 +125,11 @@ async def _handle_call_tool(
         if response.action == "cancel":
             response_error = "Action confirmation was cancelled. No action was executed."
             return False
+        if mode == "url":
+            # The person decided in Seizu, signed in as themselves. This response
+            # only says the client stopped waiting, so re-read rather than write a
+            # decision the client would otherwise be able to invent (AGT-051).
+            return True
         # The elicitation action is the decision: the form carries no fields, so
         # accept approves and decline denies (AGT-050).
         approved = response.action == "accept"
@@ -139,9 +144,14 @@ async def _handle_call_tool(
         return True
 
     continuing = params.request_state is not None or params.input_responses is not None
-    if continuing and not forms_supported:
+    if continuing and mode is None:
         return CallToolResult(
-            content=[TextContent(type="text", text="Form confirmation requires MCP 2026-07-28 and form capability.")],
+            content=[
+                TextContent(
+                    type="text",
+                    text="Confirmation elicitation requires MCP 2026-07-28 and a supported elicitation mode.",
+                )
+            ],
             is_error=True,
         )
     result = await mcp_runtime.call_tool_for_user(
@@ -155,28 +165,16 @@ async def _handle_call_tool(
     )
     if response_error is not None:
         return CallToolResult(content=[TextContent(type="text", text=response_error)], is_error=True)
-    if forms_supported and result.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED:
+    # Only a first attempt elicits. A continuation that arrives here was answered
+    # without the action being approved, so returning the payload ends the
+    # exchange instead of asking the same client the same question forever.
+    if mode is not None and not continuing and result.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED:
         confirmation = json.loads(result.content[0].text)
         if confirmation["status"] == "pending":
             confirmation_id = confirmation["confirmation_id"]
             return InputRequiredResult(
                 request_state=confirmation_id,
-                input_requests={
-                    confirmation_id: ElicitRequest(
-                        params=ElicitRequestFormParams(
-                            message=(
-                                f"Approve {confirmation['tool_name']}?\n"
-                                f"Action: {confirmation['action']}\n"
-                                f"Resource: {confirmation['resource_type']}/{confirmation['resource_id']}\n"
-                                f"Arguments:\n{json.dumps(confirmation['arguments'], indent=2)}\n\n"
-                                "Accept approves this action. Decline refuses it for the rest of the "
-                                "confirmation window, so the same call cannot be retried until it "
-                                "expires. Cancel leaves it undecided and can be asked again."
-                            ),
-                            requested_schema={"type": "object", "properties": {}},
-                        )
-                    )
-                },
+                input_requests={confirmation_id: ElicitRequest(params=_elicitation_params(mode, confirmation))},
             )
     # The runtime validates arguments against the tool's advertised schema and
     # never raises, because MCP 2.0 no longer wraps a raised handler exception
@@ -185,6 +183,65 @@ async def _handle_call_tool(
     # report which failures were failures, so they stay distinguishable from a
     # tool that ran and returned an unwelcome answer.
     return CallToolResult(content=list(result.content), is_error=result.is_error)
+
+
+def _elicitation_mode(
+    protocol_version: str | None, capabilities: Any, permissions: frozenset[str] | None
+) -> str | None:
+    """The elicitation mode this call may use, or None to answer with content.
+
+    A client that cannot do the configured mode is never given the other one:
+    an operator who requires the URL flow must not be downgraded to a dialog the
+    client can answer by itself (AGT-051).
+    """
+    configured = settings.MCP_CONFIRMATION_ELICITATION_MODE
+    if configured == "permission":
+        # A caller trusted to skip confirmations entirely is trusted to answer
+        # one in its own client; everyone else decides in Seizu (AGT-051).
+        trusted = Permission.CHAT_BYPASS_PERMISSIONS in (permissions or frozenset())
+        configured = "form" if trusted else "url"
+    if configured not in {"form", "url"} or protocol_version != "2026-07-28":
+        return None
+    elicitation = capabilities.get("elicitation") if isinstance(capabilities, dict) else None
+    if not isinstance(elicitation, dict):
+        return None
+    if isinstance(elicitation.get(configured), dict):
+        return configured
+    # A bare {} names no mode. Clients that predate URL elicitation advertise it
+    # and then refuse a URL request outright, so it is read as form support only.
+    if configured == "form" and elicitation == {}:
+        return configured
+    return None
+
+
+def _confirmation_summary(confirmation: dict[str, Any]) -> str:
+    return (
+        f"Approve {confirmation['tool_name']}?\n"
+        f"Action: {confirmation['action']}\n"
+        f"Resource: {confirmation['resource_type']}/{confirmation['resource_id']}\n"
+        f"Arguments:\n{json.dumps(confirmation['arguments'], indent=2)}"
+    )
+
+
+def _elicitation_params(mode: str, confirmation: dict[str, Any]) -> ElicitRequestFormParams | ElicitRequestURLParams:
+    if mode == "url":
+        return ElicitRequestURLParams(
+            message=(
+                f"{_confirmation_summary(confirmation)}\n\n"
+                "Open this link and approve or deny the action while signed in to Seizu, "
+                "then let the call continue."
+            ),
+            url=confirmation["confirmation_url"],
+        )
+    return ElicitRequestFormParams(
+        message=(
+            f"{_confirmation_summary(confirmation)}\n\n"
+            "Accept approves this action. Decline refuses it for the rest of the "
+            "confirmation window, so the same call cannot be retried until it "
+            "expires. Cancel leaves it undecided and can be asked again."
+        ),
+        requested_schema={"type": "object", "properties": {}},
+    )
 
 
 async def _handle_list_prompts(
