@@ -8,6 +8,7 @@ The session manager lifespan is managed by the FastAPI app's lifespan context.
 """
 
 import contextvars
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -19,8 +20,13 @@ from mcp.server.streamable_http_manager import StreamableHTTPASGIApp, Streamable
 from mcp.types import (
     CallToolRequestParams,
     CallToolResult,
+    ElicitRequest,
+    ElicitRequestFormParams,
+    ElicitRequestURLParams,
+    ElicitResult,
     GetPromptRequestParams,
     GetPromptResult,
+    InputRequiredResult,
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
@@ -28,6 +34,7 @@ from mcp.types import (
     PaginatedRequestParams,
     ReadResourceRequestParams,
     ReadResourceResult,
+    TextContent,
 )
 from starlette.requests import Request
 from starlette.responses import JSONResponse as StarletteJSONResponse
@@ -35,7 +42,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from reporting import settings
 from reporting.authnz import CurrentUser, validate_bearer_token
-from reporting.services import mcp_runtime, report_store
+from reporting.authnz.permissions import Permission
+from reporting.schema.confirmations import ActionConfirmation
+from reporting.services import action_confirmations, mcp_runtime, report_store
 from reporting.services.action_confirmations import bearer_session_key
 
 reporting_neo4j = mcp_runtime.reporting_neo4j
@@ -66,8 +75,8 @@ _mcp_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVar("_
 # ---------------------------------------------------------------------------
 
 
-# The handlers ignore their ServerRequestContext: everything they need about the
-# caller (identity, permissions, confirmation session) is set by
+# Everything the handlers need about the caller (identity, permissions,
+# confirmation session) is set by
 # _MCPAuthMiddleware in the ContextVars above, which the SDK's per-request task
 # inherits. Keeping them off the context object means the same runtime call works
 # unchanged from the chat agent, which has no MCP request at all.
@@ -81,7 +90,70 @@ async def _handle_list_tools(ctx: ServerRequestContext[Any], params: PaginatedRe
     return ListToolsResult(tools=tools)
 
 
-async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequestParams) -> CallToolResult:
+async def _handle_call_tool(
+    ctx: ServerRequestContext[Any], params: CallToolRequestParams
+) -> CallToolResult | InputRequiredResult:
+    mode = _elicitation_mode(
+        ctx.protocol_version,
+        (params.meta or {}).get("io.modelcontextprotocol/clientCapabilities"),
+        _mcp_permissions.get(),
+    )
+    response_error: str | None = None
+
+    async def respond(confirmation: ActionConfirmation) -> bool:
+        nonlocal response_error
+        # The runtime resolved this record using the current caller, session,
+        # tool, target and argument hash, after validating permissions (AGT-050).
+        if params.request_state != confirmation.confirmation_id:
+            # An expired record is invisible to the resolver above, which then
+            # returns a fresh one, so a response naming the expired record is
+            # stale rather than addressed to the wrong action.
+            prior = (
+                await report_store.get_action_confirmation(params.request_state, confirmation.user_id)
+                if params.request_state is not None
+                else None
+            )
+            if prior is not None and (prior.status == "expired" or action_confirmations.is_expired(prior)):
+                response_error = "Confirmation is no longer available. Request confirmation again."
+            else:
+                response_error = "Confirmation does not match this action. Request confirmation again."
+            return False
+        response = (params.input_responses or {}).get(confirmation.confirmation_id)
+        if not isinstance(response, ElicitResult):
+            response_error = "A confirmation response is required."
+            return False
+        if response.action == "cancel":
+            response_error = "Action confirmation was cancelled. No action was executed."
+            return False
+        if mode == "url":
+            # The person decided in Seizu, signed in as themselves. This response
+            # only says the client stopped waiting, so re-read rather than write a
+            # decision the client would otherwise be able to invent (AGT-051).
+            return True
+        # The elicitation action is the decision: the form carries no fields, so
+        # accept approves and decline denies (AGT-050).
+        approved = response.action == "accept"
+        decided = await action_confirmations.decide_confirmation(
+            confirmation_id=confirmation.confirmation_id,
+            user_id=confirmation.user_id,
+            decision="approved" if approved else "denied",
+        )
+        if decided is None or decided.status not in {"approved", "denied", "executed"}:
+            response_error = "Confirmation is no longer available. Request confirmation again."
+            return False
+        return True
+
+    continuing = params.request_state is not None or params.input_responses is not None
+    if continuing and mode is None:
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text="Confirmation elicitation requires MCP 2026-07-28 and a supported elicitation mode.",
+                )
+            ],
+            is_error=True,
+        )
     result = await mcp_runtime.call_tool_for_user(
         _mcp_current_user.get(),
         params.name,
@@ -89,7 +161,21 @@ async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequ
         permissions=_mcp_permissions.get(),
         confirmation_source="mcp",
         confirmation_session_key=_mcp_session_key.get(),
+        confirmation_responder=respond if continuing else None,
     )
+    if response_error is not None:
+        return CallToolResult(content=[TextContent(type="text", text=response_error)], is_error=True)
+    # Only a first attempt elicits. A continuation that arrives here was answered
+    # without the action being approved, so returning the payload ends the
+    # exchange instead of asking the same client the same question forever.
+    if mode is not None and not continuing and result.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED:
+        confirmation = json.loads(result.content[0].text)
+        if confirmation["status"] == "pending":
+            confirmation_id = confirmation["confirmation_id"]
+            return InputRequiredResult(
+                request_state=confirmation_id,
+                input_requests={confirmation_id: ElicitRequest(params=_elicitation_params(mode, confirmation))},
+            )
     # The runtime validates arguments against the tool's advertised schema and
     # never raises, because MCP 2.0 no longer wraps a raised handler exception
     # into an is_error result the way v1 did — it would surface as a JSON-RPC
@@ -97,6 +183,65 @@ async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequ
     # report which failures were failures, so they stay distinguishable from a
     # tool that ran and returned an unwelcome answer.
     return CallToolResult(content=list(result.content), is_error=result.is_error)
+
+
+def _elicitation_mode(
+    protocol_version: str | None, capabilities: Any, permissions: frozenset[str] | None
+) -> str | None:
+    """The elicitation mode this call may use, or None to answer with content.
+
+    A client that cannot do the configured mode is never given the other one:
+    an operator who requires the URL flow must not be downgraded to a dialog the
+    client can answer by itself (AGT-051).
+    """
+    configured = settings.MCP_CONFIRMATION_ELICITATION_MODE
+    if configured == "permission":
+        # A caller trusted to skip confirmations entirely is trusted to answer
+        # one in its own client; everyone else decides in Seizu (AGT-051).
+        trusted = Permission.CHAT_BYPASS_PERMISSIONS in (permissions or frozenset())
+        configured = "form" if trusted else "url"
+    if configured not in {"form", "url"} or protocol_version != "2026-07-28":
+        return None
+    elicitation = capabilities.get("elicitation") if isinstance(capabilities, dict) else None
+    if not isinstance(elicitation, dict):
+        return None
+    if isinstance(elicitation.get(configured), dict):
+        return configured
+    # A bare {} names no mode. Clients that predate URL elicitation advertise it
+    # and then refuse a URL request outright, so it is read as form support only.
+    if configured == "form" and elicitation == {}:
+        return configured
+    return None
+
+
+def _confirmation_summary(confirmation: dict[str, Any]) -> str:
+    return (
+        f"Approve {confirmation['tool_name']}?\n"
+        f"Action: {confirmation['action']}\n"
+        f"Resource: {confirmation['resource_type']}/{confirmation['resource_id']}\n"
+        f"Arguments:\n{json.dumps(confirmation['arguments'], indent=2)}"
+    )
+
+
+def _elicitation_params(mode: str, confirmation: dict[str, Any]) -> ElicitRequestFormParams | ElicitRequestURLParams:
+    if mode == "url":
+        return ElicitRequestURLParams(
+            message=(
+                f"{_confirmation_summary(confirmation)}\n\n"
+                "Open this link and approve or deny the action while signed in to Seizu, "
+                "then let the call continue."
+            ),
+            url=confirmation["confirmation_url"],
+        )
+    return ElicitRequestFormParams(
+        message=(
+            f"{_confirmation_summary(confirmation)}\n\n"
+            "Accept approves this action. Decline refuses it for the rest of the "
+            "confirmation window, so the same call cannot be retried until it "
+            "expires. Cancel leaves it undecided and can be asked again."
+        ),
+        requested_schema={"type": "object", "properties": {}},
+    )
 
 
 async def _handle_list_prompts(

@@ -8,6 +8,41 @@ LLM agents such as Claude can connect to this endpoint and call tools that run r
 Tools are grouped into **toolsets**. Each toolset contains one or more **tools**, where every tool is a parameterised Cypher query.
 Both toolsets and tools maintain a full version history so changes can be audited and reverted.
 
+## Action confirmations
+
+Built-in tools that require approval ask an MCP client using protocol
+`2026-07-28` to collect that approval. `MCP_CONFIRMATION_ELICITATION_MODE`
+chooses how:
+
+| Mode | Behaviour |
+|------|-----------|
+| `url` (default) | The client shows a link to Seizu's confirmation page. The person approves or denies there, signed in as themselves, then lets the call continue. |
+| `form` | The client renders the approval dialog itself and reports the answer back. One round trip fewer, but the client can answer without asking anyone. |
+| `permission` | `form` for callers holding `chat:bypass_permissions`, `url` for everyone else. |
+| `off` | Never elicit; return the confirmation payload and its URL as tool content. |
+
+Prefer `url` where clients are not under your control. In `form` mode the
+approval is only as trustworthy as the client: nothing in the protocol proves a
+person saw the dialog, so a client that answers automatically approves every
+action the caller is otherwise permitted to take. In `url` mode the decision is
+recorded in Seizu against the user's own session, so a client cannot fabricate
+it — a client that claims approval without one gets the pending confirmation
+back and the action does not run.
+
+The server returns `InputRequiredResult` with an `elicitation/create` request.
+The client continues the original call with the returned `requestState` and the
+user's response in `inputResponses`. Approval remains scoped to the caller,
+session, tool, target, and exact arguments, expires after
+`ACTION_CONFIRMATION_TTL_SECONDS`, and is consumed once.
+
+A client that cannot do the configured mode is never offered the other one; it
+receives the confirmation URL as content instead. URL mode requires the client
+to advertise `elicitation.url` explicitly — a bare `elicitation: {}` is read as
+form support only, because clients predating URL elicitation advertise it and
+then refuse a URL request. Older clients and clients without elicitation
+support get content too. Upstream account authorization and
+recovery continue to use URL interactions.
+
 ## Managing Toolsets
 
 Navigate to **MCP Toolsets** in the sidebar to view all toolsets.
