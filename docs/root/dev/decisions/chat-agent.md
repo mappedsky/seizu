@@ -2872,3 +2872,107 @@ continuation driver, so negotiation cannot change the detached recovery and
 no-replay contract in AGT-048. The legacy override accommodates peers that reject
 requests made before initialization without treating their errors as consent to
 downgrade automatically.
+
+## AGT-050 — MCP forms decide existing action confirmations
+
+**Applies to:** `mcp_server._handle_call_tool`, `mcp_runtime._ensure_tool_confirmation`
+
+MCP 2026-07-28 clients advertising form elicitation receive an
+`InputRequiredResult` for pending Seizu action approvals. The confirmation ID
+is the continuation state and input-response key. The runtime resolves the
+confirmation after current permission and argument validation, using the
+existing caller/session/tool/target/argument-hash scope. The form carries no
+fields: the elicitation action is the decision, so a matching continuation
+that accepts approves the record, decline denies it, and cancel leaves it
+pending. Execution consumes the ordinary atomic grant. Other clients retain
+the browser URL flow.
+
+**Why:** these approvals need a decision, not credentials, so a client form
+removes the browser round trip. The modern input-required flow works with our
+stateless HTTP transport; legacy server-to-client callbacks require a
+back-channel that this deployment does not retain. Reusing confirmation records
+preserves ownership, expiry, decision attribution, and the execution claim;
+trusting a bare accept response or setting `confirmation_pre_approved` would
+discard those checks. A required `confirm` boolean defaulting to false was
+tried and removed: it restates the accept/decline the protocol already
+carries, and a client that submits the form without toggling it silently
+denies the action and then holds the denial for the confirmation window. The
+SDK's capability checker tests elicitation presence but does not distinguish
+form from URL support, so the transport checks the per-request mode
+declaration explicitly.
+
+**Don't:** turn a form response into a permission grant or bypass flag, or
+replace upstream account authorization URL elicitation (AGT-048) with a form.
+
+## AGT-051 — Keep HTTP connections alive between MCP requests
+
+**Applies to:** `gunicorn.conf`, MCP Streamable HTTP clients
+
+Gunicorn uses a five-second HTTP keep-alive interval with UvicornWorker.
+Legacy MCP clients still initialize normally, independently of the modern
+protocol and form-elicitation capability gates.
+
+**Why:** with `keepalive = 0`, Codex 0.153.4 received Seizu's legacy
+`initialize` response, then repeatedly failed sending
+`notifications/initialized` with a closed transport. Separate curl requests
+returned 200 and 202, concealing the connection-reuse failure. The same native
+Codex client, with `mcp_2026_07_28` explicitly disabled, completed initialization
+and listed all 105 tools against the same application with `--keep-alive 5`.
+This is an HTTP connection-lifetime issue, not a failure to negotiate an older
+MCP revision. After applying the change to the normal endpoint, native Codex
+discovered all 105 tools with both `2025-06-18` (flag disabled) and `2026-07-28`
+(flag enabled). The in-process ASGI tests do not exercise TCP connection reuse.
+
+**Don't:** disable keep-alive to make MCP stateless. Protocol session state
+and HTTP connection reuse are independent.
+
+## AGT-051 — Confirmation elicitation mode is an operator's choice, defaulting to URL
+
+**Applies to:** `mcp_server._elicitation_mode`, `_elicitation_params`,
+`settings.MCP_CONFIRMATION_ELICITATION_MODE`
+
+`MCP_CONFIRMATION_ELICITATION_MODE` selects how an MCP client collects approval
+for a mutating action: `url` (default) points the client at Seizu's own
+confirmation page, `form` (AGT-050) renders a dialog in the client, `permission`
+picks `form` for callers holding `chat:bypass_permissions` and `url` for the
+rest, and `off` returns the payload as content. In `url` mode the client's
+response never carries a decision — the responder re-reads the record rather
+than writing one, so a continuation that claims approval without one gets the
+pending confirmation back. A client that cannot do the configured mode receives
+content, never the other mode. Only a first attempt elicits; a continuation that
+arrives unapproved is answered with the payload.
+
+**Why:** the protocol has no way to show that a person saw a form. The client
+reports the decision, so a client that answers automatically approves every
+action its caller is otherwise permitted to take, which is exactly what the
+confirmation exists to prevent — and an operator running clients it does not
+control cannot detect the difference. Deciding in Seizu costs a round trip and
+removes the client from the trust path entirely, so it is the default; `form`
+stays available where the client is trusted, and `permission` reuses the
+judgement a deployment already made about who may skip confirmations. Falling
+back from `url` to `form` when a client lacks URL support would let any client
+opt itself into the weaker flow, so the fallback is content instead. A bare
+`elicitation: {}` counts as form support but not URL support: Claude Code 2.1.263
+advertises it and then rejects a URL request outright, which fails the call
+rather than degrading it.
+
+**Don't:** let a `url`-mode response decide a record, or treat a missing client
+capability as licence to downgrade the mode.
+
+## AGT-052 — Modern URL elicitation has a Codex compatibility gap
+
+**Applies to:** `mcp_server._elicitation_params`
+
+Keep the SDK's protocol-version serialization for URL elicitation. Codex
+0.153.4's modern URL path is not validated as compatible with Seizu.
+
+**Why:** a native Codex call failed with `Unexpected response type` before
+displaying the URL. The captured Seizu response contained a URL elicitation
+inside `InputRequiredResult`; Codex's generated schema requires `elicitationId`,
+while the installed Python SDK marks it as removed at MCP 2026-07-28 and strips
+it on serialization. Adding the field to the request object was tested and did
+not put it on the wire. The report remained present and its confirmation stayed
+pending. This is distinct from the working form flow and from capability-based
+fallback: Codex advertises URL support, so Seizu offers the configured URL mode.
+
+**Don't:** downgrade to form elicitation to work around a URL-client failure.
