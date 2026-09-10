@@ -3,6 +3,21 @@
 import io
 import zipfile
 from pathlib import Path
+from typing import Any
+
+#: Seizu's own extension namespace inside an Agent Plugin manifest.
+SEIZU_EXTENSION = "com.mappedsky.seizu"
+
+#: Marks a package Seizu serialized from a legacy skillset rather than one an
+#: author wrote. Mirrors ``LEGACY_PROJECTION_EXTENSION_KEY`` in
+#: reporting/services/plugin_packages.py.
+LEGACY_PROJECTION_KEY = "legacySkillsetProjection"
+
+
+def is_legacy_projection(manifest: dict[str, Any]) -> bool:
+    """Whether a package manifest belongs to the legacy skillset projection."""
+    extension = (manifest or {}).get("extensions", {}).get(SEIZU_EXTENSION, {})
+    return isinstance(extension, dict) and extension.get(LEGACY_PROJECTION_KEY) is True
 
 
 def build_plugin_package(source: Path) -> tuple[str, bytes]:

@@ -127,7 +127,10 @@ def test_legacy_projection_preserves_namespaced_identity_and_tools():
     assert parsed.plugin_id == "incident_response"
     assert is_legacy_skillset_projection(parsed.manifest)
     assert parsed.skills[0].skill_id == "review_alert"
-    assert parsed.skills[0].allowed_tools == ["graph__query"]
+    # One vocabulary for every dependency, Seizu's own included (AGT-042). A
+    # bare name here reads back as the consumer's own built-in and the
+    # dependency disappears -- see allowed_tools_contract_test.py.
+    assert parsed.skills[0].allowed_tools == ["mcp__seizu__graph__query"]
 
 
 def _package(body: str, *, projection: bool = False) -> object:

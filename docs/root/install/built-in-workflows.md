@@ -103,7 +103,7 @@ query returned, write a summary report, or act on another activity's output.
 - **Output is named**, so a later stage can consume it: `status`, `thread_id`,
   `summary`, `error`, and the run's `budget`.
 - **Config:** `prompt` (required), `session_title`, `skill` (an optional stored
-  skill rendered into the prompt as `skillset__skill`, with its required tools
+  skill rendered into the prompt as `plugin__skill`, with its required tools
   pre-unlocked), and `timeout_minutes`.
 - Like every headless surface it runs as the workflow's creator, under their
   RBAC, with confirmations bypassed only when they hold

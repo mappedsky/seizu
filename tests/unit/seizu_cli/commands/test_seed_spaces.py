@@ -343,6 +343,7 @@ def test_export_round_trips_spaces_membership_and_overview(mock_client: MagicMoc
         "/api/v1/workflows": {"workflows": []},
         "/api/v1/toolsets": {"toolsets": []},
         "/api/v1/skillsets": {"skillsets": []},
+        "/api/v1/plugins": {"plugins": []},
     }[path]
 
     seed.export_cmd(str(config), dry_run=False)
@@ -375,6 +376,7 @@ def test_export_reuses_existing_yaml_keys_for_spaces(mock_client: MagicMock, tmp
         "/api/v1/workflows": {"workflows": []},
         "/api/v1/toolsets": {"toolsets": []},
         "/api/v1/skillsets": {"skillsets": []},
+        "/api/v1/plugins": {"plugins": []},
     }[path]
 
     seed.export_cmd(str(config), dry_run=False)
@@ -412,6 +414,7 @@ def test_export_skips_builtin_toolsets(mock_client: MagicMock, tmp_path: Path) -
             ]
         },
         "/api/v1/skillsets": {"skillsets": []},
+        "/api/v1/plugins": {"plugins": []},
     }[path]
 
     seed.export_cmd(str(config), dry_run=False)
@@ -452,6 +455,7 @@ def test_export_skips_one_bad_toolset_without_aborting(mock_client: MagicMock, t
         },
         "/api/v1/toolsets/good/tools": {"tools": []},
         "/api/v1/skillsets": {"skillsets": []},
+        "/api/v1/plugins": {"plugins": []},
     }[path]
 
     seed.export_cmd(str(config), dry_run=False)
@@ -480,6 +484,7 @@ def test_export_drops_an_overview_whose_report_failed_to_export(mock_client: Mag
         "/api/v1/workflows": {"workflows": []},
         "/api/v1/toolsets": {"toolsets": []},
         "/api/v1/skillsets": {"skillsets": []},
+        "/api/v1/plugins": {"plugins": []},
     }[path]
 
     seed.export_cmd(str(config), dry_run=False)
@@ -487,3 +492,109 @@ def test_export_drops_an_overview_whose_report_failed_to_export(mock_client: Mag
     written = seed.schema.load_file(str(config))
     assert written.spaces["security"].overview is None
     assert written.reports == {}
+
+
+def _skillset_row(skillset_id: str, name: str) -> dict[str, Any]:
+    return {
+        "skillset_id": skillset_id,
+        "name": name,
+        "description": "d",
+        "enabled": True,
+        "current_version": 1,
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "updated_at": "2024-01-01T00:00:00+00:00",
+        "created_by": "u1",
+    }
+
+
+def _export_environment(
+    skillsets: list[dict[str, Any]],
+    plugins: list[dict[str, Any]],
+    manifests: dict[str, dict[str, Any]],
+    skills: dict[str, list[dict[str, Any]]],
+) -> Any:
+    routes: dict[str, Any] = {
+        "/api/v1/model-profiles": {"profiles": []},
+        "/api/v1/spaces": {"spaces": []},
+        "/api/v1/reports": {"reports": []},
+        "/api/v1/reports/dashboard": {"report_id": None},
+        "/api/v1/workflows": {"workflows": []},
+        "/api/v1/toolsets": {"toolsets": []},
+        "/api/v1/skillsets": {"skillsets": skillsets},
+        "/api/v1/plugins": {"plugins": plugins},
+    }
+    for plugin in plugins:
+        path = f"/api/v1/plugins/{plugin['plugin_id']}/versions/{plugin['current_revision']}"
+        routes[path] = {"manifest": manifests[plugin["plugin_id"]]}
+    for skillset_id, items in skills.items():
+        routes[f"/api/v1/skillsets/{skillset_id}/skills"] = {"skills": items}
+    return lambda path: routes[path]
+
+
+def _authored_manifest() -> dict[str, Any]:
+    return {"name": "cve-response", "extensions": {"com.mappedsky.seizu": {"skills": {}}}}
+
+
+def _projection_manifest() -> dict[str, Any]:
+    return {
+        "name": "incident-response",
+        "extensions": {"com.mappedsky.seizu": {"legacySkillsetProjection": True, "skills": {}}},
+    }
+
+
+def test_export_does_not_rewrite_a_package_as_a_legacy_skillset(mock_client: MagicMock, tmp_path: Path) -> None:
+    """The skillset endpoints project every package, and the projection is lossy.
+
+    Writing one back as a skillset drops its mcp.json, scripts and references,
+    and re-seeding the result would replace the package with that copy. The
+    package is carried by its `plugins:` entry and its source directory.
+    """
+    config = tmp_path / "c.yaml"
+    config.write_text("plugins:\n  cve_response:\n    source: plugins/cve-response\n")
+    mock_client.get.side_effect = _export_environment(
+        skillsets=[_skillset_row("cve_response", "CVE Response")],
+        plugins=[{"plugin_id": "cve_response", "current_revision": 3}],
+        manifests={"cve_response": _authored_manifest()},
+        skills={},
+    )
+
+    seed.export_cmd(str(config), dry_run=False)
+
+    written = seed.schema.load_file(str(config))
+    assert written.skillsets == {}
+    # The package's own declaration is carried forward untouched.
+    assert written.plugins["cve_response"].source == "plugins/cve-response"
+    # Its skills are never even fetched.
+    fetched = [call.args[0] for call in mock_client.get.call_args_list]
+    assert "/api/v1/skillsets/cve_response/skills" not in fetched
+
+
+def test_export_still_writes_a_skillset_that_only_has_a_projection(mock_client: MagicMock, tmp_path: Path) -> None:
+    """A projected package is derived; the skillset record is still the source."""
+    config = tmp_path / "c.yaml"
+    config.write_text("reports: {}\n")
+    mock_client.get.side_effect = _export_environment(
+        skillsets=[_skillset_row("incident_response", "Incident response")],
+        plugins=[{"plugin_id": "incident_response", "current_revision": 2}],
+        manifests={"incident_response": _projection_manifest()},
+        skills={
+            "incident_response": [
+                {
+                    "skill_id": "review_alert",
+                    "name": "Review alert",
+                    "description": "Review one alert",
+                    "template": "Review it.",
+                    "parameters": [],
+                    "triggers": [],
+                    "tools_required": ["graph__query"],
+                    "enabled": True,
+                }
+            ]
+        },
+    )
+
+    seed.export_cmd(str(config), dry_run=False)
+
+    written = seed.schema.load_file(str(config))
+    assert set(written.skillsets) == {"incident_response"}
+    assert written.skillsets["incident_response"].skills["review_alert"].tools_required == ["graph__query"]

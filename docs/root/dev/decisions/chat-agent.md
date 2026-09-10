@@ -2976,3 +2976,75 @@ pending. This is distinct from the working form flow and from capability-based
 fallback: Codex advertises URL support, so Seizu offers the configured URL mode.
 
 **Don't:** downgrade to form elicitation to work around a URL-client failure.
+
+## AGT-053 — One converter writes `allowed-tools`, and the parser reports the other spellings
+
+**Applies to:** `plugin_packages.allowed_tool_entry`, `_allowed_tool_diagnostics`,
+`routes/skillsets._legacy_skill_markdown`, `legacy_skillset_package`,
+`report_store.reconcile_legacy_projection`, `src/pluginAuthoring.toolDeclaration`
+
+[AGT-042](#agt-042-seizus-own-tools-are-named-like-any-other-mcp-servers) made
+`mcp__seizu__<tool>` the only spelling that resolves, and deliberately left
+every other token alone as the consumer's own built-in. Three writers inside
+Seizu kept emitting the internal spelling into packages they generate — the
+startup projection of a legacy skillset, the legacy skill routes (which are
+what the `skillsets__*` built-ins call), and the plugin skill editor's tool
+picker, which wrote the tool catalog's `mcp_name` verbatim.
+
+**The failure mode is the one AGT-042 accepts for a foreign token, applied to
+our own.** The entry resolves to nothing, reports nothing *missing*, and the
+skill stays listed and renders. Under progressive disclosure the model then
+reads instructions naming tools it holds none of, because `tools_required` came
+back empty. Every skill projected from a legacy skillset lost every dependency
+this way, the skill-authoring skill included.
+
+Two rules keep it from returning:
+
+- **Every writer goes through `allowed_tool_entry`**, which qualifies only a
+  name shaped like one of Seizu's own and is safe to apply twice. The frontend
+  mirror is `toolDeclaration`, and the editor normalizes on load, so opening a
+  stale skill and saving it heals the declaration.
+- **`parse_package` reports what it will not resolve.** A bare Seizu tool name,
+  an `ext__<proxy>__<tool>`, and a `mcp__<server>__<tool>` naming a server
+  `mcp.json` does not declare are each a warning, not an error: a wrong
+  declaration is not a broken package, but it must not be an invisible one.
+
+**The projection is reconciled, not just created.** `_migrate_legacy_skillsets`
+re-projects every legacy skillset at startup and republishes when the digest
+moved, so a change to what the projection *writes* reaches deployments whose
+packages already exist. A package published over the projection is left alone.
+An unchanged skillset re-projects to the same digest, so the settled cost is
+still one read per skillset.
+
+**An `ext__<proxy>__<tool>` in a legacy skill stays in its legacy spelling.**
+The package form needs an `mcp.json` server entry, and a legacy skillset has
+nowhere to carry one; synthesizing it from the configured proxy would take
+skills on http upstreams from "this tool is not disclosed" to "this skill is
+unavailable", since `mcp.json` accepts only https or loopback URLs.
+
+**The seed ships skills as packages.** The dev seed's four legacy skillsets are
+now `plugins:` entries with package sources, which is what let
+`cve_response/dependency_provenance` declare the deps MCP it has always needed:
+as a skillset it could not, so its four external tools were dropped on every
+render. `seizu export` no longer writes an authored package back out as a
+skillset either — the projection has nowhere to put `mcp.json`, `scripts/` or
+`references/`, so re-seeding that export would have replaced each package with a
+lossy copy of itself. A package whose manifest carries the projection marker is
+still exported as a skillset, because there the legacy record is the source.
+
+**A capability the listing does not mention is a capability the model will not
+find.** Under progressive disclosure the agent chooses from skill descriptions
+and triggers; the body is only read once a skill is loaded. `reports__delete`
+was declared by the create/update skill, where it exists for the clone-cleanup
+step, and nothing in that skill's description or triggers said "delete". Asked
+to delete a report, the agent read the listing, found no such capability and
+answered that it had none — never loading the skill, so no confirmation was ever
+offered and the failure looked like a missing tool. The package now has a
+`delete-reports` skill that says so in its description and triggers. Declaring
+the tool is necessary; advertising it is what makes it reachable.
+
+**Don't:** re-derive the qualified name at each call site. The contract is held
+by `tests/unit/reporting/services/allowed_tools_contract_test.py`, which drives
+every writer off the built-in registry rather than a fixed list, and by
+`seed_config_test.py`, which resolves every seeded package's declarations
+against the registry and the seed's own toolsets.

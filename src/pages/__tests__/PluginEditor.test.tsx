@@ -27,6 +27,7 @@ const usePluginMutations = pluginsApi.usePluginMutations as jest.Mock;
 const useToolCatalog = toolsetsApi.useToolCatalog as jest.Mock;
 const theme = createTheme();
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 const manifest = {
   $schema: PLUGIN_SCHEMA,
@@ -160,7 +161,7 @@ describe('PluginEditor', () => {
     expect(within(allowedToolsDialog).getByText('Graph')).toBeInTheDocument();
     expect(
       within(allowedToolsDialog).getByRole('checkbox', {
-        name: /Query graph__query/,
+        name: /Query mcp__seizu__graph__query/,
       }),
     ).toBeChecked();
     expect(
@@ -169,7 +170,7 @@ describe('PluginEditor', () => {
     fireEvent.click(
       within(allowedToolsDialog).getByRole('button', { name: 'Cancel' }),
     );
-    expect(screen.getByText('graph__query')).toBeInTheDocument();
+    expect(screen.getByText('mcp__seizu__graph__query')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Choose tools' }));
     const reopenedAllowedToolsDialog = screen.getByRole('dialog', {
@@ -177,7 +178,7 @@ describe('PluginEditor', () => {
     });
     fireEvent.click(
       within(reopenedAllowedToolsDialog).getByRole('checkbox', {
-        name: /Query graph__query/,
+        name: /Query mcp__seizu__graph__query/,
       }),
     );
     fireEvent.click(
@@ -249,6 +250,33 @@ describe('PluginEditor', () => {
       'skills/review-repository/references/checklist.md',
     );
     expect(retained.content_base64).toBeUndefined();
+  });
+
+  it('publishes tool dependencies in the form the server resolves', async () => {
+    // A bare `group__action` reads back as the consuming client's own built-in,
+    // so the dependency is dropped and the rendered skill discloses no tools.
+    // The fixture skill carries the old spelling; editing it republishes the
+    // declaration in the one vocabulary the resolver reads.
+    render(<PluginEditor />, { wrapper: Wrapper });
+    await screen.findByRole('heading', { name: 'Plugin details' });
+
+    fireEvent.click(screen.getByText('Review repository'));
+    await screen.findByRole('textbox', { name: /skill id/i });
+    fireEvent.change(screen.getByRole('textbox', { name: /description/i }), {
+      target: { value: 'Review a repository closely' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Publish/ }));
+
+    await waitFor(() => expect(publishPackage).toHaveBeenCalled());
+    const files = publishPackage.mock.calls[0][1];
+    const skill = files.find((file: { path: string }) =>
+      file.path.endsWith('SKILL.md'),
+    );
+    const published = decoder.decode(
+      Uint8Array.from(atob(skill.content_base64), (char) => char.charCodeAt(0)),
+    );
+    expect(published).toContain('allowed-tools: mcp__seizu__graph__query');
+    expect(published).not.toContain('allowed-tools: graph__query');
   });
 
   it('warns before leaving with unpublished edits', async () => {

@@ -80,7 +80,7 @@ def _legacy_skill_markdown(
 ) -> bytes:
     metadata: dict[str, Any] = {"name": portable_name, "description": description}
     if tools_required:
-        metadata["allowed-tools"] = " ".join(tools_required)
+        metadata["allowed-tools"] = " ".join(plugin_packages.allowed_tool_entries(tools_required))
     frontmatter = yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True).strip()
     return f"---\n{frontmatter}\n---\n{template}".encode()
 

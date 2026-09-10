@@ -414,6 +414,64 @@ def _parse_mcp(files: dict[str, PluginFile], diagnostics: list[PluginDiagnostic]
     return result
 
 
+def _allowed_tool_diagnostics(
+    allowed_tools: list[str],
+    mcp_servers: dict[str, dict[str, Any]],
+    path: str,
+    skill: str,
+) -> list[PluginDiagnostic]:
+    """Report `allowed-tools` entries this deployment will not resolve.
+
+    A dependency Seizu cannot resolve is not an error -- an entry it does not
+    recognize is the consumer's own built-in and stays portable (AGT-042). But
+    the two shapes below are Seizu's own vocabulary written where the package
+    vocabulary belongs, so they read as portable metadata and vanish. Saying so
+    at parse time is the difference between a wrong declaration and an invisible
+    one.
+    """
+    found: list[PluginDiagnostic] = []
+    for entry in allowed_tools:
+        ref = mcp_tool_ref(entry)
+        if ref is None:
+            if entry.startswith(f"{_EXTERNAL_NAMESPACE_PREFIX}__"):
+                found.append(
+                    diagnostic(
+                        "warning",
+                        "unqualified_tool",
+                        f"allowed-tools entry {entry!r} is Seizu's internal name for an external tool and is "
+                        "ignored. Declare it as mcp__<server>__<tool> and name that server in mcp.json.",
+                        path=path,
+                        skill=skill,
+                    )
+                )
+            elif _SEIZU_TOOL_NAME_RE.match(entry):
+                found.append(
+                    diagnostic(
+                        "warning",
+                        "unqualified_tool",
+                        f"allowed-tools entry {entry!r} looks like a Seizu tool but names no MCP server, so it "
+                        f"is treated as the consuming client's own built-in. Declare it as "
+                        f"{SEIZU_TOOL_PREFIX}{entry}.",
+                        path=path,
+                        skill=skill,
+                    )
+                )
+            continue
+        server_name, _remote_tool = ref
+        if server_name != SEIZU_MCP_SERVER_NAME and server_name not in mcp_servers:
+            found.append(
+                diagnostic(
+                    "warning",
+                    "undeclared_mcp_server",
+                    f"allowed-tools entry {entry!r} names MCP server {server_name!r}, which mcp.json does not "
+                    "declare. The skill is unavailable to a caller until that server resolves.",
+                    path=path,
+                    skill=skill,
+                )
+            )
+    return found
+
+
 def _frontmatter(content: bytes, path: str) -> tuple[dict[str, Any] | None, str | None, str | None]:
     if len(content) > MAX_SKILL_MD_BYTES:
         return None, None, f"{path} exceeds {MAX_SKILL_MD_BYTES} bytes"
@@ -543,6 +601,7 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
             )
             continue
         allowed_tools = raw_allowed.split()
+        diagnostics.extend(_allowed_tool_diagnostics(allowed_tools, mcp_servers, path, directory))
         config = extension.skills.get(name) if extension else None
         derived_skill_id = derive_seizu_id(name)
         if derived_skill_id is None:
@@ -616,6 +675,19 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
 #: external proxy of this name never answers `mcp__seizu__*` (AGT-042).
 SEIZU_MCP_SERVER_NAME = "seizu"
 
+#: The `allowed-tools` prefix that declares one of Seizu's own tools.
+SEIZU_TOOL_PREFIX = f"mcp__{SEIZU_MCP_SERVER_NAME}__"
+
+#: `external_mcp.NAMESPACE_PREFIX`, duplicated because importing that module
+#: here would close an import cycle through the `plugins` built-in group. A
+#: test pins the two together.
+_EXTERNAL_NAMESPACE_PREFIX = "ext"
+
+#: A bare Seizu tool name -- `group__action` for a built-in, `toolset__tool`
+#: for a user-defined one. Used only to recognize a declaration written in the
+#: wrong vocabulary, never to resolve one (AGT-042).
+_SEIZU_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*__[a-z0-9_]+$")
+
 
 def mcp_tool_ref(value: str) -> tuple[str, str] | None:
     """Parse ``mcp__<server>__<tool>`` into its parts.
@@ -630,6 +702,35 @@ def mcp_tool_ref(value: str) -> tuple[str, str] | None:
     if not separator or not server or not tool:
         return None
     return server, tool
+
+
+def allowed_tool_entry(tool_ref: str) -> str:
+    """The package spelling of one legacy ``tools_required`` entry.
+
+    A legacy skill names Seizu's own tools bare (``graph__query``); a package
+    names every dependency ``mcp__<server>__<tool>``, Seizu's own included
+    (AGT-042). A bare name written into a package is read back as the
+    *consumer's* built-in and dropped, so every writer of `allowed-tools` must
+    come through here or the declaration is silently lost.
+
+    Only a name shaped like one of Seizu's own is qualified, so an already
+    qualified entry and anything portable are returned unchanged and applying
+    this twice is safe. An ``ext__<proxy>__<tool>`` reference is left in its
+    legacy spelling deliberately: the package form needs an `mcp.json` server
+    entry that a legacy skillset has nowhere to carry, and inventing one would
+    take the skill from "this tool is not disclosed" to "this skill is
+    unavailable".
+    """
+    already_qualified = mcp_tool_ref(tool_ref) is not None
+    external = tool_ref.startswith(f"{_EXTERNAL_NAMESPACE_PREFIX}__")
+    if already_qualified or external or not _SEIZU_TOOL_NAME_RE.match(tool_ref):
+        return tool_ref
+    return f"{SEIZU_TOOL_PREFIX}{tool_ref}"
+
+
+def allowed_tool_entries(tool_refs: list[str]) -> list[str]:
+    """`allowed_tool_entry` over a legacy skill's whole ``tools_required``."""
+    return [allowed_tool_entry(tool_ref) for tool_ref in tool_refs]
 
 
 def legacy_skillset_package(skillset: Any, skills: list[Any]) -> ParsedPlugin:
@@ -662,7 +763,7 @@ def legacy_skillset_package(skillset: Any, skills: list[Any]) -> ParsedPlugin:
             "description": skill.description or skill.name,
         }
         if skill.tools_required:
-            metadata["allowed-tools"] = " ".join(skill.tools_required)
+            metadata["allowed-tools"] = " ".join(allowed_tool_entries(list(skill.tools_required)))
         frontmatter = yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True).strip()
         content = f"---\n{frontmatter}\n---\n{skill.template}".encode()
         files.append(

@@ -36,6 +36,9 @@ import type { ToolCatalogItem, ToolParamDef } from 'src/hooks/useToolsetsApi';
 import {
   PluginSkillExtension,
   SkillDocument,
+  declaredToolName,
+  isExternalDeclaration,
+  toolDeclaration,
   validateSkillAuthoring,
 } from 'src/pluginAuthoring';
 
@@ -207,31 +210,36 @@ function AllowedToolsDialog({
                   {group.label}
                 </Typography>
                 <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-                  {group.tools.map((tool) => (
-                    <FormControlLabel
-                      key={tool.mcp_name}
-                      control={
-                        <Checkbox
-                          checked={selection.includes(tool.mcp_name)}
-                          onChange={() => toggle(tool.mcp_name)}
-                        />
-                      }
-                      label={
-                        <Box sx={{ minWidth: 0 }}>
-                          <Typography variant="body2">
-                            {tool.name || tool.mcp_name}
-                          </Typography>
-                          <Typography
-                            variant="caption"
-                            color="text.secondary"
-                            sx={{ fontFamily: 'monospace' }}
-                          >
-                            {tool.mcp_name}
-                          </Typography>
-                        </Box>
-                      }
-                    />
-                  ))}
+                  {group.tools.map((tool) => {
+                    // The declaration, not the catalog name, is what the file
+                    // carries and what the server resolves.
+                    const declaration = toolDeclaration(tool.mcp_name);
+                    return (
+                      <FormControlLabel
+                        key={declaration}
+                        control={
+                          <Checkbox
+                            checked={selection.includes(declaration)}
+                            onChange={() => toggle(declaration)}
+                          />
+                        }
+                        label={
+                          <Box sx={{ minWidth: 0 }}>
+                            <Typography variant="body2">
+                              {tool.name || tool.mcp_name}
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{ fontFamily: 'monospace' }}
+                            >
+                              {declaration}
+                            </Typography>
+                          </Box>
+                        }
+                      />
+                    );
+                  })}
                 </Box>
               </Paper>
             ))}
@@ -432,7 +440,12 @@ export default function PluginSkillEditor({
 }) {
   const [description, setDescription] = useState(document.description);
   const [body, setBody] = useState(document.body);
-  const [allowedTools, setAllowedTools] = useState(document.allowedTools);
+  // A declaration written before the mcp__<server>__ form was required still
+  // names a real tool. Normalizing on load checks its box and republishes it
+  // in the spelling the server resolves, so opening a stale skill heals it.
+  const [allowedTools, setAllowedTools] = useState(() =>
+    document.allowedTools.map(toolDeclaration),
+  );
   // Derived, never authored: the portable name is the skill's identity.
   const skillId = document.portableName.replaceAll('-', '_');
   const [title, setTitle] = useState(
@@ -451,10 +464,13 @@ export default function PluginSkillEditor({
   const [allowedToolsOpen, setAllowedToolsOpen] = useState(false);
 
   const availableTools = useMemo(() => {
-    const values = new Map(catalog.map((tool) => [tool.mcp_name, tool]));
-    for (const name of allowedTools) {
-      if (!values.has(name)) {
-        values.set(name, {
+    const values = new Map(
+      catalog.map((tool) => [toolDeclaration(tool.mcp_name), tool]),
+    );
+    for (const entry of allowedTools) {
+      if (!values.has(entry)) {
+        const name = declaredToolName(entry);
+        values.set(entry, {
           mcp_name: name,
           name,
           tool_id: name,
@@ -468,6 +484,20 @@ export default function PluginSkillEditor({
     }
     return [...values.values()];
   }, [allowedTools, catalog]);
+
+  // A dependency on another MCP server resolves only when mcp.json declares
+  // it, and the editor has no view of that file -- so say what the package
+  // needs rather than letting the skill go quietly unavailable.
+  const externalServers = useMemo(
+    () => [
+      ...new Set(
+        allowedTools
+          .filter(isExternalDeclaration)
+          .map((entry) => entry.slice('mcp__'.length).split('__')[0]),
+      ),
+    ],
+    [allowedTools],
+  );
 
   const updateParameter = <K extends keyof ParamFormState>(
     index: number,
@@ -645,6 +675,13 @@ export default function PluginSkillEditor({
             Choose tools
           </Button>
         </Box>
+        {externalServers.length > 0 && (
+          <Alert severity="info" sx={{ mt: 1 }}>
+            {externalServers.length === 1
+              ? `${externalServers[0]} is an external MCP server. This package needs an mcp.json entry naming it, or the skill stays unavailable.`
+              : `${externalServers.join(', ')} are external MCP servers. This package needs an mcp.json entry naming each of them, or the skill stays unavailable.`}
+          </Alert>
+        )}
       </FieldWithHelp>
       <StringListEditor
         label="Triggers"
