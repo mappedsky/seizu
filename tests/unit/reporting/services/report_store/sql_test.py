@@ -1179,6 +1179,100 @@ async def test_get_scheduled_chat_version_returns_correct_version(store):
 # ---------------------------------------------------------------------------
 
 
+async def test_confirmation_retry_and_approval_with_real_store(store, mocker):
+    from reporting.schema.confirmations import ActionConfirmationTarget
+    from reporting.services import action_confirmations
+
+    mocker.patch.object(action_confirmations.report_store, "get_store", return_value=store)
+    scope = dict(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        tool_name="reports__delete",
+        target=ActionConfirmationTarget(action="delete", resource_type="report", resource_id="r1"),
+        arguments={"report_id": "r1"},
+    )
+    first = await action_confirmations.ensure_confirmation(**scope)
+    await action_confirmations.decide_confirmation(
+        confirmation_id=first.confirmation_id, user_id="user-1", decision="denied"
+    )
+    retry = await action_confirmations.ensure_confirmation(**scope)
+    assert retry.status == "pending"
+    assert retry.confirmation_id != first.confirmation_id
+    assert await action_confirmations.ensure_confirmation(retry_denied=False, **scope) == retry
+    await action_confirmations.decide_confirmation(
+        confirmation_id=retry.confirmation_id, user_id="user-1", decision="approved"
+    )
+    assert await action_confirmations.ensure_confirmation(retry_denied=False, **scope) is None
+    assert (await store.get_action_confirmation(retry.confirmation_id)).status == "executed"
+
+
+async def test_denial_counts_scope_expiry_and_all_fingerprint_fields(store):
+    from reporting.schema.confirmations import ActionConfirmationTarget
+
+    denied = _action_confirmation("denied", "denied", "2024-01-01T00:00:00+00:00")
+    variants = [
+        {},
+        {"arguments_hash": "other"},
+        {"tool_name": "other"},
+        {"action": "other"},
+        {"resource_type": "other"},
+        {"resource_id": "other"},
+        {"user_id": "other"},
+        {"source": "chat"},
+        {"session_key": "other"},
+        {"expires_at": "2000-01-01T00:00:00+00:00"},
+        {"status": "approved"},
+    ]
+    for index, changes in enumerate(variants):
+        await store.create_action_confirmation(denied.model_copy(update={**changes, "confirmation_id": str(index)}))
+    assert await store.count_action_confirmation_denials(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        tool_name="reports__delete",
+        target=ActionConfirmationTarget(action="delete", resource_type="report", resource_id="report-1"),
+        arguments_hash="hash-1",
+    ) == (6, 1)
+
+
+async def test_denial_reversal_is_owner_scoped_expiring_and_single_use(store):
+    denied = _action_confirmation("denied", "denied", "2024-01-01T00:00:00+00:00")
+    await store.create_action_confirmation(denied)
+    assert await store.decide_action_confirmation("denied", "other", "approved", allow_denial_reversal=True) is None
+    assert await store.decide_action_confirmation("denied", "user-1", "approved") is None
+    approved = await store.decide_action_confirmation("denied", "user-1", "approved", allow_denial_reversal=True)
+    assert approved.status == "approved"
+    assert approved.decided_by == "user-1"
+    assert await store.claim_action_confirmation_for_execution("denied", "user-1") is not None
+    assert await store.decide_action_confirmation("denied", "user-1", "approved", allow_denial_reversal=True) is None
+    assert await store.claim_action_confirmation_for_execution("denied", "user-1") is None
+    await store.create_action_confirmation(
+        denied.model_copy(update={"confirmation_id": "expired", "expires_at": "2000-01-01T00:00:00+00:00"})
+    )
+    assert await store.decide_action_confirmation("expired", "user-1", "approved", allow_denial_reversal=True) is None
+
+
+async def test_reversed_approval_precedes_newer_denial(store):
+    denied = _action_confirmation("old", "denied", "2024-01-01T00:00:00+00:00")
+    await store.create_action_confirmation(denied)
+    await store.decide_action_confirmation("old", "user-1", "approved", allow_denial_reversal=True)
+    await store.create_action_confirmation(
+        denied.model_copy(update={"confirmation_id": "new", "decided_at": "2090-01-01T00:00:00+00:00"})
+    )
+    found = await store.find_action_confirmation_grant(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        tool_name="reports__delete",
+        action="delete",
+        resource_type="report",
+        resource_id="report-1",
+        arguments_hash="hash-1",
+    )
+    assert found.confirmation_id == "old"
+
+
 async def test_get_action_confirmation_not_found(store):
     result = await store.get_action_confirmation("no-such", user_id="user-1")
     assert result is None

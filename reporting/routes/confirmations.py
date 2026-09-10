@@ -73,6 +73,7 @@ async def decide_confirmation(
         confirmation_id=confirmation_id,
         user_id=current.user.user_id,
         decision=body.decision,
+        allow_denial_reversal=True,
     )
     if confirmation is None:
         raise HTTPException(status_code=404, detail="Confirmation not found")

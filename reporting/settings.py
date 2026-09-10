@@ -1111,6 +1111,10 @@ MCP_TOOL_RESULT_MAX_BYTES = int_env("MCP_TOOL_RESULT_MAX_BYTES", 25_000_000)
 
 # Maximum lifetime for an approved or denied mutating-action confirmation.
 ACTION_CONFIRMATION_TTL_SECONDS = int_env("ACTION_CONFIRMATION_TTL_SECONDS", 1800)
+# Extra prompts after a denial of an identical action; 0 keeps denials sticky.
+ACTION_CONFIRMATION_DENIAL_RETRIES = max(0, int_env("ACTION_CONFIRMATION_DENIAL_RETRIES", 1))
+# Live denials per user/source/session that stop further prompts; minimum 1.
+ACTION_CONFIRMATION_SESSION_DENIAL_LIMIT = max(1, int_env("ACTION_CONFIRMATION_SESSION_DENIAL_LIMIT", 5))
 
 # How an MCP client is asked to approve a mutating action.
 #   url  - the client shows a link to Seizu's confirmation page and the person

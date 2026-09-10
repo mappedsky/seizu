@@ -22,6 +22,7 @@ _LATER = "2099-01-01T00:30:00+00:00"
 def _no_deployment_external_proxies(mocker):
     """Keep unit listing tests independent of the developer's .env."""
     mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [])
+    mocker.patch.object(report_store, "count_action_confirmation_denials", return_value=(0, 0))
 
 
 def _user(permissions: frozenset[str]) -> CurrentUser:

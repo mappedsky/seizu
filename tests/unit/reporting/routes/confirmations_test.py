@@ -161,7 +161,7 @@ async def test_decide_confirmation_returns_404_when_not_found(mocker):
 
 
 async def test_decide_confirmation_returns_result_when_found(mocker):
-    mocker.patch(
+    decide = mocker.patch(
         "reporting.routes.confirmations.action_confirmations.decide_confirmation",
         return_value=_confirmation(),
     )
@@ -175,3 +175,4 @@ async def test_decide_confirmation_returns_result_when_found(mocker):
 
     assert response.status_code == 200
     assert response.json()["confirmation"]["status"] == "pending"
+    assert decide.call_args.kwargs["allow_denial_reversal"] is True

@@ -1,11 +1,76 @@
 from uuid import UUID
 
+import pytest
+
 from reporting.schema.confirmations import ActionConfirmation, ActionConfirmationTarget
 from reporting.services import action_confirmations
 
 _NOW = "2024-01-01T00:00:00+00:00"
 _LATER = "2099-01-01T00:30:00+00:00"
 _PAST = "2000-01-01T00:00:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def denial_counts(mocker):
+    return mocker.patch.object(
+        action_confirmations.report_store, "count_action_confirmation_denials", return_value=(0, 0)
+    )
+
+
+@pytest.mark.parametrize("counts,expected", [((1, 1), "pending"), ((2, 2), "denied")])
+async def test_denial_allows_only_one_extra_prompt(mocker, denial_counts, counts, expected):
+    denial_counts.return_value = counts
+    mocker.patch.object(
+        action_confirmations.report_store, "find_action_confirmation_grant", side_effect=[_confirmation("denied"), None]
+    )
+    create = mocker.patch.object(
+        action_confirmations.report_store, "create_action_confirmation", side_effect=lambda c: c
+    )
+    result = await action_confirmations.ensure_confirmation(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        tool_name="reports__delete",
+        target=ActionConfirmationTarget(action="delete", resource_type="report", resource_id="r1"),
+        arguments={"report_id": "r1"},
+    )
+    assert result.status == expected
+    assert create.await_count == (1 if expected == "pending" else 0)
+
+
+async def test_session_denial_limit_blocks_changed_arguments(mocker, denial_counts):
+    denial_counts.return_value = (5, 0)
+    mocker.patch.object(action_confirmations.report_store, "find_action_confirmation_grant", return_value=None)
+    create = mocker.patch.object(action_confirmations.report_store, "create_action_confirmation")
+    with pytest.raises(action_confirmations.ConfirmationDenialLimit):
+        await action_confirmations.ensure_confirmation(
+            user_id="user-1",
+            source="mcp",
+            session_key="session-1",
+            tool_name="reports__delete",
+            target=ActionConfirmationTarget(action="delete", resource_type="report", resource_id="other"),
+            arguments={"report_id": "other"},
+        )
+    create.assert_not_awaited()
+
+
+async def test_browser_can_reverse_live_denial(mocker):
+    mocker.patch.object(
+        action_confirmations.report_store, "get_action_confirmation", return_value=_confirmation("denied")
+    )
+    decide = mocker.patch.object(
+        action_confirmations.report_store, "decide_action_confirmation", return_value=_confirmation("approved")
+    )
+    result = await action_confirmations.decide_confirmation(
+        confirmation_id="confirm-1",
+        user_id="user-1",
+        decision="approved",
+        allow_denial_reversal=True,
+    )
+    assert result.status == "approved"
+    decide.assert_awaited_once_with(
+        confirmation_id="confirm-1", user_id="user-1", decision="approved", allow_denial_reversal=True
+    )
 
 
 def _confirmation(status: str = "pending", arguments: dict[str, object] | None = None) -> ActionConfirmation:
@@ -79,7 +144,8 @@ async def test_public_arguments_mirror_model_provided_arguments(mocker):
     assert result.arguments == {"keyword": "search-term", "token_count": 42, "cache_key": "abc", "name": "my-thing"}
 
 
-async def test_approved_confirmation_is_claimed_before_execution(mocker):
+async def test_approved_confirmation_is_claimed_before_execution(mocker, denial_counts):
+    denial_counts.return_value = (5, 2)
     approved = _confirmation("approved")
     mocker.patch(
         "reporting.services.action_confirmations.report_store.find_action_confirmation_grant",
@@ -101,6 +167,7 @@ async def test_approved_confirmation_is_claimed_before_execution(mocker):
 
     assert result is None
     claim.assert_awaited_once_with("confirm-1", "user-1")
+    denial_counts.assert_not_awaited()
 
 
 async def test_concurrent_race_on_approved_confirmation_returns_executed(mocker):
@@ -271,6 +338,7 @@ async def test_decide_confirmation_returns_successful_write(mocker):
         confirmation_id="confirm-1",
         user_id="user-1",
         decision="approved",
+        allow_denial_reversal=False,
     )
 
 
