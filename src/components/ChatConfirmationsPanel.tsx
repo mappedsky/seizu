@@ -11,13 +11,18 @@ import {
   useMediaQuery,
   useTheme,
 } from '@mui/material';
+import { Fragment } from 'react';
 import CheckCircle from '@mui/icons-material/CheckCircle';
 import Close from '@mui/icons-material/Close';
 import GppMaybe from '@mui/icons-material/GppMaybe';
 import MenuOpen from '@mui/icons-material/MenuOpen';
 import Block from '@mui/icons-material/Block';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
-import type { ActionConfirmation } from 'src/hooks/useConfirmationsApi';
+import {
+  effectiveConfirmationStatus,
+  isConfirmationExpired,
+  type ActionConfirmation,
+} from 'src/hooks/useConfirmationsApi';
 
 interface ChatConfirmationsPanelProps {
   confirmations: ActionConfirmation[];
@@ -43,7 +48,19 @@ export default function ChatConfirmationsPanel({
 }: ChatConfirmationsPanelProps) {
   const theme = useTheme();
   const narrow = useMediaQuery(theme.breakpoints.down('lg'));
-  const pendingCount = confirmations.length;
+  const pendingConfirmations = confirmations.filter(
+    (confirmation) => effectiveConfirmationStatus(confirmation) === 'pending',
+  );
+  const deniedConfirmations = confirmations.filter(
+    (confirmation) =>
+      effectiveConfirmationStatus(confirmation) === 'denied' &&
+      !isConfirmationExpired(confirmation),
+  );
+  const displayedConfirmations = [
+    ...pendingConfirmations,
+    ...deniedConfirmations,
+  ];
+  const pendingCount = pendingConfirmations.length;
   const openLabel =
     pendingCount > 0
       ? `Open confirmations (${pendingCount} pending)`
@@ -89,127 +106,184 @@ export default function ChatConfirmationsPanel({
           </Box>
         ) : error ? (
           <Alert severity="error">{error}</Alert>
-        ) : confirmations.length === 0 ? (
-          <Typography color="text.secondary" variant="body2">
-            No pending approvals.
-          </Typography>
         ) : (
-          confirmations.map((confirmation) => (
-            <Box
-              key={confirmation.confirmation_id}
+          <>
+            <Typography
+              component="h2"
               sx={{
-                border: 1,
+                borderBottom: 1,
                 borderColor: 'divider',
-                borderRadius: 1,
-                mb: 1.25,
-                p: 1.25,
+                fontWeight: 700,
+                mb: 1,
+                pb: 0.5,
               }}
+              variant="subtitle2"
             >
-              <Typography
-                variant="subtitle2"
-                sx={{ textTransform: 'capitalize', wordBreak: 'break-word' }}
-              >
-                {confirmation.action} {confirmation.resource_type}
+              Pending
+            </Typography>
+            {pendingCount === 0 ? (
+              <Typography color="text.secondary" sx={{ mb: 2 }} variant="body2">
+                No confirmations pending.
               </Typography>
-              <Typography
-                color="text.secondary"
-                sx={{ display: 'block', wordBreak: 'break-word' }}
-                variant="caption"
-              >
-                {confirmation.resource_id}
-              </Typography>
-              {Object.keys(confirmation.arguments).length > 0 && (
-                <Box
-                  component="details"
-                  open
-                  sx={{
-                    border: 1,
-                    borderColor: 'divider',
-                    borderRadius: 1,
-                    mt: 1,
-                    overflow: 'hidden',
-                  }}
-                >
+            ) : null}
+            {displayedConfirmations.map((confirmation, index) => {
+              const status = effectiveConfirmationStatus(confirmation);
+              const canReverseDenial =
+                status === 'denied' && !isConfirmationExpired(confirmation);
+              return (
+                <Fragment key={confirmation.confirmation_id}>
+                  {index === pendingCount && deniedConfirmations.length > 0 ? (
+                    <Typography
+                      component="h2"
+                      sx={{
+                        borderBottom: 1,
+                        borderColor: 'divider',
+                        fontWeight: 700,
+                        mb: 1.5,
+                        pb: 0.5,
+                      }}
+                      variant="subtitle2"
+                    >
+                      Previously denied
+                    </Typography>
+                  ) : null}
                   <Box
-                    component="summary"
                     sx={{
-                      cursor: 'pointer',
-                      fontSize: '0.72rem',
-                      fontWeight: 600,
-                      listStyle: 'revert',
-                      px: 1,
-                      py: 0.75,
-                      userSelect: 'none',
+                      border: 1,
+                      borderColor: 'divider',
+                      borderRadius: 1,
+                      mb: 1.25,
+                      p: 1.25,
                     }}
                   >
-                    Request details
-                  </Box>
-                  <Box sx={{ borderTop: 1, borderColor: 'divider', p: 1 }}>
-                    {Object.entries(confirmation.arguments).map(
-                      ([key, value]) => (
+                    <Typography
+                      variant="subtitle2"
+                      sx={{
+                        textTransform: 'capitalize',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {confirmation.action} {confirmation.resource_type}
+                    </Typography>
+                    <Typography
+                      color="text.secondary"
+                      sx={{ display: 'block', wordBreak: 'break-word' }}
+                      variant="caption"
+                    >
+                      {confirmation.resource_id}
+                    </Typography>
+                    {Object.keys(confirmation.arguments).length > 0 && (
+                      <Box
+                        component="details"
+                        open
+                        sx={{
+                          border: 1,
+                          borderColor: 'divider',
+                          borderRadius: 1,
+                          mt: 1,
+                          overflow: 'hidden',
+                        }}
+                      >
                         <Box
-                          key={key}
+                          component="summary"
                           sx={{
-                            alignItems: 'flex-start',
-                            display: 'flex',
-                            gap: 1,
-                            '&:not(:last-child)': { mb: 0.5 },
+                            cursor: 'pointer',
+                            fontSize: '0.72rem',
+                            fontWeight: 600,
+                            listStyle: 'revert',
+                            px: 1,
+                            py: 0.75,
+                            userSelect: 'none',
                           }}
                         >
-                          <Typography
-                            sx={{
-                              color: 'text.secondary',
-                              flexShrink: 0,
-                              fontFamily: '"JetBrains Mono", monospace',
-                              fontSize: '0.68rem',
-                              lineHeight: 1.5,
-                              minWidth: 72,
-                              wordBreak: 'break-all',
-                            }}
-                          >
-                            {key}
-                          </Typography>
-                          <Typography
-                            sx={{
-                              fontFamily: '"JetBrains Mono", monospace',
-                              fontSize: '0.68rem',
-                              lineHeight: 1.5,
-                              wordBreak: 'break-all',
-                            }}
-                          >
-                            {typeof value === 'object' && value !== null
-                              ? JSON.stringify(value)
-                              : String(value ?? '—')}
-                          </Typography>
+                          Request details
                         </Box>
-                      ),
+                        <Box
+                          sx={{ borderTop: 1, borderColor: 'divider', p: 1 }}
+                        >
+                          {Object.entries(confirmation.arguments).map(
+                            ([key, value]) => (
+                              <Box
+                                key={key}
+                                sx={{
+                                  alignItems: 'flex-start',
+                                  display: 'flex',
+                                  gap: 1,
+                                  '&:not(:last-child)': { mb: 0.5 },
+                                }}
+                              >
+                                <Typography
+                                  sx={{
+                                    color: 'text.secondary',
+                                    flexShrink: 0,
+                                    fontFamily: '"JetBrains Mono", monospace',
+                                    fontSize: '0.68rem',
+                                    lineHeight: 1.5,
+                                    minWidth: 72,
+                                    wordBreak: 'break-all',
+                                  }}
+                                >
+                                  {key}
+                                </Typography>
+                                <Typography
+                                  sx={{
+                                    fontFamily: '"JetBrains Mono", monospace',
+                                    fontSize: '0.68rem',
+                                    lineHeight: 1.5,
+                                    wordBreak: 'break-all',
+                                  }}
+                                >
+                                  {typeof value === 'object' && value !== null
+                                    ? JSON.stringify(value)
+                                    : String(value ?? '—')}
+                                </Typography>
+                              </Box>
+                            ),
+                          )}
+                        </Box>
+                      </Box>
                     )}
+                    {status === 'pending' ? (
+                      <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
+                        <Button
+                          disabled={decidingId === confirmation.confirmation_id}
+                          onClick={() => onDecision(confirmation, 'approved')}
+                          size="small"
+                          startIcon={<CheckCircle />}
+                          variant="contained"
+                        >
+                          Allow
+                        </Button>
+                        <Button
+                          color="error"
+                          disabled={decidingId === confirmation.confirmation_id}
+                          onClick={() => onDecision(confirmation, 'denied')}
+                          size="small"
+                          startIcon={<Block />}
+                          variant="outlined"
+                        >
+                          Deny
+                        </Button>
+                      </Box>
+                    ) : null}
+                    {canReverseDenial ? (
+                      <Box sx={{ mt: 1 }}>
+                        <Button
+                          color="error"
+                          disabled={decidingId === confirmation.confirmation_id}
+                          onClick={() => onDecision(confirmation, 'approved')}
+                          size="small"
+                          variant="outlined"
+                        >
+                          Accept
+                        </Button>
+                      </Box>
+                    ) : null}
                   </Box>
-                </Box>
-              )}
-              <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-                <Button
-                  disabled={decidingId === confirmation.confirmation_id}
-                  onClick={() => onDecision(confirmation, 'approved')}
-                  size="small"
-                  startIcon={<CheckCircle />}
-                  variant="contained"
-                >
-                  Allow
-                </Button>
-                <Button
-                  color="error"
-                  disabled={decidingId === confirmation.confirmation_id}
-                  onClick={() => onDecision(confirmation, 'denied')}
-                  size="small"
-                  startIcon={<Block />}
-                  variant="outlined"
-                >
-                  Deny
-                </Button>
-              </Box>
-            </Box>
-          ))
+                </Fragment>
+              );
+            })}
+          </>
         )}
       </Box>
     </Box>

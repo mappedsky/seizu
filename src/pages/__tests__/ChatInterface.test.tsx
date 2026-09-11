@@ -570,6 +570,67 @@ describe('ChatInterface', () => {
     });
   });
 
+  it('resumes an accepted retry despite an earlier denied confirmation', async () => {
+    const earlierDeniedConfirmation = {
+      confirmation_id: 'confirm-0',
+      source: 'chat' as const,
+      tool_name: 'reports__delete',
+      action: 'delete',
+      resource_type: 'report',
+      resource_id: 'report-1',
+      arguments: {},
+      status: 'denied' as const,
+      thread_id: 'thread-1',
+      created_at: '2026-01-01T00:00:00Z',
+      expires_at: '2099-01-01T00:00:00Z',
+    };
+    const retryConfirmation = {
+      ...earlierDeniedConfirmation,
+      confirmation_id: 'confirm-1',
+      status: 'pending' as const,
+    };
+    const decideConfirmation = jest
+      .fn()
+      .mockResolvedValue({ ...retryConfirmation, status: 'approved' });
+    const sendMessage = jest.fn();
+    mockUseConfirmationsApi.mockReturnValue({
+      confirmations: [earlierDeniedConfirmation, retryConfirmation],
+      loading: false,
+      error: null,
+      fetchConfirmations: jest.fn().mockResolvedValue(undefined),
+      getConfirmation: jest.fn(),
+      getConfirmationsByBatchId: jest.fn(),
+      decideConfirmation,
+    });
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [],
+      sendMessage,
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    fireEvent.click(screen.getByRole('button', { name: /Open confirmations/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+
+    await waitFor(() =>
+      expect(decideConfirmation).toHaveBeenCalledWith('confirm-1', 'approved'),
+    );
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'resume-confirm-1' }),
+      { body: { resume_confirmation_id: 'confirm-1' } },
+    );
+  });
+
   it('shows a not-found state for a missing linked session', async () => {
     renderChat({ initialPath: '/app/chat/missing-session' });
 

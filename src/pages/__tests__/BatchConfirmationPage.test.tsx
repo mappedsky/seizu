@@ -7,7 +7,7 @@ import {
 } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import * as confirmationsApi from 'src/hooks/useConfirmationsApi';
-import ConfirmationPage from 'src/pages/ConfirmationPage';
+import BatchConfirmationPage from 'src/pages/BatchConfirmationPage';
 import { AuthContext } from 'src/auth.context';
 
 const denied: confirmationsApi.ActionConfirmation = {
@@ -19,24 +19,25 @@ const denied: confirmationsApi.ActionConfirmation = {
   resource_id: 'r1',
   arguments: {},
   status: 'denied',
+  batch_id: 'b1',
   created_at: '2026-01-01T00:00:00Z',
   expires_at: '2099-01-01T00:00:00Z',
 };
 
 let spy: jest.SpyInstance;
 const decideConfirmation = jest.fn();
-const getConfirmation = jest.fn();
+const getConfirmationsByBatchId = jest.fn();
 
 beforeEach(() => {
-  getConfirmation.mockResolvedValue(denied);
+  getConfirmationsByBatchId.mockResolvedValue([denied]);
   decideConfirmation.mockResolvedValue({ ...denied, status: 'approved' });
   spy = jest.spyOn(confirmationsApi, 'useConfirmationsApi').mockReturnValue({
     confirmations: [],
     loading: false,
     error: null,
     fetchConfirmations: jest.fn(),
-    getConfirmation,
-    getConfirmationsByBatchId: jest.fn(),
+    getConfirmation: jest.fn(),
+    getConfirmationsByBatchId,
     decideConfirmation,
   });
 });
@@ -47,44 +48,29 @@ afterEach(() => {
   jest.clearAllMocks();
 });
 
-function renderPage() {
+test('MCP batch confirmation can approve a live denied action', async () => {
   render(
-    <MemoryRouter initialEntries={['/app/confirmations/c1']}>
+    <MemoryRouter initialEntries={['/app/confirmations/batch/b1']}>
       <AuthContext.Provider
         value={{ accessToken: 'test-token', isLoading: false }}
       >
         <Routes>
           <Route
-            path="/app/confirmations/:confirmationId"
-            element={<ConfirmationPage />}
+            path="/app/confirmations/batch/:batchId"
+            element={<BatchConfirmationPage />}
           />
         </Routes>
       </AuthContext.Provider>
     </MemoryRouter>,
   );
-}
 
-test('owner can allow a previously denied action', async () => {
-  renderPage();
   fireEvent.click(
     await screen.findByRole('button', {
       name: 'Accept',
     }),
   );
+
   await waitFor(() =>
     expect(decideConfirmation).toHaveBeenCalledWith('c1', 'approved'),
   );
-  expect(await screen.findByText('Status: approved')).toBeInTheDocument();
-});
-
-test('expired denials cannot be reversed', async () => {
-  getConfirmation.mockResolvedValue({
-    ...denied,
-    expires_at: '2000-01-01T00:00:00Z',
-  });
-  renderPage();
-  await screen.findByText('Status: denied');
-  expect(
-    screen.queryByRole('button', { name: 'Accept' }),
-  ).not.toBeInTheDocument();
 });

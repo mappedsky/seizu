@@ -154,12 +154,12 @@ export default function ConfirmationPage() {
                       confirmation expires.
                     </Typography>
                     <Button
+                      color="error"
                       disabled={deciding !== null}
                       onClick={() => void decide('approved')}
-                      startIcon={<CheckCircle />}
-                      variant="contained"
+                      variant="outlined"
                     >
-                      Allow previously denied action
+                      Accept
                     </Button>
                   </Box>
                 ) : null}

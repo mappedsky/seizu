@@ -23,13 +23,12 @@ async def list_confirmations(
         user_id=current.user.user_id,
         source="chat",
         session_key=thread_id,
-        status="pending",
     )
     return ConfirmationListResponse(
         confirmations=[
             ActionConfirmationPublic.from_confirmation(confirmation)
             for confirmation in confirmations
-            if not action_confirmations.is_expired(confirmation)
+            if confirmation.status in ("pending", "denied") and not action_confirmations.is_expired(confirmation)
         ]
     )
 
