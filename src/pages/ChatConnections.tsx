@@ -20,7 +20,9 @@ const labels: Record<ConnectionStatus, string> = {
 };
 
 export default function ChatConnections() {
-  const enabled = useFeature('chat');
+  const chatEnabled = useFeature('chat');
+  const connectionsEnabled = useFeature('chat_connections');
+  const enabled = chatEnabled && connectionsEnabled;
   const permissions = usePermissionState();
   const allowed =
     enabled && !permissions.loading && permissions.hasPermission('chat:use');

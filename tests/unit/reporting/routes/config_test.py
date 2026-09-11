@@ -28,6 +28,31 @@ async def test_config_features_chat_disabled_by_default(mocker):
     assert ret.json()["features"]["chat"] is False
 
 
+async def test_config_features_chat_connections_requires_a_user_authorized_proxy(mocker):
+    from reporting.schema.external_mcp import ExternalMCPProxy, ExternalMCPUserAuthorization
+
+    mocker.patch("reporting.settings.CHAT_ENABLED", True)
+    shared = ExternalMCPProxy(name="shared", url="https://gateway.test/mcp")
+    mocker.patch("reporting.settings.MCP_EXTERNAL_PROXIES", [])
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.get("/api/v1/config")).json()["features"]["chat_connections"] is False
+
+    # A shared-token proxy has no per-user status to show either.
+    mocker.patch("reporting.settings.MCP_EXTERNAL_PROXIES", [shared])
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.get("/api/v1/config")).json()["features"]["chat_connections"] is False
+
+    per_user = ExternalMCPProxy(
+        name="gateway",
+        url="https://gateway.test/mcp",
+        user_authorization=ExternalMCPUserAuthorization(reauthorize_url="https://gateway.test/accounts"),
+    )
+    mocker.patch("reporting.settings.MCP_EXTERNAL_PROXIES", [per_user])
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.get("/api/v1/config")).json()["features"]["chat_connections"] is True
+
+
 async def test_config_serves_workflow_activity_types(mocker):
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

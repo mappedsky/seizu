@@ -50,7 +50,9 @@ const SCHEDULE: schedulesModule.ScheduledChat = {
 function Wrapper({ children }: { children: React.ReactNode }) {
   return (
     <MemoryRouter initialEntries={['/app/scheduled-chats']}>
-      <FeaturesContext.Provider value={{ chat: true, chat_schedules: true }}>
+      <FeaturesContext.Provider
+        value={{ chat: true, chat_schedules: true, chat_connections: true }}
+      >
         <ThemeProvider theme={theme}>{children}</ThemeProvider>
       </FeaturesContext.Provider>
     </MemoryRouter>

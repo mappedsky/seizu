@@ -6,6 +6,7 @@ import { createContext, useContext } from 'react';
 export interface Features {
   chat: boolean;
   chat_schedules: boolean;
+  chat_connections: boolean;
 }
 
 // Disabled defaults prevent feature UI from flashing before GET /api/v1/config
@@ -13,11 +14,14 @@ export interface Features {
 export const DEFAULT_FEATURES: Features = {
   chat: false,
   chat_schedules: false,
+  chat_connections: false,
 };
 
 export const BACKEND_DEFAULT_FEATURES: Features = {
   chat: true,
   chat_schedules: true,
+  // External gateways are opt-in, so an older backend has none configured.
+  chat_connections: false,
 };
 
 export const FeaturesContext = createContext<Features>(DEFAULT_FEATURES);
