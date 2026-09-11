@@ -20,10 +20,19 @@ const connection = {
   reauthorize_url: 'https://gateway.test/accounts',
 };
 
-function renderPage(token: string | null = 'browser-token') {
+function renderPage(
+  token: string | null = 'browser-token',
+  connectionsEnabled = true,
+) {
   return render(
     <MemoryRouter>
-      <FeaturesContext.Provider value={{ chat: true, chat_schedules: true }}>
+      <FeaturesContext.Provider
+        value={{
+          chat: true,
+          chat_schedules: true,
+          chat_connections: connectionsEnabled,
+        }}
+      >
         <AuthConfigContext.Provider
           value={{ auth_required: true, oidc: null, loaded: true }}
         >
@@ -135,6 +144,14 @@ describe('Chat connections', () => {
       currentUser: null,
     });
     renderPage();
+    expect(
+      screen.getByText('Chat connections are unavailable.'),
+    ).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not request connections when no gateway is configured', () => {
+    renderPage('browser-token', false);
     expect(
       screen.getByText('Chat connections are unavailable.'),
     ).toBeInTheDocument();

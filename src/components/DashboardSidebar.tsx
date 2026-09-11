@@ -39,6 +39,8 @@ function DashboardSidebar({
   const hasPermission = usePermissions();
   const chatEnabled = useFeature('chat');
   const canUseChat = chatEnabled && hasPermission('chat:use');
+  const chatConnectionsEnabled = useFeature('chat_connections');
+  const canSeeChatConnections = canUseChat && chatConnectionsEnabled;
   const chatSchedulesEnabled = useFeature('chat_schedules');
   const canScheduleChats =
     chatSchedulesEnabled && hasPermission('chat:schedule');
@@ -96,6 +98,10 @@ function DashboardSidebar({
             icon: Chat,
             title: 'Chat',
           },
+        ]
+      : []),
+    ...(canSeeChatConnections
+      ? [
           {
             href: '/app/chat/connections',
             icon: Chat,

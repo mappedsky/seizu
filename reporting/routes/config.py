@@ -37,6 +37,10 @@ async def get_config() -> dict:
         "features": {
             "chat": settings.CHAT_ENABLED,
             "chat_schedules": settings.CHAT_ENABLED and settings.CHAT_SCHEDULES_ENABLED,
+            # Only gateways a user can connect for themselves have a status page
+            # to show, so the UI stays hidden when none is configured.
+            "chat_connections": settings.CHAT_ENABLED
+            and any(proxy.enabled and proxy.user_authorization for proxy in settings.MCP_EXTERNAL_PROXIES),
         },
         "config": {},
     }

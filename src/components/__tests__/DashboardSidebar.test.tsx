@@ -21,15 +21,21 @@ function Wrapper({
   children,
   theme = lightTheme,
   chatEnabled = true,
+  chatConnectionsEnabled = false,
 }: {
   children: React.ReactNode;
   theme?: ReturnType<typeof createTheme>;
   chatEnabled?: boolean;
+  chatConnectionsEnabled?: boolean;
 }) {
   return (
     <MemoryRouter>
       <FeaturesContext.Provider
-        value={{ ...DEFAULT_FEATURES, chat: chatEnabled }}
+        value={{
+          ...DEFAULT_FEATURES,
+          chat: chatEnabled,
+          chat_connections: chatConnectionsEnabled,
+        }}
       >
         <ThemeProvider theme={theme}>{children}</ThemeProvider>
       </FeaturesContext.Provider>
@@ -37,13 +43,22 @@ function Wrapper({
   );
 }
 
-function renderSidebar(permissions: string[], chatEnabled = true) {
+function renderSidebar(
+  permissions: string[],
+  chatEnabled = true,
+  chatConnectionsEnabled = false,
+) {
   mockUsePermissions.mockReturnValue((permission: string) =>
     permissions.includes(permission),
   );
   return render(<DashboardSidebar />, {
     wrapper: ({ children }) => (
-      <Wrapper chatEnabled={chatEnabled}>{children}</Wrapper>
+      <Wrapper
+        chatEnabled={chatEnabled}
+        chatConnectionsEnabled={chatConnectionsEnabled}
+      >
+        {children}
+      </Wrapper>
     ),
   });
 }
@@ -116,6 +131,22 @@ describe('DashboardSidebar', () => {
     expect(
       screen.queryByRole('link', { name: 'Chat' }),
     ).not.toBeInTheDocument();
+  });
+
+  it('hides Chat Connections when no external gateway is configured', () => {
+    renderSidebar(['chat:use']);
+
+    expect(
+      screen.queryByRole('link', { name: 'Chat Connections' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows Chat Connections when a user-authorized gateway is configured', () => {
+    renderSidebar(['chat:use'], true, true);
+
+    expect(
+      screen.getByRole('link', { name: 'Chat Connections' }),
+    ).toHaveAttribute('href', '/app/chat/connections');
   });
 
   it('renders the full logo in the expanded sidebar', () => {
