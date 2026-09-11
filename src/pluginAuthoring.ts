@@ -23,6 +23,51 @@ export function deriveSeizuId(portableName: string): string | null {
   return candidate;
 }
 
+/** The MCP server name a package uses to mean Seizu itself. */
+export const SEIZU_MCP_SERVER = 'seizu';
+/** The `allowed-tools` prefix declaring one of Seizu's own tools. */
+export const SEIZU_TOOL_PREFIX = `mcp__${SEIZU_MCP_SERVER}__`;
+/** Seizu's internal namespace for an external proxy's tools. */
+const EXTERNAL_NAMESPACE_PREFIX = 'ext__';
+/** A bare Seizu tool name: `group__action` or `toolset__tool`. */
+const SEIZU_TOOL_NAME = /^[a-z][a-z0-9_]*__[a-z0-9_]+$/;
+
+/**
+ * The `allowed-tools` entry declaring a tool the catalog lists by `mcp_name`.
+ *
+ * Every dependency is `mcp__<server>__<tool>`, Seizu's own included. A bare
+ * `group__action` is read back as the consuming client's own built-in and
+ * dropped, so writing one loses the dependency silently. Mirrors
+ * `allowed_tool_entry` in reporting/services/plugin_packages.py.
+ */
+export function toolDeclaration(mcpName: string): string {
+  if (mcpName.startsWith('mcp__')) return mcpName;
+  if (mcpName.startsWith(EXTERNAL_NAMESPACE_PREFIX)) {
+    return `mcp__${mcpName.slice(EXTERNAL_NAMESPACE_PREFIX.length)}`;
+  }
+  // Anything that is not shaped like one of our tools is a portable entry such
+  // as `Read` or `Bash(git:*)`, and is never ours to rewrite.
+  return SEIZU_TOOL_NAME.test(mcpName)
+    ? `${SEIZU_TOOL_PREFIX}${mcpName}`
+    : mcpName;
+}
+
+/** The catalog `mcp_name` a declaration refers to, for matching a selection. */
+export function declaredToolName(entry: string): string {
+  if (entry.startsWith(SEIZU_TOOL_PREFIX)) {
+    return entry.slice(SEIZU_TOOL_PREFIX.length);
+  }
+  if (entry.startsWith('mcp__')) {
+    return `${EXTERNAL_NAMESPACE_PREFIX}${entry.slice('mcp__'.length)}`;
+  }
+  return entry;
+}
+
+/** Whether a declaration needs an `mcp.json` server entry to resolve. */
+export function isExternalDeclaration(entry: string): boolean {
+  return entry.startsWith('mcp__') && !entry.startsWith(SEIZU_TOOL_PREFIX);
+}
+
 export interface PluginAuthor {
   name?: string;
   email?: string;

@@ -13,6 +13,7 @@ Rows are rendered in the order specified, and panels within rows are also render
 
 Report and dashboard configurations are stored in PostgreSQL, not in the YAML configuration file.
 The YAML file contains a top-level `queries` dict (used only by `scheduled_queries` references), `scheduled_queries`, a `dashboard` pointer, and `model_profiles`, `spaces`, `reports`, `toolsets`, `skillsets`, and `plugins` sections — all used to seed the report store.
+Skills belong under `plugins`; the `skillsets` section is the compatibility surface and cannot express a package's `mcp.json`, scripts or references.
 A report may name a `space` (and optionally a `subspace`) from the `spaces` section to be filed into it — see [Spaces](spaces.html#seeding).
 Each report has its own `queries` dict for named Cypher strings used by its panels.
 

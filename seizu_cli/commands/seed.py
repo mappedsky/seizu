@@ -9,7 +9,7 @@ from rich.console import Console
 
 from seizu_cli import schema, state
 from seizu_cli.client import APIError
-from seizu_cli.plugin_package import build_plugin_package
+from seizu_cli.plugin_package import build_plugin_package, is_legacy_projection
 
 console = Console()
 err_console = Console(stderr=True)
@@ -153,6 +153,23 @@ def _list_skillsets() -> list[dict[str, Any]]:
 
 def _list_plugins() -> list[dict[str, Any]]:
     return state.get_client().get("/api/v1/plugins").get("plugins", [])
+
+
+def _authored_package_ids() -> set[str]:
+    """Plugin IDs whose current revision is a real package, not a projection.
+
+    The skillset endpoints project every installed package into the legacy
+    view, so a listing alone cannot tell the two apart. The manifest can: a
+    package Seizu serialized from a legacy skillset says so, and for those the
+    skillset record is still the source of truth.
+    """
+    authored: set[str] = set()
+    for item in _list_plugins():
+        plugin_id = item["plugin_id"]
+        version = state.get_client().get(f"/api/v1/plugins/{plugin_id}/versions/{item['current_revision']}")
+        if not is_legacy_projection(version.get("manifest") or {}):
+            authored.add(plugin_id)
+    return authored
 
 
 def _list_model_profiles() -> list[dict[str, Any]]:
@@ -1570,16 +1587,30 @@ def export_cmd(config: str, dry_run: bool) -> None:
 
     # Export skillsets
     new_skillsets: dict[str, Any] = {}
-    ss_exported = ss_failed = 0
+    ss_exported = ss_failed = ss_package = 0
 
     try:
         skillset_list = _list_skillsets()
+        # A package cannot be written back as a skillset: the YAML has nowhere
+        # to carry its mcp.json, scripts or references, and re-seeding the
+        # result would replace the package with a lossy copy of itself. A
+        # package is exported by its `plugins:` entry and its source directory
+        # instead, both of which this export carries forward as-is.
+        package_ids = _authored_package_ids()
     except Exception as exc:
         _die(exc)
         return
 
     for ss_item in sorted(skillset_list, key=lambda s: s["name"]):
         ss_key = ss_item["skillset_id"]
+        if ss_key in package_ids:
+            if ss_key not in existing_cfg.plugins:
+                err_console.print(
+                    f"[yellow][warn][/yellow] '{ss_key}' is an Agent Plugin package, which cannot be exported "
+                    "as a skillset — add it under `plugins:` with a source directory to seed it."
+                )
+            ss_package += 1
+            continue
         try:
             skills_data = _list_skills(ss_item["skillset_id"])
 
@@ -1638,7 +1669,7 @@ def export_cmd(config: str, dry_run: bool) -> None:
         f"reports: exported={exported} failed={failed}  "
         f"workflows: exported={len(new_workflows)} failed={workflow_failed}  "
         f"toolsets: exported={ts_exported} failed={ts_failed} builtin_skipped={ts_builtin}  "
-        f"skillsets: exported={ss_exported} failed={ss_failed}  "
+        f"skillsets: exported={ss_exported} failed={ss_failed} package_skipped={ss_package}  "
     )
 
     if dry_run:

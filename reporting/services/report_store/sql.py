@@ -1003,7 +1003,7 @@ class SQLModelReportStore(ReportStore):
         logger.info("SQL report store tables initialised")
 
     async def _migrate_legacy_skillsets(self) -> None:
-        """Serialize and create canonical packages for skillsets predating plugins."""
+        """Serialize and reconcile canonical packages for skillsets predating plugins."""
         # Checked before the lock: every worker runs startup on every boot, and
         # once a deployment holds no legacy skillsets there is nothing to
         # serialize -- so the common path is one query, not a lock plus a scan.
@@ -1015,31 +1015,26 @@ class SQLModelReportStore(ReportStore):
             return
         async with engine.begin() as connection:
             # Every web worker runs startup. Keep the projection single-writer
-            # so its check-and-create sequence cannot race another worker.
+            # so its check-and-publish sequence cannot race another worker.
             await connection.execute(text("SELECT pg_advisory_xact_lock(hashtext('seizu-plugin-legacy-migration'))"))
             await self._migrate_legacy_skillsets_unlocked()
 
     async def _migrate_legacy_skillsets_unlocked(self) -> None:
-        """Create missing canonical packages while the startup lock is held."""
-        from reporting.services.plugin_packages import legacy_skillset_package
+        """Reconcile projection-owned packages while the startup lock is held.
+
+        Reconciling rather than only creating is what carries a change to *what*
+        the projection serializes into deployments whose packages already exist:
+        an unchanged skillset re-projects to the same digest and publishes
+        nothing, so the steady state is still one read per skillset.
+        """
+        from reporting.services.report_store import reconcile_legacy_projection
 
         for skillset in await self.list_skillsets():
-            existing = await self.get_plugin(skillset.skillset_id)
-            if existing is not None:
-                continue
-            parsed = legacy_skillset_package(skillset, await self.list_skills(skillset.skillset_id))
-            if not parsed.valid:
-                logger.error("Could not migrate legacy skillset %s to a plugin", skillset.skillset_id)
-                continue
-            await self.publish_plugin(
-                parsed.plugin_id,
-                parsed.manifest,
-                parsed.files,
-                parsed.skills,
-                [item.model_dump() for item in parsed.diagnostics],
-                parsed.package_digest,
+            await reconcile_legacy_projection(
+                self,
+                skillset.skillset_id,
                 skillset.updated_by or skillset.created_by,
-                "Migrated from legacy skillset",
+                "Projected from legacy skillset",
             )
 
     async def list_reports(self, user_id: str | None = None) -> list[ReportListItem]:

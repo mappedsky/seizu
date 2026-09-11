@@ -863,9 +863,28 @@ async def delete_skill(skill_id: str) -> bool:
 
 async def _sync_legacy_skillset(skillset_id: str, user_id: str, comment: str) -> None:
     """Publish the package projection after a legacy compatibility write."""
+    await reconcile_legacy_projection(get_store(), skillset_id, user_id, comment)
+
+
+async def reconcile_legacy_projection(
+    store: ReportStore,
+    skillset_id: str,
+    user_id: str,
+    comment: str,
+) -> None:
+    """Bring one legacy skillset's package projection up to date.
+
+    The projection is derived data: the legacy skillset is the source of truth,
+    and a package the projection owns is republished whenever re-projecting it
+    yields a different digest. That is what heals a projection serialized by an
+    older release -- startup calls this for every legacy skillset, so a fix to
+    what the projection writes reaches deployments that never edit the skill.
+
+    A package whose current revision is *not* the projection's is left alone: it
+    has been published over, and the legacy record no longer owns it.
+    """
     from reporting.services.plugin_packages import legacy_skillset_package
 
-    store = get_store()
     existing = await store.get_plugin(skillset_id)
     if existing and not await _is_projection_owned_plugin(store, existing):
         return

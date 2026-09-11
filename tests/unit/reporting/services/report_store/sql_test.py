@@ -3371,3 +3371,160 @@ async def test_model_profile_default_cannot_be_disabled_without_replacement(stor
             _model_profile_data(enabled=False, is_default=True),
             "admin",
         )
+
+
+async def test_a_legacy_skill_write_projects_dependencies_the_resolver_can_read(store):
+    """A legacy skill's `tools_required` survives the trip through a package.
+
+    The legacy record is the source of truth and the package is derived, so a
+    write is only correct if what the projection serializes is what the skill
+    resolver reads back. It was not: bare names were written and read as the
+    consuming client's own built-ins, leaving the rendered skill with no tools.
+    """
+    from reporting.services import mcp_runtime
+    from reporting.services import report_store as report_store_module
+
+    with patch.object(report_store_module, "get_store", return_value=store):
+        await report_store_module.create_skillset("skill_authoring", "Authoring", "d", True, "u1")
+        await report_store_module.create_skill(
+            "skill_authoring",
+            "authoring_workflow",
+            "Authoring workflow",
+            "Create or update a skill",
+            "Do the work.",
+            [],
+            [],
+            ["skillsets__create_skill", "graph__validate_query"],
+            True,
+            "u1",
+        )
+
+    projected = await store.get_enabled_plugin_skill("skill_authoring", "authoring_workflow")
+    assert projected.allowed_tools == [
+        "mcp__seizu__skillsets__create_skill",
+        "mcp__seizu__graph__validate_query",
+    ]
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
+        projected,
+        {"skillsets__create_skill", "graph__validate_query"},
+    )
+    assert resolved == ["skillsets__create_skill", "graph__validate_query"]
+    assert missing == []
+
+    # The legacy view keeps the bare names its own consumers expect.
+    assert (await store.get_skill("authoring_workflow")).tools_required == [
+        "skillsets__create_skill",
+        "graph__validate_query",
+    ]
+
+
+async def test_startup_reconciles_a_projection_serialized_by_an_older_release(store):
+    """Startup republishes a projection whose serialization has since changed.
+
+    Only creating the missing ones left every deployment that had already
+    migrated stuck on whatever the old release wrote, with no path to the fix
+    short of editing each skill by hand.
+    """
+    from reporting.services.plugin_packages import parse_package
+
+    skillset = await store.create_skillset(
+        skillset_id="skill_authoring",
+        name="Authoring",
+        description="d",
+        enabled=True,
+        created_by="u1",
+    )
+    await store.create_skill(
+        skillset_id="skill_authoring",
+        skill_id="authoring_workflow",
+        name="Authoring workflow",
+        description="Create or update a skill",
+        template="Do the work.",
+        parameters=[],
+        triggers=[],
+        tools_required=["skillsets__create_skill"],
+        enabled=True,
+        created_by="u1",
+    )
+
+    # Stand in for a package an older release serialized: identical but for the
+    # unqualified dependency it used to write.
+    current = legacy_skillset_package(skillset, await store.list_skills("skill_authoring"))
+    stale_files = [
+        PluginFile(
+            path=item.path,
+            content=item.content.replace(b"mcp__seizu__skillsets__create_skill", b"skillsets__create_skill"),
+            media_type=item.media_type,
+        )
+        for item in current.files
+    ]
+    stale = parse_package(stale_files)
+    assert stale.skills[0].allowed_tools == ["skillsets__create_skill"]
+    published = await store.publish_plugin(
+        stale.plugin_id,
+        stale.manifest,
+        stale.files,
+        stale.skills,
+        [],
+        stale.package_digest,
+        "u1",
+    )
+
+    await store._migrate_legacy_skillsets_unlocked()  # noqa: SLF001
+
+    healed = await store.get_plugin("skill_authoring")
+    assert healed.current_revision == published.current_revision + 1
+    skill = await store.get_enabled_plugin_skill("skill_authoring", "authoring_workflow")
+    assert skill.allowed_tools == ["mcp__seizu__skillsets__create_skill"]
+
+    # Reconciling is idempotent: a settled projection publishes nothing, so
+    # this does not add a revision on every worker's every boot.
+    await store._migrate_legacy_skillsets_unlocked()  # noqa: SLF001
+    assert (await store.get_plugin("skill_authoring")).current_revision == healed.current_revision
+
+
+async def test_startup_leaves_a_package_published_over_the_projection_alone(store):
+    """A package the projection no longer owns is not reverted to the legacy record."""
+    from reporting.services.plugin_packages import parse_package
+
+    await store.create_skillset(
+        skillset_id="skill_authoring",
+        name="Authoring",
+        description="d",
+        enabled=True,
+        created_by="u1",
+    )
+    manifest = {
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+        "name": "skill-authoring",
+        "version": "1.0.0",
+        "description": "Hand-authored replacement",
+        "extensions": {"com.mappedsky.seizu": {"skills": {}}},
+    }
+    owned = parse_package(
+        [
+            PluginFile(path="plugin.json", content=json.dumps(manifest).encode(), media_type="application/json"),
+            PluginFile(
+                path="skills/authoring-workflow/SKILL.md",
+                content=b"---\nname: authoring-workflow\ndescription: Hand written\n---\nDo it.",
+                media_type="text/markdown",
+            ),
+        ]
+    )
+    assert owned.valid
+    published = await store.publish_plugin(
+        owned.plugin_id,
+        owned.manifest,
+        owned.files,
+        owned.skills,
+        [],
+        owned.package_digest,
+        "u1",
+    )
+
+    await store._migrate_legacy_skillsets_unlocked()  # noqa: SLF001
+
+    unchanged = await store.get_plugin("skill_authoring")
+    assert unchanged.current_revision == published.current_revision
+    assert unchanged.package_digest == owned.package_digest

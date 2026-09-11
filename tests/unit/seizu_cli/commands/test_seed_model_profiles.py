@@ -105,6 +105,7 @@ def test_export_model_profiles_round_trips_and_preserves_yaml_key(mock_client: M
         "/api/v1/workflows": {"workflows": []},
         "/api/v1/toolsets": {"toolsets": []},
         "/api/v1/skillsets": {"skillsets": []},
+        "/api/v1/plugins": {"plugins": []},
     }[path]
 
     seed.export_cmd(str(config_path), dry_run=False)

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "description": "Self-referential workflows for inspecting, designing, and maintaining Seizu skillsets, skills, toolsets, and Cypher-backed tools through the skillsets/toolsets MCP tools, validating tool queries before saving them.",
+  "extensions": {
+    "com.mappedsky.seizu": {
+      "skills": {
+        "skill-authoring-workflow": {
+          "aliases": [
+            "skill_authoring__skill_authoring_workflow"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "The skillset or skill authoring change to design or apply.",
+              "name": "request",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Existing or proposed skillset ID, if known.",
+              "name": "target_skillset_id",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Existing or proposed skill ID, if known.",
+              "name": "target_skill_id",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": false,
+              "description": "When true, produce payloads without creating or updating anything. Defaults to false (apply); set true only to preview a plan.",
+              "name": "dry_run",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "title": "Skill Authoring Workflow",
+          "triggers": [
+            "create a Seizu skill",
+            "update a skill prompt",
+            "add a skillset",
+            "create a Seizu tool",
+            "add a toolset",
+            "update a Cypher tool",
+            "improve this skill",
+            "maintain Seizu skills"
+          ]
+        },
+        "skillset-inventory-review": {
+          "aliases": [
+            "skill_authoring__skillset_inventory_review"
+          ],
+          "parameters": [
+            {
+              "default": "all skillsets",
+              "description": "Skillset, skill, domain, or review goal to focus on.",
+              "name": "focus",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": false,
+              "description": "Include version history checks for relevant skillsets and skills.",
+              "name": "include_versions",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "title": "Skillset Inventory Review",
+          "triggers": [
+            "review Seizu skills",
+            "audit skillsets",
+            "inspect skill definitions",
+            "improve skill prompts"
+          ]
+        }
+      }
+    }
+  },
+  "name": "skill-authoring",
+  "version": "1.0.0"
+}

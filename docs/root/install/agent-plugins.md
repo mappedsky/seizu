@@ -97,6 +97,16 @@ rendered skill carries that host's resolved names.
 cannot be claimed by anything else. Any other server must be declared in the
 package's `mcp.json`.
 
+Validation warns about the spellings that will not resolve, so a mistake here
+shows up when you publish rather than as a skill that renders with no tools:
+
+| Warning | What it means |
+|---------|---------------|
+| `unqualified_tool` | A bare `graph__query`, or Seizu's internal `ext__github__search_code`. Both read as the consuming client's own built-in and are ignored. Write `mcp__seizu__graph__query` or `mcp__github__search_code`. |
+| `undeclared_mcp_server` | The entry names a server that `mcp.json` does not declare, so the skill stays unavailable until that server resolves. |
+
+Neither is an error: the package still installs, and the skill still renders.
+
 **Seizu never connects to the address a package declares.** It only ever talks
 to the external MCP proxies an operator has configured, so the declared URL is
 at most a hint used to work out which proxy a server means.
@@ -196,3 +206,35 @@ compare, so two revisions that both declare `1.0.0` are indistinguishable to
 them. Publishing changed contents under an unchanged version therefore records a
 non-blocking `unchanged_package_version` warning on the revision, visible in the
 plugin's diagnostics.
+
+## Legacy skillsets
+
+Skillsets and skills predate packages and remain as a compatibility surface.
+Seizu serializes each legacy skillset into a package on startup and whenever
+one is edited, so a skill is always rendered from a package either way. That
+projection is lossy in one direction that matters: the legacy shape has nowhere
+to carry an `mcp.json`, so a skill of a legacy skillset can never depend on
+another MCP server's tools.
+
+Authoring a package directly is the way to avoid that. To move an existing
+skillset:
+
+1. Create `skills/<portable-name>/SKILL.md` per skill, with `name`,
+   `description` and `allowed-tools` in the front matter. Qualify every
+   dependency: a skillset's bare `graph__query` becomes
+   `mcp__seizu__graph__query`, and its `ext__github__search_code` becomes
+   `mcp__github__search_code` plus an `mcp.json` entry for `github`.
+2. Move the skill's parameters, triggers and display title into `plugin.json`
+   under the Seizu extension, and keep the old `skillset__skill` name as an
+   `alias` so existing references still resolve.
+3. Refer to inputs by name in the instructions rather than substituting them —
+   the values arrive in a rendered `## Inputs` block, which keeps the body the
+   same bytes on every run.
+4. Name the package so it derives the same Seizu ID (`cve-response` gives
+   `cve_response`), add it to the seed's `plugins:` section, and delete the
+   `skillsets:` entry. Seeding never deletes, so remove the old skillset record
+   itself through the UI or the API.
+
+Publishing a package over a projected skillset takes ownership of that ID:
+startup stops re-projecting it, and `seizu export` stops writing it back out as
+a skillset.

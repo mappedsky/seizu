@@ -1,0 +1,247 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "description": "Workflows for creating, updating, cloning, pinning, and publishing Seizu reports through the built-in reports MCP tools.",
+  "extensions": {
+    "com.mappedsky.seizu": {
+      "skills": {
+        "clone-reports": {
+          "aliases": [
+            "report_authoring__clone_reports"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "The cloning goal or context.",
+              "name": "request",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Report ID to clone, if known.",
+              "name": "source_report_id",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Name for the cloned report.",
+              "name": "clone_name",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": false,
+              "description": "When true, show the clone payload without creating the clone.",
+              "name": "dry_run",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "title": "Clone Reports",
+          "triggers": [
+            "clone a Seizu report",
+            "copy a report",
+            "duplicate a report",
+            "make a report review copy"
+          ]
+        },
+        "create-update-reports": {
+          "aliases": [
+            "report_authoring__create_update_reports"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "The report create or update request to design or apply.",
+              "name": "request",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Existing report ID to update, if known.",
+              "name": "target_report_id",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Desired new report name, or an existing report name to look up.",
+              "name": "report_name",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": true,
+              "description": "Use a temporary clone to review updates before changing the original report.",
+              "name": "use_review_clone",
+              "required": false,
+              "type": "boolean"
+            },
+            {
+              "default": "",
+              "description": "Optional explicit name for the temporary review clone.",
+              "name": "review_clone_name",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": true,
+              "description": "Delete the temporary review clone after its config has been applied to the original.",
+              "name": "delete_review_clone_after_apply",
+              "required": false,
+              "type": "boolean"
+            },
+            {
+              "default": false,
+              "description": "When true, produce payloads without creating, cloning, updating, or deleting reports.",
+              "name": "dry_run",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "title": "Create or Update Reports",
+          "triggers": [
+            "create a Seizu report",
+            "update a Seizu report",
+            "modify a report safely",
+            "review report changes in a clone",
+            "test report updates before applying",
+            "add panels to a report"
+          ]
+        },
+        "delete-reports": {
+          "aliases": [
+            "report_authoring__delete_reports"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "The deletion request and why the report should go.",
+              "name": "request",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Report ID to delete, if known.",
+              "name": "target_report_id",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Report name to look up when the ID is not known.",
+              "name": "report_name",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": false,
+              "description": "When true, show the delete payload without deleting the report.",
+              "name": "dry_run",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "title": "Delete Reports",
+          "triggers": [
+            "delete a Seizu report",
+            "delete this report",
+            "remove a report",
+            "discard a draft report",
+            "clean up a leftover review clone"
+          ]
+        },
+        "pin-reports": {
+          "aliases": [
+            "report_authoring__pin_reports"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "The pinning or unpinning request.",
+              "name": "request",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Report ID to pin or unpin, if known.",
+              "name": "target_report_id",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": true,
+              "description": "True to pin the report; false to unpin it.",
+              "name": "pinned",
+              "required": false,
+              "type": "boolean"
+            },
+            {
+              "default": false,
+              "description": "When true, show the pin payload without applying it.",
+              "name": "dry_run",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "title": "Pin Reports",
+          "triggers": [
+            "pin a Seizu report",
+            "unpin a Seizu report",
+            "add report to dashboard navigation",
+            "remove report from dashboard navigation"
+          ]
+        },
+        "publish-reports": {
+          "aliases": [
+            "report_authoring__publish_reports"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "The publish or unpublish request.",
+              "name": "request",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Report ID to publish or unpublish, if known.",
+              "name": "target_report_id",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": true,
+              "description": "True to make the report public; false to make it private.",
+              "name": "publish",
+              "required": false,
+              "type": "boolean"
+            },
+            {
+              "default": false,
+              "description": "When true, show the visibility payload without applying it.",
+              "name": "dry_run",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "title": "Publish Reports",
+          "triggers": [
+            "publish a Seizu report",
+            "unpublish a Seizu report",
+            "make a report public",
+            "make a report private",
+            "change report visibility"
+          ]
+        }
+      }
+    }
+  },
+  "name": "report-authoring",
+  "version": "1.1.0"
+}

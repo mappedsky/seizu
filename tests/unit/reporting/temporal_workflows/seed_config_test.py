@@ -4,11 +4,34 @@ import yaml
 
 from reporting.schema.external_mcp import parse_external_mcp_proxies
 from reporting.services import external_mcp, mcp_runtime
-from reporting.services.plugin_packages import files_from_directory, mcp_tool_ref, parse_package
+from reporting.services.mcp_builtins import registered_tool_names
+from reporting.services.plugin_packages import (
+    SEIZU_MCP_SERVER_NAME,
+    ParsedPlugin,
+    files_from_directory,
+    mcp_tool_ref,
+    parse_package,
+)
+from reporting.temporal_workflows import activities
 
 
 def _activity(workflow: dict, stage: int, position: int = 0) -> dict:
     return workflow["stages"][stage]["activities"][position]
+
+
+def _seed_config() -> tuple[Path, dict]:
+    config_path = Path(__file__).parents[4] / ".config/dev/seizu/reporting-dashboard.yaml"
+    return config_path, yaml.safe_load(config_path.read_text())
+
+
+def _seeded_package(plugin_id: str) -> ParsedPlugin:
+    """Parse the package the seed installs for one plugin id."""
+    config_path, config = _seed_config()
+    source = config_path.parent / config["plugins"][plugin_id]["source"]
+    parsed = parse_package(files_from_directory(source))
+    assert parsed.valid, [item.message for item in parsed.diagnostics]
+    assert parsed.plugin_id == plugin_id
+    return parsed
 
 
 def test_portable_plugin_dependencies_match_development_proxy_aliases(mocker) -> None:
@@ -134,13 +157,13 @@ def test_cve_repo_workflow_uses_new_security_issue_observation() -> None:
 
 
 def test_cve_severity_skill_declares_the_tools_in_its_workflow() -> None:
-    config_path = Path(__file__).parents[4] / ".config/dev/seizu/reporting-dashboard.yaml"
-    config = yaml.safe_load(config_path.read_text())
-    skill = config["skillsets"]["cve_response"]["skills"]["cve_severity_analysis"]
+    parsed = _seeded_package("cve_response")
+    skill = next(item for item in parsed.skills if item.skill_id == "cve_severity_analysis")
 
-    assert skill["tools_required"] == [
-        "cve_analysis__get_recent_cves",
-        "cve_analysis__count_cves_by_severity",
+    # One vocabulary for every dependency, Seizu's own included (AGT-042).
+    assert skill.allowed_tools == [
+        "mcp__seizu__cve_analysis__get_recent_cves",
+        "mcp__seizu__cve_analysis__count_cves_by_severity",
     ]
 
 
@@ -178,3 +201,94 @@ def test_cve_dependency_remediation_workflow() -> None:
         "output": "remediation_results",
         "parameters": {},
     }
+
+
+def test_the_seed_ships_skills_as_packages_rather_than_legacy_skillsets() -> None:
+    """Legacy skillsets are a compatibility surface, not the shape to seed in.
+
+    A skillset is projected into a package before it can be rendered, and the
+    projection cannot express an `mcp.json`, so an external dependency in one is
+    unreachable. Authoring the package directly is what the plugin surface is
+    for.
+    """
+    _config_path, config = _seed_config()
+
+    assert config.get("skillsets") is None
+    assert set(config["plugins"]) == {
+        "cve_response",
+        "github_security_investigations",
+        "portable_security_review",
+        "report_authoring",
+        "skill_authoring",
+    }
+
+
+def test_every_seeded_package_declares_seizu_tools_that_exist() -> None:
+    """A dependency Seizu recognizes must name a real tool, or the skill is unavailable.
+
+    Resolution is by exact name against the caller's inventory (AGT-036), so a
+    typo or a renamed tool takes the whole skill out of every user's list with
+    no other symptom. The seed's own toolsets are part of that inventory.
+    """
+    _config_path, config = _seed_config()
+    # The whole registry, not what this environment enables: a package is
+    # portable, so a dependency on a tool some deployments switch off is a
+    # configuration fact rather than a typo. CI runs with the sandbox off.
+    available = set(registered_tool_names())
+    available |= {
+        f"{toolset_id}__{tool_id}"
+        for toolset_id, toolset in config["toolsets"].items()
+        for tool_id in toolset.get("tools", {})
+    }
+
+    unknown: list[str] = []
+    for plugin_id in config["plugins"]:
+        for skill in _seeded_package(plugin_id).skills:
+            for entry in skill.allowed_tools:
+                ref = mcp_tool_ref(entry)
+                assert ref is not None, f"{plugin_id}/{skill.skill_id}: {entry!r} names no MCP server"
+                server_name, tool_name = ref
+                if server_name == SEIZU_MCP_SERVER_NAME and tool_name not in available:
+                    unknown.append(f"{plugin_id}/{skill.skill_id}: {entry}")
+
+    assert unknown == []
+
+
+def test_every_seeded_package_declares_the_mcp_servers_it_depends_on() -> None:
+    """An external dependency resolves only through the package's own mcp.json."""
+    _config_path, config = _seed_config()
+
+    for plugin_id in config["plugins"]:
+        for skill in _seeded_package(plugin_id).skills:
+            for entry in skill.allowed_tools:
+                server_name, _tool = mcp_tool_ref(entry)
+                if server_name == SEIZU_MCP_SERVER_NAME:
+                    continue
+                assert server_name in skill.mcp_servers, f"{plugin_id}/{skill.skill_id}: {entry}"
+
+
+def test_the_cve_workflow_targets_a_seeded_package_skill() -> None:
+    """`cve_repo_report` renders one named skill; the seed has to keep supplying it."""
+    parsed = _seeded_package(activities._CVE_SKILLSET_ID)  # noqa: SLF001
+
+    assert activities._CVE_SKILL_ID in {skill.skill_id for skill in parsed.skills}  # noqa: SLF001
+
+
+def test_report_deletion_is_discoverable_from_the_skill_listing() -> None:
+    """A capability only in a skill's body is a capability the model will not find.
+
+    Under progressive disclosure the agent chooses from descriptions and
+    triggers, not bodies. `reports__delete` lived only inside the create/update
+    skill's clone-cleanup step, so "delete this report" was answered with "I
+    can't delete reports" — the skill was never loaded, and no approval was ever
+    offered.
+    """
+    parsed = _seeded_package("report_authoring")
+    deleting = [
+        skill
+        for skill in parsed.skills
+        if "delete" in skill.description.lower() or any("delete" in item.lower() for item in skill.triggers)
+    ]
+
+    assert deleting, "no report skill advertises deletion in its description or triggers"
+    assert any("mcp__seizu__reports__delete" in skill.allowed_tools for skill in deleting)
