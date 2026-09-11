@@ -35,6 +35,7 @@ async def get_config() -> dict:
         "workflow_activity_definitions": workflow_activity_definitions,
         # Feature flags consumed by the frontend to show/hide whole features.
         "features": {
+            "chat_elicitation": settings.CHAT_ENABLED and settings.MCP_EXTERNAL_ELICITATION_ENABLED,
             "chat": settings.CHAT_ENABLED,
             "chat_schedules": settings.CHAT_ENABLED and settings.CHAT_SCHEDULES_ENABLED,
             # Only gateways a user can connect for themselves have a status page

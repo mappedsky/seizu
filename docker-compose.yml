@@ -462,6 +462,9 @@ services:
       # token is the convenient default used by the documentation; production
       # orchestrators may inject any token_env referenced by the JSON config.
       - MCP_EXTERNAL_ENABLED
+      - MCP_EXTERNAL_ELICITATION_ENABLED
+      - CHAT_ELICITATION_TTL_SECONDS
+      - CHAT_ELICITATION_MAX_FIELDS
       - MCP_EXTERNAL_PROXIES
       - MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE
       - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS
@@ -744,6 +747,9 @@ services:
       # External MCP servers used by the chat agent (also passed to the worker,
       # which is where interactive and headless turns actually execute).
       - MCP_EXTERNAL_ENABLED
+      - MCP_EXTERNAL_ELICITATION_ENABLED
+      - CHAT_ELICITATION_TTL_SECONDS
+      - CHAT_ELICITATION_MAX_FIELDS
       - MCP_EXTERNAL_PROXIES
       - MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE
       - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS

@@ -17,6 +17,65 @@ does not re-export them from `/api/v1/mcp`. Tool names are rewritten as
 `ext__<proxy-name>__<remote-tool-name>`, preventing collisions with built-ins,
 stored toolsets, or another proxy.
 
+## In-chat input requests
+
+Set `MCP_EXTERNAL_ELICITATION_ENABLED=true` on the web and Temporal worker
+services, and opt each proxy into `"elicitation": {"form": true, "url": true}`.
+Both kinds default to false. URL requests also require `user_authorization` with
+a `reauthorize_url` on the same origin as the requested browser URL.
+
+Interactive modern MCP calls display input cards in chat. Answer every card in
+a group; submitting the last answer resumes the conversation. After a reload,
+an answered card's **Continue chat** button resumes without resubmitting values.
+The call uses its saved arguments and continuation state and checks permissions
+and action approvals again. Expired or rejected upstream continuations require
+a new request. Decline and Cancel are final decisions for that request.
+
+`CHAT_ELICITATION_TTL_SECONDS` controls pending and answered request lifetime
+(default 3600 seconds, bounded to 1–86400). `CHAT_ELICITATION_MAX_FIELDS` controls
+the maximum field count (default and hard ceiling 32). Forms support flat
+strings, numbers, integers, booleans and bounded enums, with at most 4096
+characters per string. Unsupported schemas are rejected. A call may request
+eight inputs; live limits are sixteen per turn and sixty-four per thread.
+
+Submitted values go to the external server. They are stored until consumption
+or expiry collection and do not enter model message history; literal echoes in
+tool responses are redacted. Database backups may retain earlier copies.
+Deleting a chat removes its input records. Expired rows are collected while
+interactive elicitation is enabled.
+
+Legacy callbacks, discovery, scheduled runs and other detached work retain the
+Chat Connections recovery flow. Sandbox subagents do not advertise forms. If
+one nevertheless receives an input request, it returns with its existing work;
+a later delegation can continue the matching call after the owner answers.
+
+### Local elicitation fixture
+
+Run the unauthenticated fixture only on a development machine:
+
+```bash
+docker compose run --rm --no-deps --name seizu-elicitation-demo -p 127.0.0.1:8099:8099 seizu uv run --frozen --no-sync python scripts/elicitation_mcp_server.py
+```
+
+Append this entry to `MCP_EXTERNAL_PROXIES`, enable
+`MCP_EXTERNAL_ELICITATION_ENABLED`, and recreate the web and Temporal worker:
+
+```json
+{
+  "name": "elicitation-demo",
+  "url": "http://seizu-elicitation-demo:8099/mcp/",
+  "transport": "streamable_http",
+  "require_confirmation": false,
+  "elicitation": {"form": true, "url": true},
+  "user_authorization": {"reauthorize_url": "http://localhost:8099/complete"}
+}
+```
+
+Ask chat to call `ext__elicitation-demo__ask_form` or
+`ext__elicitation-demo__ask_url`. Submit, decline, cancel, and reload with a
+pending card. The fixture returns the action without echoing field values.
+Use the same proxy in a scheduled chat to check its recovery-only behavior.
+
 ## Proxy configuration
 
 Set `MCP_EXTERNAL_ENABLED=true` and `MCP_EXTERNAL_PROXIES` to a JSON array. The web service and

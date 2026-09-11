@@ -230,3 +230,25 @@ without assuming protocol URLs carry an expiry. Database copies/backups may
 retain old recovery URLs, so these must never themselves authorize account
 linking or carry access/refresh tokens. The configuration fingerprint and URL
 origin validation apply again at read time.
+
+## STO-014 — Elicitation groups are claimed together and bounded per owner thread
+
+**Applies to:** `chat_elicitations`, migration `0014_chat_elicitations`
+
+Each input request has an owner-scoped row; requests from one MCP result share a
+group ID. Rows carry the original arguments, argument hash, proxy snapshot and
+continuation state. Responses are decided once with a conditional update.
+Execution locks and consumes all answered rows together, clearing stored response
+values in that transaction. Expiry applies to accepted responses too.
+
+Creation locks the owning interactive session before counting live requests:
+eight per call, sixteen per turn, sixty-four per thread. Consumed rows count
+until expiry. Session deletion removes its rows; the enabled chat elicitation
+sweep deletes expired rows in bounded batches. Migration DDL is inspector-guarded
+for fresh and upgraded databases (STO-004).
+
+**Why:** independent claims could replay a multi-question continuation with only
+some answers; independent cap checks let parallel workers exceed the UI bound.
+Separating responses from public projections prevents a reload or stream replay
+from disclosing them to model state. Clearing on claim narrows retention without
+treating an uncertain remote outcome as permission to retry.

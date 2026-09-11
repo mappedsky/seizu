@@ -63,6 +63,8 @@ import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import ChatInput from 'src/components/ChatInput';
 import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
+import ChatElicitationCard from 'src/components/ChatElicitationCard';
+import { useChatElicitations } from 'src/hooks/useChatElicitations';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { pageContentSx } from 'src/theme/layout';
 
@@ -1091,6 +1093,10 @@ export default function ChatInterface() {
               ? body.resume_confirmation_id
               : resumeConfirmationIdRef.current;
           const continueResponse = body?.continue_response === true;
+          const resumeElicitationId =
+            typeof body?.resume_elicitation_id === 'string'
+              ? body.resume_elicitation_id
+              : null;
           const continueMessageId =
             typeof body?.continue_message_id === 'string'
               ? body.continue_message_id
@@ -1098,13 +1104,16 @@ export default function ChatInterface() {
           resumeConfirmationIdRef.current = null;
           return {
             message:
-              resumeConfirmationId || continueResponse
+              resumeConfirmationId || resumeElicitationId || continueResponse
                 ? ''
                 : latestUserText(messages),
             ...(resumeConfirmationId
               ? { resume_confirmation_id: resumeConfirmationId }
               : {}),
             ...(continueResponse ? { continue_response: true } : {}),
+            ...(resumeElicitationId
+              ? { resume_elicitation_id: resumeElicitationId }
+              : {}),
             ...(continueMessageId
               ? { continue_message_id: continueMessageId }
               : {}),
@@ -1508,6 +1517,11 @@ export default function ChatInterface() {
     if (!pendingAttach || activeThreadId !== pendingAttach.threadId) return;
     touchSession(activeThreadId);
   }, [pendingAttach, activeThreadId, touchSession]);
+
+  const elicitations = useChatElicitations(
+    useFeature('chat_elicitation') ? activeThreadId : null,
+    busy,
+  );
 
   const handleConfirmationDecision = useCallback(
     async (
@@ -2193,6 +2207,50 @@ export default function ChatInterface() {
                       </Box>
                     );
                   })}
+                  {elicitations.items.map((item) => (
+                    <ChatElicitationCard
+                      key={item.elicitation_id}
+                      item={item}
+                      busy={busy}
+                      onRespond={async (action, content) => {
+                        await elicitations.respond(
+                          item.elicitation_id,
+                          action,
+                          content,
+                        );
+                        if (
+                          !elicitations.items.some(
+                            (other) =>
+                              other.group_id === item.group_id &&
+                              other.elicitation_id !== item.elicitation_id &&
+                              other.status === 'pending',
+                          )
+                        ) {
+                          await sendMessage(
+                            hiddenResumeMessage(item.elicitation_id),
+                            {
+                              body: {
+                                resume_elicitation_id: item.elicitation_id,
+                              },
+                            },
+                          );
+                        }
+                      }}
+                      onResume={async () => {
+                        await sendMessage(
+                          hiddenResumeMessage(item.elicitation_id),
+                          {
+                            body: {
+                              resume_elicitation_id: item.elicitation_id,
+                            },
+                          },
+                        );
+                      }}
+                    />
+                  ))}
+                  {elicitations.error && (
+                    <Alert severity="error">{elicitations.error}</Alert>
+                  )}
                   {busy ? (
                     <Box
                       sx={{

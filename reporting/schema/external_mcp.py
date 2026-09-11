@@ -107,6 +107,12 @@ class ExternalMCPConnectionsResponse(BaseModel):
     connections: list[ExternalMCPConnection]
 
 
+class ExternalMCPElicitationOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    form: bool = False
+    url: bool = False
+
+
 class ExternalMCPProxy(BaseModel):
     """One operator-configured external MCP proxy.
 
@@ -129,6 +135,7 @@ class ExternalMCPProxy(BaseModel):
     token_env: str | None = None
     client_credentials: ExternalMCPClientCredentials | None = None
     user_authorization: ExternalMCPUserAuthorization | None = None
+    elicitation: ExternalMCPElicitationOptions = Field(default_factory=ExternalMCPElicitationOptions)
     require_confirmation: bool = True
     enabled: bool = True
     connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)

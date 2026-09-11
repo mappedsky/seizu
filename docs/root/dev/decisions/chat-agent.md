@@ -3079,3 +3079,53 @@ bounding a patient caller. The existing TTL gives operators one window to tune.
 The new budget refusal is an MCP error and a distinct chat block reason.
 Existing pending/denied result `isError` semantics remain unchanged; changing
 those for every client is separate from the denial policy in this issue.
+
+## AGT-055 — External input parks a call and resumes through an owner action
+
+**Applies to:** `chat_elicitations`, `external_mcp`, chat resume commands,
+orchestrated step results, `ChatElicitationCard`
+
+Interactive MCP 2026-07-28 input requests are stored as a bounded group, end
+the turn, and resume with the original arguments and opaque continuation state
+after the owner answers. Legacy callbacks still cancel. Form capability is
+advertised only for an opted-in interactive top-level or orchestrated call;
+discovery, detached runs, and sandbox subagents keep it stripped. URL capability
+remains available for AGT-048 recovery, including when interactive elicitation
+is disabled. Sampling and roots input requests are unsupported.
+
+**Why:** a Temporal activity has no inbound form channel (AGT-008), and a legacy
+callback needs an open upstream session. The modern continuation survives both
+the activity ending and a browser reload without holding a worker slot. Reusing
+the confirmation pause keeps distributed worker results portable: the coordinator
+resumes the parked call without restarting the remote step's model loop.
+
+Responses are owner-only data, never messages or tool arguments in model state.
+Only the elicitation IDs and a fixed explanation enter the transcript. The
+response is forwarded through `input_responses`; literal echoes are redacted
+from returned tool text. Form schemas are a bounded flat primitive subset,
+rendered as escaped text. URLs retain the operator-pinned origin and are
+revalidated with the proxy configuration before display.
+
+**Why:** an upstream may request sensitive values or supply hostile schemas.
+Global and per-proxy opt-ins establish which operators enabled that surface;
+they do not turn schemas into trusted UI or responses into model context.
+
+Replay checks current permissions, current tool discovery and confirmation
+policy, and atomically consumes the group once. An approval needed during
+resume is linked to the continuation, so approval cannot run a fresh call.
+Declined, cancelled and expired requests are terminal without re-prompting.
+Resumed reads undergo normal verification, but are not retried.
+
+**Why:** answering a form is not an authorization grant. Verification may reject
+evidence without repeating a call that may already have had effects. This
+refines AGT-048 only for owner-initiated interactive continuations; detached runs
+still never replay. A one-shot decline path needs no additional denial budget.
+
+A sandbox delegation that unexpectedly elicits records the request and returns.
+After the owner answers, a later delegation may consume the continuation for
+the exact same tool, arguments, owner, thread and proxy. Its sandbox files and
+receipts survive; its earlier model loop does not (SBX-005, SBX-008).
+
+**Why:** retaining or reconstructing a subagent transcript would introduce a
+second continuation lifecycle. The persistent sandbox already carries work
+into a new delegation.

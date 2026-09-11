@@ -623,7 +623,13 @@ def _forced_route(state: ChatState, config: RunnableConfig) -> str | None:
     # (and emits the cut-off/finish-reason that drives the "Continue response"
     # button) or resumes one confirmed tool call. The planner would replan from
     # scratch and drop the continuation, so never route these to orchestrate.
-    if _is_continuation_turn(state["messages"]) or _resume_confirmation_id(state["messages"]):
+    from reporting.services.chat_elicitations import resume_id as elicitation_resume_id
+
+    if (
+        _is_continuation_turn(state["messages"])
+        or _resume_confirmation_id(state["messages"])
+        or elicitation_resume_id(state["messages"])
+    ):
         return "simple"
     return None
 
@@ -1546,7 +1552,9 @@ async def _dispatch_batch_traced(state: ChatState, config: RunnableConfig) -> di
 
     # Resume path: a prior turn paused this plan on an action confirmation inside
     # a step. Execute the now-approved action(s) and fold the result back in.
-    resume_id = _resume_confirmation_id(state["messages"])
+    from reporting.services.chat_elicitations import resume_id as elicitation_resume_id
+
+    resume_id = _resume_confirmation_id(state["messages"]) or elicitation_resume_id(state["messages"])
     if resume_id and any(step["status"] == "awaiting" for step in plan):
         return await _resume_awaiting_steps(plan, results, iteration, current_user, session_key, writer)
 
@@ -1697,7 +1705,9 @@ async def _dispatch_batch_traced(state: ChatState, config: RunnableConfig) -> di
     # plan pauses (rather than verifying/retrying) until the user approves.
     merged_by_id = {result["step_id"]: result for result in merged}
     for step in batch:
-        if merged_by_id.get(step["id"], {}).get("awaiting_confirmation"):
+        if merged_by_id.get(step["id"], {}).get("awaiting_confirmation") or merged_by_id.get(step["id"], {}).get(
+            "awaiting_elicitation"
+        ):
             step["status"] = "awaiting"
     update: dict[str, Any] = {
         "plan": plan,
@@ -2252,6 +2262,44 @@ async def _resume_awaiting_steps(
         if step["status"] != "awaiting":
             continue
         result = results_by_id.setdefault(step["id"], {"step_id": step["id"]})
+        if result.get("awaiting_elicitation") and current_user is not None:
+            from reporting.services import chat_elicitations
+
+            remaining = []
+            outputs = list(result.get("elicitation_outputs", []))
+            failures = list(result.get("elicitation_failures", []))
+            for eid in result.get("elicitation_ids") or [result["elicitation_id"]]:
+                kind, output = await chat_elicitations.resume(eid, current_user, session_key)
+                if kind == "wait":
+                    result["elicitation_message"] = output
+                    try:
+                        ids = json.loads(output).get("elicitation_ids", [])
+                        eid = ids[0] if ids else eid
+                    except (ValueError, AttributeError):
+                        pass
+                    remaining.append(eid)
+                elif kind == "run":
+                    outputs.append(output)
+                else:
+                    failures.append(output)
+            result["elicitation_ids"] = remaining
+            result["elicitation_outputs"] = outputs
+            result["elicitation_failures"] = failures
+            if remaining:
+                result["elicitation_id"] = remaining[0]
+                continue
+            result.pop("awaiting_elicitation", None)
+            result["output"] = "\n\n".join(outputs)
+            result["blocked"] = None
+            # The verifier judges elicited results; it must not replay the calls.
+            step["no_retry"] = True
+            if failures:
+                step["status"] = "failed"
+                result["verify_reason"] = "\n".join(failures)
+                continue
+            if not result.get("awaiting_confirmation"):
+                step["status"] = "ran"
+                continue
         confirmation_id = result.get("confirmation_id")
         if current_user is None or not confirmation_id:
             step["status"] = "failed"
@@ -2264,9 +2312,23 @@ async def _resume_awaiting_steps(
             outcomes, errors, detail_events = await _execute_confirmations(to_run, current_user)
             for detail_data in detail_events:
                 _emit(writer, detail_data)
+            elicitation_ids = [
+                detail["elicitation_ids"][0] for detail in detail_events if detail.get("elicitation_ids")
+            ]
+            if elicitation_ids:
+                result.pop("awaiting_confirmation", None)
+                result["awaiting_elicitation"] = True
+                result["elicitation_id"] = elicitation_ids[0]
+                result["elicitation_ids"] = elicitation_ids
+                result["elicitation_outputs"] = [
+                    *result.get("elicitation_outputs", []),
+                    *(text for _, text in outcomes),
+                ]
+                result["elicitation_message"] = "An external server requested input. Answer its card to continue."
+                continue
             if outcomes:
                 combined = "\n\n".join(f"{name}:\n{_truncate_text(text, 4000)}" for name, text in outcomes)
-                result["output"] = combined
+                result["output"] = "\n\n".join([*result.get("elicitation_outputs", []), combined])
                 result["blocked"] = None
                 result.pop("awaiting_confirmation", None)
                 # The approved action ran; the verifier auto-passes it so the plan
@@ -2481,7 +2543,11 @@ def _conversation_context(messages: list[Any], *, max_chars: int) -> str:
             continue
         if isinstance(message, HumanMessage):
             kwargs = getattr(message, "additional_kwargs", None) or {}
-            if isinstance(kwargs, dict) and (kwargs.get("resume_confirmation_id") or kwargs.get("continue_response")):
+            if isinstance(kwargs, dict) and (
+                kwargs.get("resume_confirmation_id")
+                or kwargs.get("resume_elicitation_id")
+                or kwargs.get("continue_response")
+            ):
                 continue
             if not skipped_current_request:
                 # The turn being answered; it reaches every node on its own.
@@ -2634,6 +2700,10 @@ async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> 
     The sandbox is not this function's to close any more: it belongs to the
     dispatcher and outlives every step in the batch.
     """
+    from reporting.services import chat_elicitations
+
+    input_config_token = chat_elicitations.worker_config.set(kwargs.get("config") or {})
+    input_step_token = chat_elicitations.worker_step_id.set(str(step["id"]))
     required = _required_action_spec(kwargs.get("tool_specs") or [], step)
     skill_id = required.skill_id if required is not None and required.kind == "skill" else ""
     skill_name = required.skill_name if required is not None and required.kind == "skill" else ""
@@ -2666,6 +2736,8 @@ async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> 
                 )
                 return result
     finally:
+        chat_elicitations.worker_config.reset(input_config_token)
+        chat_elicitations.worker_step_id.reset(input_step_token)
         # In a finally. The step closes its own scope before its summary pass,
         # but an exception in the loop skipped that -- and because open_scope
         # does not reset accumulated spend, a retry of the same step id would
@@ -2863,6 +2935,7 @@ async def _run_worker_step(
     # showed live — not just tool names.
     tool_details: list[dict[str, Any]] = []
     confirmation_blocked: list[ToolCallResult] = []
+    elicitation_blocked: list[ToolCallResult] = []
     required_action = str(step.get("required_action") or "")
     execution_error = ""
     budget_exhausted = False
@@ -3089,6 +3162,8 @@ async def _run_worker_step(
                 output_text = output_text or result.content
                 if result.blocked == ChatBlockReason.CONFIRMATION_REQUIRED:
                     confirmation_blocked.append(result)
+                if result.blocked == ChatBlockReason.INPUT_REQUIRED:
+                    elicitation_blocked.append(result)
         if blocked is not None:
             break
         # Stop work that is going nowhere, rather than waiting for a spend limit
@@ -3278,6 +3353,13 @@ async def _run_worker_step(
         step_result["verify_reason"] = (
             "Stopped early: the step stopped making new calls and was repeating work it had already done."
         )
+    if elicitation_blocked:
+        step_result["awaiting_elicitation"] = True
+        step_result["elicitation_id"] = json.loads(elicitation_blocked[0].content)["elicitation_ids"][0]
+        step_result["elicitation_ids"] = [
+            json.loads(item.content)["elicitation_ids"][0] for item in elicitation_blocked
+        ]
+        step_result["elicitation_message"] = _blocked_tool_call_response(elicitation_blocked)
     if confirmation_blocked:
         # The mutating tool created an ActionConfirmation; record what we need to
         # surface the approval prompt now and resume this step once approved.
@@ -3307,7 +3389,7 @@ async def _run_worker_step(
         record_path = await _persist_step_record(step["id"], step_result, tool_details)
         if record_path:
             step_result["record_path"] = record_path
-    if confirmation_blocked:
+    if confirmation_blocked or elicitation_blocked:
         step_status = "awaiting"  # parked on an approval; a wait, not a failure
     elif blocked is not None or execution_error:
         step_status = "blocked"
@@ -3850,7 +3932,8 @@ async def confirmation_pause_node(state: ChatState, config: RunnableConfig) -> d
     messages: list[str] = []
     for step in plan:
         if step["status"] == "awaiting":
-            message = results_by_id.get(step["id"], {}).get("confirmation_message")
+            result = results_by_id.get(step["id"], {})
+            message = result.get("confirmation_message") or result.get("elicitation_message")
             if message:
                 messages.append(message)
     # dict.fromkeys dedupes a shared batch URL surfaced by multiple steps.
@@ -4162,7 +4245,7 @@ def _orchestration_details(plan: list[dict[str, Any]], results: list[dict[str, A
             continue  # replaced by its children, which follow it in the plan
         step_id = str(step["id"])
         result = results_by_id.get(step["id"], {})
-        if result.get("awaiting_confirmation"):
+        if result.get("awaiting_confirmation") or result.get("awaiting_elicitation"):
             step_status = "awaiting"
         elif result.get("blocked") or result.get("execution_error"):
             step_status = "blocked"
@@ -4218,7 +4301,9 @@ def _is_plan_resume_turn(state: ChatState) -> bool:
     never as a fresh request.
     """
     messages = state["messages"]
-    return bool(_resume_confirmation_id(messages) or _is_continuation_turn(messages))
+    from reporting.services.chat_elicitations import resume_id as elicitation_resume_id
+
+    return bool(_resume_confirmation_id(messages) or elicitation_resume_id(messages) or _is_continuation_turn(messages))
 
 
 def _abandoned_plan_reset(state: ChatState) -> dict[str, Any]:

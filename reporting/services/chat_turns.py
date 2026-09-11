@@ -255,6 +255,14 @@ def build_graph_input(body: ChatTurnCommand, budget_controller: BudgetController
     plumbing the user never wrote and must not survive into the model's view of
     the conversation (AGT-003).
     """
+    if body.resume_elicitation_id:
+        resume_message = HumanMessage(
+            content="Resume external input request",
+            id=f"msg_{uuid.uuid4().hex}",
+            additional_kwargs={"resume_elicitation_id": body.resume_elicitation_id},
+        )
+        tag_message(resume_message, MessageTag.EPHEMERAL)
+        return {"messages": [resume_message], "budget": budget_controller.snapshot()}
     if body.resume_confirmation_id:
         resume_message = HumanMessage(
             content=f"Resume approved confirmation {body.resume_confirmation_id}",
@@ -300,6 +308,7 @@ async def start_turn(
     command = ChatTurnCommand(
         message=body.message,
         resume_confirmation_id=body.resume_confirmation_id,
+        resume_elicitation_id=body.resume_elicitation_id,
         continue_response=body.continue_response,
         continue_message_id=body.continue_message_id,
         bypass_confirmations=body.bypass_confirmations,
@@ -595,6 +604,10 @@ async def sweep_expired_turns() -> None:
         )
         for turn_id in expired:
             await report_store.delete_chat_turn(turn_id)
+        if settings.MCP_EXTERNAL_ELICITATION_ENABLED:
+            from reporting.services.report_store import elicitations
+
+            await elicitations.purge_expired()
     except Exception:
         # Housekeeping. A failure here costs storage, never a turn.
         logger.warning("Failed to sweep expired chat turns", exc_info=True)
