@@ -67,6 +67,18 @@ def _get_allowed() -> set | None:
     return set(normalized)
 
 
+def registered_tool_names() -> frozenset[str]:
+    """Every built-in tool name, whatever this deployment enables.
+
+    Distinct from `list_builtin_tools`, which answers what a caller may see
+    here and now. This answers whether a name refers to a tool at all -- the
+    question a package's `allowed-tools` declaration has to be checked against,
+    since a package is portable and naming a tool some deployments switch off
+    is a configuration fact rather than a typo.
+    """
+    return frozenset(_TOOLS_BY_NAME)
+
+
 def list_builtin_groups() -> list[BuiltinGroup]:
     """Return every built-in group that is enabled per ``MCP_ENABLED_BUILTINS``."""
     allowed = _get_allowed()
@@ -143,5 +155,6 @@ __all__ = [
     "find_builtin",
     "list_builtin_groups",
     "list_builtin_tools",
+    "registered_tool_names",
     "sandbox_result_dir",
 ]

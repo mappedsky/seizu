@@ -4,7 +4,7 @@ import yaml
 
 from reporting.schema.external_mcp import parse_external_mcp_proxies
 from reporting.services import external_mcp, mcp_runtime
-from reporting.services.mcp_builtins import list_builtin_tools
+from reporting.services.mcp_builtins import registered_tool_names
 from reporting.services.plugin_packages import (
     SEIZU_MCP_SERVER_NAME,
     ParsedPlugin,
@@ -231,7 +231,10 @@ def test_every_seeded_package_declares_seizu_tools_that_exist() -> None:
     no other symptom. The seed's own toolsets are part of that inventory.
     """
     _config_path, config = _seed_config()
-    available = {tool.name for tool in list_builtin_tools(include_chat_only=True)}
+    # The whole registry, not what this environment enables: a package is
+    # portable, so a dependency on a tool some deployments switch off is a
+    # configuration fact rather than a typo. CI runs with the sandbox off.
+    available = set(registered_tool_names())
     available |= {
         f"{toolset_id}__{tool_id}"
         for toolset_id, toolset in config["toolsets"].items()

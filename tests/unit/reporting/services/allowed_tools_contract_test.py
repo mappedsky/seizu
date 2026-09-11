@@ -18,7 +18,7 @@ from reporting.routes import skillsets as skillsets_routes
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem
 from reporting.schema.plugins import PluginFile
 from reporting.services import external_mcp, mcp_runtime, plugin_packages
-from reporting.services.mcp_builtins import list_builtin_tools
+from reporting.services.mcp_builtins import registered_tool_names
 from reporting.services.plugin_packages import (
     allowed_tool_entries,
     allowed_tool_entry,
@@ -57,7 +57,12 @@ def _skill(tools_required: list[str], skillset_id: str = "skill_authoring") -> S
 
 
 def _builtin_tool_names() -> list[str]:
-    return sorted(tool.name for tool in list_builtin_tools(include_chat_only=True))
+    """Every registered tool name, so coverage does not shrink with the config.
+
+    `list_builtin_tools` drops a tool whose feature is off, which would quietly
+    leave the sandbox group out of this contract wherever it is disabled.
+    """
+    return sorted(registered_tool_names())
 
 
 # ---------------------------------------------------------------------------
