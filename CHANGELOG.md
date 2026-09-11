@@ -4,6 +4,183 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.4.0] - 2026-09-11
+
+This release widens the agent's reach into third-party MCP servers and into its
+own action confirmations, and makes chat traces good enough to compare two
+revisions of a skill. Per-user external MCP gateway access lands as an
+experimental capability, MCP clients can now approve mutating actions through
+elicitation, tracing carries skill identity behind a new prompt opt-in, and
+there is a Kubernetes install guide. Two additive schema migrations; one default
+changes behavior (`MCP_CONFIRMATION_ELICITATION_MODE=url`). Nothing is removed.
+
+### Added
+
+- **Per-user access to external MCP gateways** (#309). A proxy definition can
+  opt into `user_authorization`; Seizu then supplies the stored run owner's
+  durable OIDC `(issuer, subject)` pair — never its local user id — over M2M
+  bearer or trusted mesh authentication, or maps a non-empty IdP claim such as
+  email into a target header, and the gateway resolves that identity to its own
+  upstream grant. M2M `client_credentials` acquire and renew service tokens in
+  process memory (`MCP_EXTERNAL_CLIENT_SECRET`); existing `token_env`
+  configurations keep working. Owner-scoped connection status, including a failed
+  discovery that hides a skill, is durable (migrations `0012`, `0013`) and shown
+  on a new **Chat Connections** page (`/app/chat/connections`, gated by
+  `chat:use`); the nav entry and page appear only when an enabled proxy opts in
+  (#322). Recovery uses standard MCP URL elicitation bounded to the
+  operator-configured account-page origin; detached runs never accept consent or
+  replay the operation. **Per-user delegation and recovery are experimental**
+  pending the end-to-end validation in
+  [#312](https://github.com/mappedsky/seizu/issues/312); shared-token access is
+  not covered by that designation. Rationale:
+  [AGT-048](docs/root/dev/decisions/chat-agent.md),
+  [AGT-049](docs/root/dev/decisions/chat-agent.md),
+  [STO-013](docs/root/dev/decisions/report-store.md).
+- **MCP clients can approve a mutating action through elicitation** (#313). A
+  2026-07-28 client advertising form support receives an `InputRequiredResult`
+  for a pending Seizu confirmation, keyed on the confirmation id and resolved
+  against the existing caller/session/tool/target/argument scope; the
+  elicitation action is the decision (accept approves, decline denies, cancel
+  leaves it pending). `MCP_CONFIRMATION_ELICITATION_MODE` chooses between `url`
+  (default, below), `form`, `permission` and `off`. Rationale:
+  [AGT-050](docs/root/dev/decisions/chat-agent.md),
+  [AGT-051](docs/root/dev/decisions/chat-agent.md).
+- **Chat tracing identifies skills and separates prompts from results** (#308). A
+  listed skill carries its stable id, display name and immutable revision into
+  the tool spec and onto the step and its descendant spans, so runs from two
+  revisions form comparable populations without exporting instructions.
+  `TELEMETRY_RECORD_PROMPTS` (default off) is a new, more sensitive opt-in for
+  system prompts, model inputs and rendered skill bodies; `TELEMETRY_CONTENT_MAX_CHARS`
+  (default 20,000) bounds every content-bearing attribute. Rationale:
+  [AGT-047](docs/root/dev/decisions/chat-agent.md).
+- **A dedicated skill for report deletion** (#321). Under progressive disclosure
+  the agent chooses from skill descriptions, and `reports__delete` was declared
+  only by the create/update skill (where it exists for clone cleanup) — so an
+  agent asked to delete a report found no such capability and answered that it
+  had none, never loading a skill and never offering a confirmation. It now
+  loads the delete skill, calls `reports__delete`, and the report is gone once
+  the confirmation is approved.
+- **A Kubernetes install guide** (#311) pointing at
+  `mappedsky/mappedsky-helm-charts` as the authoritative chart reference:
+  external dependencies the chart expects, the OCI install command, and a
+  values-to-component map for the optional workers and features.
+
+### Changed
+
+- **`MCP_CONFIRMATION_ELICITATION_MODE` defaults to `url`** (#313). An MCP client
+  that advertises elicitation support and calls a confirmation-gated tool is now
+  sent to Seizu's own confirmation page, where the person decides signed in as
+  themselves; the client's response never carries a decision, so a continuation
+  claiming an approval nobody gave gets the pending confirmation back. `form`
+  keeps the in-client dialog, `permission` picks `form` for callers holding
+  `chat:bypass_permissions` and `url` for the rest, and `off` returns the payload
+  as content. A client that cannot do the configured mode falls back to `off`
+  behavior — the same content response it received before this release — never to
+  the other mode. Rationale:
+  [AGT-051](docs/root/dev/decisions/chat-agent.md).
+- **Gunicorn keeps HTTP connections alive for five seconds** (#313). With
+  keep-alive at `0`, Codex 0.153.4 received Seizu's legacy `initialize` response
+  and then repeatedly failed to send `notifications/initialized` over a closed
+  transport; a five-second interval lets a native Codex client complete
+  initialization and list all tools. This is an HTTP connection-lifetime issue,
+  not MCP protocol state. Rationale:
+  [AGT-051](docs/root/dev/decisions/chat-agent.md) (keep-alive).
+- **Skill tool dependencies are written in the one spelling that resolves**
+  (#321). Agent Plugins made `mcp__seizu__<tool>` the only spelling a dependency
+  resolves by ([AGT-042](docs/root/dev/decisions/chat-agent.md)); three writers
+  inside Seizu kept emitting the bare internal name, which is then read as an
+  unknown client built-in and dropped with nothing reported — so every skill
+  projected from a legacy skillset, the skill-authoring skill included, rendered
+  with no tools. One converter now qualifies `allowed-tools` everywhere (safe to
+  apply twice), `parse_package` warns on the spellings it will not resolve, and
+  the startup projection is reconciled so existing packages heal. This also lets
+  `cve_response/dependency_provenance` declare the deps.dev MCP it always needed
+  via `mcp.json`, and `seizu export` no longer rewrites an authored package as a
+  lossy skillset. Rationale:
+  [AGT-053](docs/root/dev/decisions/chat-agent.md).
+- **`TELEMETRY_RECORD_CONTENT` no longer covers prompts** (#308). It now gates
+  model results and tool input/output only; system prompts, model input messages
+  and rendered skill bodies move behind `TELEMETRY_RECORD_PROMPTS`. Both remain
+  off by default. A deployment that set `TELEMETRY_RECORD_CONTENT=true` to
+  capture prompts must also set the new switch.
+- The frontend consumes a generated typed OpenAPI client
+  (`src/api/openapi.generated.ts`); the reports hooks now derive their types from
+  it. CI gains mutation-testing and unit/critical-coverage gates (#307).
+- **`httpx` 2.9.1 → 2.12.0** (#317) and **`httpcore` 2.9.1 → 2.10.0** (#316),
+  transitive lock bumps opened by the CVE dependency-remediation workflow.
+
+### Documentation
+
+- Docs are served from the canonical `mappedsky.com/seizu` domain, and `make
+  docs` now emits `sitemap.xml` + `robots.txt` and a `rel="canonical"` on every
+  page via `sphinx-sitemap` (#310). Hardcoded doc links in `index.rst`, the
+  README and `CONTRIBUTING.md` move off `mappedsky.github.io/seizu`.
+- `external-mcp.md` documents per-user gateway access, the connection page and
+  the modern-first negotiation; `mcp-toolsets.md` and `agent-plugins.md` gain the
+  `allowed-tools` spelling rules; a known Codex 0.153.4 URL-elicitation
+  incompatibility is recorded
+  ([AGT-052](docs/root/dev/decisions/chat-agent.md)).
+
+### Upgrade notes {#upgrade-notes-540}
+
+Two additive schema migrations (`0012`, `0013`); no removed settings.
+
+1. **MCP confirmations default to URL elicitation.** A client that advertises
+   elicitation support now gets sent to Seizu's confirmation page instead of
+   plain content when it calls a confirmation-gated tool. A client without
+   elicitation support, and the browser chat UI, are unaffected. Set
+   `MCP_CONFIRMATION_ELICITATION_MODE=form` or `off` to keep prior behavior for
+   a trusted client, on both the web service and `seizu-temporal-worker`.
+2. **Per-user external MCP gateway access is experimental** — read
+   [AGT-048](docs/root/dev/decisions/chat-agent.md) before enabling
+   `user_authorization` on a proxy in production; shared-token access is
+   unaffected.
+3. If `TELEMETRY_RECORD_CONTENT=true` is set to capture prompts, also set the
+   new `TELEMETRY_RECORD_PROMPTS=true` — it now covers results and tool
+   input/output only.
+
+Full procedures: [Upgrading Seizu — 5.4.0](docs/root/install/upgrading.md#540).
+
+## [5.3.0] - 2026-09-06
+
+A single-change release fixing a regression introduced by 5.2.0. Deploy it
+together with, or immediately after, 5.2.0.
+
+### Fixed
+
+- **Every identifier minted after the 5.2.0 UUIDv7 upgrade failed validation at
+  the API edge** (#305). Chat and confirmation routes checked identifier shape
+  with a digits-only pattern capped at 32 characters, written when
+  `generate_report_id` returned Snowflake integers. Against the UUIDv7 strings it
+  returns since #302, `PATCH` on a new session, turn admission, history, delete
+  and every confirmation route answered `422`. `reporting/schema/ids.py` now
+  carries one rule that every call site validates against, and it accepts both
+  forms — no data migration rewrote the pre-UUID rows, so their numeric ids still
+  address real records. Rationale:
+  [STO-012](docs/root/dev/decisions/report-store.md).
+
+## [5.2.0] - 2026-09-04
+
+Server-generated identifiers move from Snowflake integers to UUIDv7. **Upgrade
+straight through to 5.3.0**, which fixes an API-edge validation regression this
+change introduced.
+
+### Changed
+
+- **Application identifiers are canonical UUIDv7 strings** (#302).
+  `ReportStore.generate_id` no longer mints Snowflake integers. UUIDv7 keeps
+  identifiers time-ordered without a per-replica machine id, and its canonical
+  string crosses JSON/JavaScript boundaries without integer-precision loss.
+  Persisted and API identifier fields were already strings, so existing decimal
+  ids remain valid and nothing is rewritten. Rationale:
+  [STO-012](docs/root/dev/decisions/report-store.md).
+
+### Removed
+
+- **`SNOWFLAKE_MACHINE_ID`** is no longer read (#302). It was the per-instance
+  machine id for the Snowflake generator; UUIDv7 needs no such coordination.
+  Leaving it set is harmless.
+
 ## [5.1.0] - 2026-09-03
 
 A follow-up to 5.0 that finishes the model-profile surface: every runtime stage
@@ -1414,6 +1591,9 @@ frontend, storage, auth, and integrations.
 Initial release of the original reporting tool that Seizu was built from —
 Dockerized build, GitHub Container Registry publishing, and quickstart docs.
 
+[5.4.0]: https://github.com/mappedsky/seizu/compare/v5.3.0...v5.4.0
+[5.3.0]: https://github.com/mappedsky/seizu/compare/v5.2.0...v5.3.0
+[5.2.0]: https://github.com/mappedsky/seizu/compare/v5.1.0...v5.2.0
 [5.1.0]: https://github.com/mappedsky/seizu/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/mappedsky/seizu/compare/v4.2.0...v5.0.0
 [4.2.0]: https://github.com/mappedsky/seizu/compare/v4.1.0...v4.2.0

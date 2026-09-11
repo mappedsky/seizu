@@ -25,6 +25,52 @@ For every production upgrade:
    database written by a newer one unless its upgrade procedure explicitly says
    that downgrade is supported.
 
+## 5.4.0
+
+Two additive schema migrations (`0012`, `0013`); no removed settings. One
+default changes behavior.
+
+### MCP action confirmations default to URL elicitation
+
+An MCP client that advertises elicitation support and calls a confirmation-gated
+tool is now sent an `InputRequiredResult` pointing at Seizu's own confirmation
+page instead of receiving the payload as content.
+
+1. No action is required for clients without elicitation support, or for the
+   browser chat UI — both are unaffected.
+2. If you run an MCP client you trust to decide on its own (nothing shows that a
+   person saw the dialog), set `MCP_CONFIRMATION_ELICITATION_MODE=form` to keep
+   the previous in-client dialog, or `off` to restore plain content. `permission`
+   picks `form` only for callers already holding `chat:bypass_permissions`.
+3. Deploy the setting the same way on the web service and `seizu-temporal-worker`
+   if you run headless/scheduled chats that call confirmation-gated tools.
+
+### Per-user external MCP gateway access is experimental
+
+Adopting `user_authorization` on an external MCP proxy is optional and new
+migrations `0012`/`0013` apply automatically. Read
+[external-mcp.md](external-mcp.md) and
+[AGT-048](../dev/decisions/chat-agent.md) before enabling it in production —
+end-to-end grant isolation is still being validated in
+[#312](https://github.com/mappedsky/seizu/issues/312). Shared-token external
+access (`bearer`/`m2m_jwt` without `user_authorization`) is unaffected and not
+covered by that caveat.
+
+### Trace content: prompts need a separate opt-in
+
+If you set `TELEMETRY_RECORD_CONTENT=true` to capture prompts in traces, add
+`TELEMETRY_RECORD_PROMPTS=true` as well — the switch now covers model results
+and tool input/output only. Both remain off by default.
+
+## 5.2.0 and 5.3.0
+
+No schema migrations and no removed functionality; `SNOWFLAKE_MACHINE_ID` is no
+longer read (harmless to leave set). Server-generated identifiers became
+UUIDv7 strings in 5.2.0; existing decimal ids remain valid and no data is
+rewritten. **Do not stop on 5.2.0** — it shipped with an API-edge validation
+regression (new UUIDv7 ids failed chat/confirmation routes' id-shape check with
+`422`) that 5.3.0 fixes. Go straight through to 5.3.0 or later.
+
 ## 5.1.0
 
 No schema migrations and no removed settings. Two defaults change behavior.
