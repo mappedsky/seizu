@@ -24,7 +24,7 @@ _BATCH_ID = report_store.generate_id()
 _THREAD_ID = report_store.generate_id()
 
 
-def _confirmation(expires_at: str = "2099-01-01T00:30:00+00:00") -> ActionConfirmation:
+def _confirmation(expires_at: str = "2099-01-01T00:30:00+00:00", status: str = "pending") -> ActionConfirmation:
     return ActionConfirmation.model_validate(
         {
             "confirmation_id": _CONFIRMATION_ID,
@@ -37,7 +37,7 @@ def _confirmation(expires_at: str = "2099-01-01T00:30:00+00:00") -> ActionConfir
             "resource_id": "tool-1",
             "arguments": {"name": "Lookup", "cypher": "MATCH (n) RETURN n"},
             "arguments_hash": "hash-1",
-            "status": "pending",
+            "status": status,
             "batch_id": _BATCH_ID,
             "created_at": "2024-01-01T00:00:00+00:00",
             "expires_at": expires_at,
@@ -85,7 +85,7 @@ async def test_list_confirmations_requires_thread_id(mocker):
 async def test_list_confirmations_uses_chat_thread_session(mocker):
     list_confirmations = mocker.patch(
         "reporting.routes.confirmations.report_store.list_action_confirmations",
-        return_value=[_confirmation()],
+        return_value=[_confirmation(), _confirmation(status="denied"), _confirmation(status="approved")],
     )
     app = _make_app()
 
@@ -93,12 +93,11 @@ async def test_list_confirmations_uses_chat_thread_session(mocker):
         response = await client.get("/api/v1/confirmations", params={"thread_id": _THREAD_ID})
 
     assert response.status_code == 200
-    assert len(response.json()["confirmations"]) == 1
+    assert [item["status"] for item in response.json()["confirmations"]] == ["pending", "denied"]
     list_confirmations.assert_awaited_once_with(
         user_id="user-1",
         source="chat",
         session_key=_THREAD_ID,
-        status="pending",
     )
 
 
@@ -161,7 +160,7 @@ async def test_decide_confirmation_returns_404_when_not_found(mocker):
 
 
 async def test_decide_confirmation_returns_result_when_found(mocker):
-    mocker.patch(
+    decide = mocker.patch(
         "reporting.routes.confirmations.action_confirmations.decide_confirmation",
         return_value=_confirmation(),
     )
@@ -175,3 +174,4 @@ async def test_decide_confirmation_returns_result_when_found(mocker):
 
     assert response.status_code == 200
     assert response.json()["confirmation"]["status"] == "pending"
+    assert decide.call_args.kwargs["allow_denial_reversal"] is True

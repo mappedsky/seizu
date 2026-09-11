@@ -236,9 +236,9 @@ def _elicitation_params(mode: str, confirmation: dict[str, Any]) -> ElicitReques
     return ElicitRequestFormParams(
         message=(
             f"{_confirmation_summary(confirmation)}\n\n"
-            "Accept approves this action. Decline refuses it for the rest of the "
-            "confirmation window, so the same call cannot be retried until it "
-            "expires. Cancel leaves it undecided and can be asked again."
+            "Accept approves this action. Decline refuses this attempt; retries are limited "
+            "per action and per session. You can reverse a denial on its Seizu confirmation "
+            "page before it expires. Cancel leaves it undecided and can be asked again."
         ),
         requested_schema={"type": "object", "properties": {}},
     )

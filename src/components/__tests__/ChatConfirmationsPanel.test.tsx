@@ -88,5 +88,43 @@ describe('ChatConfirmationsPanel', () => {
     expect(screen.getAllByText('report-1').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('Request details')).toBeInTheDocument();
     expect(screen.getByText('report_id')).toBeInTheDocument();
+    expect(screen.getByText('Pending')).toBeInTheDocument();
+  });
+
+  it('labels an empty pending section before previously denied actions', () => {
+    renderPanel({
+      confirmations: [{ ...confirmation('1'), status: 'denied' }],
+      open: true,
+    });
+
+    expect(screen.getByText('Pending')).toBeInTheDocument();
+    expect(screen.getByText('No confirmations pending.')).toBeInTheDocument();
+    expect(screen.getByText('Previously denied')).toBeInTheDocument();
+  });
+
+  it('offers a live denied confirmation for approval again', () => {
+    const denied = { ...confirmation('1'), status: 'denied' as const };
+    const onDecision = jest.fn();
+    render(
+      <ThemeProvider theme={theme}>
+        <ChatConfirmationsPanel
+          confirmations={[denied]}
+          loading={false}
+          error={null}
+          open
+          decidingId={null}
+          onToggle={jest.fn()}
+          onDecision={onDecision}
+        />
+      </ThemeProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }));
+
+    expect(onDecision).toHaveBeenCalledWith(denied, 'approved');
+    expect(screen.getByText('Previously denied')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Deny' }),
+    ).not.toBeInTheDocument();
   });
 });

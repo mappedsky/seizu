@@ -9,6 +9,7 @@ import { AuthContext } from 'src/auth.context';
 import {
   type ActionConfirmation,
   effectiveConfirmationStatus,
+  isConfirmationExpired,
   useConfirmationsApi,
 } from 'src/hooks/useConfirmationsApi';
 import { pageContentSx } from 'src/theme/layout';
@@ -57,7 +58,7 @@ export default function ConfirmationPage() {
         const updated = await decideConfirmation(confirmationId, decision);
         setConfirmation(updated);
         setError(null);
-        if (decision === 'approved' && updated.thread_id) {
+        if (updated.status === 'approved' && updated.thread_id) {
           const params = new URLSearchParams({
             resume_confirmation_id: updated.confirmation_id,
           });
@@ -145,6 +146,22 @@ export default function ConfirmationPage() {
                     This confirmation has expired and can no longer be approved.
                     Re-run the action to get a fresh confirmation.
                   </Alert>
+                ) : null}
+                {status === 'denied' && !isConfirmationExpired(confirmation) ? (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="body2" sx={{ mb: 1 }}>
+                      Changed your mind? You can allow this action before the
+                      confirmation expires.
+                    </Typography>
+                    <Button
+                      color="error"
+                      disabled={deciding !== null}
+                      onClick={() => void decide('approved')}
+                      variant="outlined"
+                    >
+                      Accept
+                    </Button>
+                  </Box>
                 ) : null}
                 {status === 'pending' ? (
                   <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>

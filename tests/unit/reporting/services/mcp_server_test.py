@@ -49,7 +49,7 @@ def confirmation_store():
         return next(
             (
                 r
-                for r in records.values()
+                for r in sorted(records.values(), key=lambda r: r.status == "approved", reverse=True)
                 if r.status in statuses
                 and not action_confirmations.is_expired(r)
                 and all(getattr(r, key) == value for key, value in scope.items())
@@ -57,7 +57,8 @@ def confirmation_store():
             None,
         )
 
-    async def decide(*, confirmation_id, user_id, decision):
+    async def decide(*, confirmation_id, user_id, decision, allow_denial_reversal=False):
+        assert allow_denial_reversal is False
         record = await get(confirmation_id, user_id)
         if record and record.status == "pending" and not action_confirmations.is_expired(record):
             records[confirmation_id] = record.model_copy(update={"status": decision, "decided_by": user_id})
@@ -71,7 +72,29 @@ def confirmation_store():
             return records[confirmation_id]
         return None
 
+    async def count_denials(*, user_id, source, session_key, tool_name, target, arguments_hash):
+        denials = [
+            r
+            for r in records.values()
+            if r.user_id == user_id
+            and r.source == source
+            and r.session_key == session_key
+            and r.status == "denied"
+            and not action_confirmations.is_expired(r)
+        ]
+        exact = [
+            r
+            for r in denials
+            if r.tool_name == tool_name
+            and r.action == target.action
+            and r.resource_type == target.resource_type
+            and r.resource_id == target.resource_id
+            and r.arguments_hash == arguments_hash
+        ]
+        return len(denials), len(exact)
+
     with (
+        patch.object(mcp_module.report_store, "count_action_confirmation_denials", side_effect=count_denials),
         patch.object(mcp_module.report_store, "create_action_confirmation", side_effect=create),
         patch.object(mcp_module.report_store, "get_action_confirmation", side_effect=get),
         patch.object(mcp_module.report_store, "find_action_confirmation_grant", side_effect=find),
@@ -121,7 +144,7 @@ async def test_form_confirmation_accepts_and_claims_once_over_http(form_mode, co
         assert '"report_id": "r1"' in form["params"]["message"]
         assert form["params"]["requestedSchema"]["properties"] == {}
         # The three actions have different durability, so the form says which is which.
-        assert "Decline refuses it for the rest of the confirmation window" in form["params"]["message"]
+        assert "Decline refuses this attempt; retries are limited" in form["params"]["message"]
         assert "Cancel leaves it undecided" in form["params"]["message"]
         execute.assert_not_awaited()
         continuation = _confirmation_response(requested, {"action": "accept"})
@@ -150,6 +173,43 @@ async def test_form_confirmation_does_not_execute_without_approval(form_mode, co
         result = await _call_confirmation_tool(client, continuation=_confirmation_response(requested, response))
         assert result.get("resultType") != "input_required"
     assert records[requested["requestState"]].status == status
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("action", ["accept", "decline"])
+async def test_denied_form_can_retry_once(form_mode, confirmation_store, action):
+    records, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        first = await _call_confirmation_tool(client)
+        await _call_confirmation_tool(client, continuation=_confirmation_response(first, {"action": "decline"}))
+        assert len(records) == 1
+        retry = await _call_confirmation_tool(client)
+        assert retry["requestState"] != first["requestState"]
+        result = await _call_confirmation_tool(client, continuation=_confirmation_response(retry, {"action": action}))
+        if action == "decline":
+            result = await _call_confirmation_tool(client)
+            assert result.get("resultType") != "input_required"
+            assert json.loads(result["content"][0]["text"])["status"] == "denied"
+            execute.assert_not_awaited()
+        else:
+            assert result["isError"] is False
+            execute.assert_awaited_once()
+        assert len(records) == 2
+
+
+async def test_session_budget_blocks_varied_form_arguments(form_mode, confirmation_store):
+    records, _, execute = confirmation_store
+    async with _mcp_http_client() as client:
+        for index in range(5):
+            arguments = {"report_id": f"r{index}", "pinned": True}
+            requested = await _call_confirmation_tool(client, arguments=arguments)
+            await _call_confirmation_tool(
+                client, arguments=arguments, continuation=_confirmation_response(requested, {"action": "decline"})
+            )
+        result = await _call_confirmation_tool(client, arguments={"report_id": "new", "pinned": True})
+    assert result["isError"] is True
+    assert json.loads(result["content"][0]["text"])["block_reason"] == "confirmation_denial_limit"
+    assert len(records) == 5
     execute.assert_not_awaited()
 
 

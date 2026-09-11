@@ -17,6 +17,7 @@ import { AuthContext } from 'src/auth.context';
 import {
   type ActionConfirmation,
   effectiveConfirmationStatus,
+  isConfirmationExpired,
   useConfirmationsApi,
 } from 'src/hooks/useConfirmationsApi';
 import { pageContentSx } from 'src/theme/layout';
@@ -41,6 +42,8 @@ function ConfirmationCard({
 }) {
   const status = effectiveConfirmationStatus(confirmation);
   const isPending = status === 'pending';
+  const canReverseDenial =
+    status === 'denied' && !isConfirmationExpired(confirmation);
   const isDeciding = deciding === confirmation.confirmation_id;
 
   return (
@@ -111,6 +114,18 @@ function ConfirmationCard({
             variant="outlined"
           >
             Deny
+          </Button>
+        </Box>
+      ) : null}
+      {canReverseDenial ? (
+        <Box sx={{ mt: 2 }}>
+          <Button
+            color="error"
+            disabled={deciding !== null}
+            onClick={() => onDecide(confirmation.confirmation_id, 'approved')}
+            variant="outlined"
+          >
+            Accept
           </Button>
         </Box>
       ) : null}

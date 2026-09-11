@@ -54,11 +54,11 @@ async def _ensure_tool_confirmation(
     *, respond: ConfirmationResponder | None = None, **kwargs: Any
 ) -> ActionConfirmation | None:
     """Resolve the gate; a responder returns True when the decision must be re-read."""
-    confirmation = await action_confirmations.ensure_confirmation(**kwargs)
+    confirmation = await action_confirmations.ensure_confirmation(retry_denied=respond is None, **kwargs)
     if confirmation is not None and confirmation.status == "pending" and respond is not None:
         if await respond(confirmation):
             # Consume approval through the ordinary atomic execution claim.
-            return await action_confirmations.ensure_confirmation(**kwargs)
+            return await action_confirmations.ensure_confirmation(retry_denied=False, **kwargs)
     return confirmation
 
 
@@ -75,6 +75,7 @@ class ChatBlockReason(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     NOT_AVAILABLE = "not_available"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    CONFIRMATION_DENIAL_LIMIT = "confirmation_denial_limit"
     AUTHENTICATION_REQUIRED = "authentication_required"
 
 
@@ -530,6 +531,19 @@ async def _guarded(
     ) as current:
         try:
             content, blocked = await call
+        except action_confirmations.ConfirmationDenialLimit:
+            telemetry.set_attributes(current, outcome=ChatBlockReason.CONFIRMATION_DENIAL_LIMIT.value)
+            return (
+                text_response(
+                    {
+                        "error": "This session has reached its confirmation denial limit. No action was executed. "
+                        "Wait for denials to expire or review an existing confirmation in Seizu.",
+                        "block_reason": "confirmation_denial_limit",
+                    }
+                ),
+                ChatBlockReason.CONFIRMATION_DENIAL_LIMIT,
+                True,
+            )
         except _ToolFailure as failure:
             telemetry.set_attributes(
                 current,
@@ -649,7 +663,7 @@ async def _call_tool_core(
                     ), None
                 payload = action_confirmations.confirmation_required_payload(confirmation)
                 if confirmation.status == "denied":
-                    payload["error"] = "Action was denied for this confirmation window"
+                    payload["error"] = "Action was denied. You can review this decision in Seizu before it expires."
                 return text_response(payload), ChatBlockReason.CONFIRMATION_REQUIRED
 
         try:
@@ -768,7 +782,7 @@ async def _call_tool_core(
                         ), None
                     payload = action_confirmations.confirmation_required_payload(confirmation)
                     if confirmation.status == "denied":
-                        payload["error"] = "Action was denied for this confirmation window"
+                        payload["error"] = "Action was denied. You can review this decision in Seizu before it expires."
                     return text_response(payload), ChatBlockReason.CONFIRMATION_REQUIRED
         try:
             # Publish the row cap first. _bounded_text_response only trims what a

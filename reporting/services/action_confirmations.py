@@ -14,6 +14,10 @@ from reporting.schema.confirmations import (
 from reporting.services import report_store
 
 
+class ConfirmationDenialLimit(Exception):
+    """The session's live denial budget refuses further confirmation prompts."""
+
+
 def bearer_session_key(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -40,8 +44,13 @@ async def ensure_confirmation(
     target: ActionConfirmationTarget,
     arguments: dict[str, Any],
     batch_id: str | None = None,
+    retry_denied: bool = True,
 ) -> ActionConfirmation | None:
-    """Return None when execution is allowed, else a pending/denied/expired confirmation."""
+    """Claim approval or return a confirmation; raise ConfirmationDenialLimit at the session cap.
+
+    Continuations set retry_denied=False to resolve existing decisions without
+    opening another prompt after a decline.
+    """
     fingerprint = arguments_hash(arguments)
     grant = await report_store.find_action_confirmation_grant(
         user_id=user_id,
@@ -70,7 +79,20 @@ async def ensure_confirmation(
             if fresh is not None and fresh.status == "executed":
                 return fresh
             return (fresh or grant).model_copy(update={"status": "expired"})
-        return grant
+
+    if retry_denied:
+        session_denials, action_denials = await report_store.count_action_confirmation_denials(
+            user_id=user_id,
+            source=source,
+            session_key=session_key,
+            tool_name=tool_name,
+            target=target,
+            arguments_hash=fingerprint,
+        )
+        if session_denials >= settings.ACTION_CONFIRMATION_SESSION_DENIAL_LIMIT:
+            raise ConfirmationDenialLimit
+        if grant is not None and action_denials > settings.ACTION_CONFIRMATION_DENIAL_RETRIES:
+            return grant
 
     # Deduplicate: if an identical pending confirmation already exists for this
     # session, return it instead of creating a duplicate.
@@ -87,6 +109,8 @@ async def ensure_confirmation(
     )
     if existing_pending is not None:
         return existing_pending
+    if grant is not None and not retry_denied:
+        return grant
 
     now = datetime.now(tz=UTC)
     confirmation = ActionConfirmation(
@@ -113,18 +137,21 @@ async def decide_confirmation(
     confirmation_id: str,
     user_id: str,
     decision: ConfirmationDecision,
+    allow_denial_reversal: bool = False,
 ) -> ActionConfirmation | None:
     confirmation = await report_store.get_action_confirmation(confirmation_id, user_id=user_id)
     if confirmation is None:
         return None
     if is_expired(confirmation):
         return confirmation.model_copy(update={"status": "expired"})
-    if confirmation.status != "pending":
+    reverse_denial = allow_denial_reversal and decision == "approved" and confirmation.status == "denied"
+    if confirmation.status != "pending" and not reverse_denial:
         return confirmation
     decided = await report_store.decide_action_confirmation(
         confirmation_id=confirmation_id,
         user_id=user_id,
         decision=decision,
+        allow_denial_reversal=reverse_denial,
     )
     if decided is not None:
         return decided

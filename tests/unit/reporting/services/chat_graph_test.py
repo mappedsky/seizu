@@ -2006,6 +2006,21 @@ async def test_decided_confirmation_response_does_not_include_url():
     assert "Confirmations" not in response
 
 
+def test_denial_budget_has_a_specific_chat_explanation():
+    result = chat_graph.ToolCallResult(
+        request=chat_graph.ToolCallRequest(
+            id="call_1",
+            name="reports__delete",
+            arguments={"report_id": "r1"},
+            spec=chat_graph.ChatToolSpec(name="reports__delete", kind="tool", description="Delete", input_schema={}),
+        ),
+        blocked=ChatBlockReason.CONFIRMATION_DENIAL_LIMIT,
+        content='{"block_reason":"confirmation_denial_limit"}',
+    )
+    assert "confirmation denial limit" in chat_graph._blocked_tool_call_response([result])
+    assert chat_graph._blocked_tool_call_reason_label(result.blocked) == "confirmation denial limit reached"
+
+
 async def test_resume_expired_approved_confirmation_does_not_execute(mocker):
     from langgraph.checkpoint.memory import MemorySaver
 

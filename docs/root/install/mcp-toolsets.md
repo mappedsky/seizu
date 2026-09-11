@@ -35,6 +35,17 @@ user's response in `inputResponses`. Approval remains scoped to the caller,
 session, tool, target, and exact arguments, expires after
 `ACTION_CONFIRMATION_TTL_SECONDS`, and is consumed once.
 
+A decline refuses that attempt. An identical action can request one extra
+prompt (`ACTION_CONFIRMATION_DENIAL_RETRIES`, default `1`; `0` disables retries).
+Five unexpired denials in the same user/source/session stop further prompts,
+including calls with changed arguments (`ACTION_CONFIRMATION_SESSION_DENIAL_LIMIT`,
+default `5`, minimum `1`). This returns an error with
+`block_reason: confirmation_denial_limit`; already approved actions remain usable.
+The window is the confirmation lifetime (`ACTION_CONFIRMATION_TTL_SECONDS`,
+default 1800 seconds from creation). Owners can open a denied action's
+confirmation URL and allow it before expiry, then retry the action. MCP form
+continuations cannot reverse denials. Cancel leaves a confirmation pending.
+
 A client that cannot do the configured mode is never offered the other one; it
 receives the confirmation URL as content instead. URL mode requires the client
 to advertise `elicitation.url` explicitly — a bare `elicitation: {}` is read as

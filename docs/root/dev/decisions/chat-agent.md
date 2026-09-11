@@ -3048,3 +3048,34 @@ by `tests/unit/reporting/services/allowed_tools_contract_test.py`, which drives
 every writer off the built-in registry rather than a fixed list, and by
 `seed_config_test.py`, which resolves every seeded package's declarations
 against the registry and the seed's own toolsets.
+## AGT-054 — Denial recovery has action and session bounds
+
+**Applies to:** `action_confirmations`, `report_store.sql`, `ConfirmationPage`
+
+An identical action gets one extra prompt after denial by default. Five live
+denials scoped to the user, source, and session refuse further prompts with
+`confirmation_denial_limit`. Both limits are configurable; the window uses the
+existing record expiry rather than a new timer or migration. Counts are SQL
+aggregates over unexpired denied rows, without the UI list's 500-row limit.
+Existing approved grants remain consumable. Already outstanding confirmations
+can still receive decisions; this is a denial budget, not a cap on concurrent
+pending requests. A reversed denial no longer contributes to the live count.
+
+Only the owner decision route enables denied-to-approved reversal, with an
+expiry- and status-conditional database update. Ownership implies this ability;
+execution still validates the caller's current permissions and claims the grant
+once. MCP form continuations never enable reversal or create retry prompts in
+response to a decline; a fresh call is needed for the bounded retry.
+
+**Why:** #314 showed that fingerprint stickiness locked out honest identical
+retries while changing one argument produced unlimited prompts. One extra
+prompt makes a mis-click recoverable with the smallest retry allowance, while
+the session budget survives argument variation. Five leaves room for several
+distinct actions without allowing an unbounded sequential denial loop. Owner
+reversal provides recovery after either budget is exhausted without adding a
+model-driven prompting surface. Exponential backoff would add state without
+bounding a patient caller. The existing TTL gives operators one window to tune.
+
+The new budget refusal is an MCP error and a distinct chat block reason.
+Existing pending/denied result `isError` semantics remain unchanged; changing
+those for every client is separate from the denial policy in this issue.

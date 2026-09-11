@@ -36,7 +36,12 @@ from reporting.schema.chat import (
     ScheduledChatItem,
     ScheduledChatVersion,
 )
-from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
+from reporting.schema.confirmations import (
+    ActionConfirmation,
+    ActionConfirmationTarget,
+    ConfirmationDecision,
+    ConfirmationSource,
+)
 from reporting.schema.mcp_config import (
     SkillItem,
     SkillsetListItem,
@@ -4816,6 +4821,7 @@ class SQLModelReportStore(ReportStore):
         confirmation_id: str,
         user_id: str,
         decision: ConfirmationDecision,
+        allow_denial_reversal: bool = False,
     ) -> ActionConfirmation | None:
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
@@ -4824,7 +4830,8 @@ class SQLModelReportStore(ReportStore):
                 .where(
                     col(ActionConfirmationRecord.confirmation_id) == confirmation_id,
                     col(ActionConfirmationRecord.user_id) == user_id,
-                    col(ActionConfirmationRecord.status) == "pending",
+                    col(ActionConfirmationRecord.status)
+                    == ("denied" if allow_denial_reversal and decision == "approved" else "pending"),
                     col(ActionConfirmationRecord.expires_at) > now,
                 )
                 .values(status=decision, decided_at=now, decided_by=user_id)
@@ -4835,6 +4842,42 @@ class SQLModelReportStore(ReportStore):
             confirmation = _action_confirmation_from_record(row) if row else None
             await session.commit()
             return confirmation
+
+    async def count_action_confirmation_denials(
+        self,
+        user_id: str,
+        source: ConfirmationSource,
+        session_key: str,
+        tool_name: str,
+        target: ActionConfirmationTarget,
+        arguments_hash: str,
+    ) -> tuple[int, int]:
+        record = ActionConfirmationRecord
+        async with AsyncSession(_get_engine()) as session:
+            result = await session.execute(
+                select(
+                    func.count(),
+                    func.count().filter(
+                        and_(
+                            col(record.tool_name) == tool_name,
+                            col(record.action) == target.action,
+                            col(record.resource_type) == target.resource_type,
+                            col(record.resource_id) == target.resource_id,
+                            col(record.arguments_hash) == arguments_hash,
+                        )
+                    ),
+                )
+                .select_from(record)
+                .where(
+                    col(record.user_id) == user_id,
+                    col(record.source) == source,
+                    col(record.session_key) == session_key,
+                    col(record.status) == "denied",
+                    col(record.expires_at) > datetime.now(tz=UTC).isoformat(),
+                )
+            )
+            session_count, action_count = result.one()
+            return int(session_count), int(action_count)
 
     async def claim_action_confirmation_for_execution(
         self,
@@ -4887,7 +4930,10 @@ class SQLModelReportStore(ReportStore):
                     col(ActionConfirmationRecord.status).in_(list(statuses)),
                     col(ActionConfirmationRecord.expires_at) > now,
                 )
-                .order_by(nullslast(col(ActionConfirmationRecord.decided_at).desc()))
+                .order_by(
+                    (col(ActionConfirmationRecord.status) == "approved").desc(),
+                    nullslast(col(ActionConfirmationRecord.decided_at).desc()),
+                )
                 .limit(1)
             )
             result = await session.execute(stmt)

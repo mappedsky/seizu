@@ -1514,16 +1514,32 @@ export default function ChatInterface() {
       confirmation: ActionConfirmation,
       decision: 'approved' | 'denied',
     ) => {
-      const pendingCount = confirmations.filter(
-        (c) => c.status === 'pending',
-      ).length;
-      const wasLastPending = pendingCount === 1;
       setDecidingConfirmationId(confirmation.confirmation_id);
       setConfirmationError(null);
       try {
-        await decideConfirmation(confirmation.confirmation_id, decision);
+        const updated = await decideConfirmation(
+          confirmation.confirmation_id,
+          decision,
+        );
+        const nextConfirmations = confirmations.map((item) =>
+          item.confirmation_id === confirmation.confirmation_id
+            ? updated
+            : item,
+        );
+        const hasPendingConfirmation = nextConfirmations.some(
+          (item) => item.status === 'pending',
+        );
+        const hasDeniedBatchConfirmation =
+          updated.batch_id !== null &&
+          updated.batch_id !== undefined &&
+          nextConfirmations.some(
+            (item) =>
+              item.batch_id === updated.batch_id && item.status === 'denied',
+          );
+        const canResume =
+          !hasPendingConfirmation && !hasDeniedBatchConfirmation;
         await fetchConfirmations();
-        if (decision === 'approved' && activeThreadId && wasLastPending) {
+        if (decision === 'approved' && activeThreadId && canResume) {
           resumeConfirmationIdRef.current = confirmation.confirmation_id;
           touchSession(activeThreadId);
           await Promise.resolve(

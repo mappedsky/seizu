@@ -546,6 +546,8 @@ drop out — the live listing is the authority. Set
 | `CHAT_TOOL_RESULT_MAX_ROWS` | `100` | Maximum rows returned to chat from one tool call (normal MCP calls are unaffected). |
 | `CHAT_TOOL_RESULT_MAX_BYTES` | `200000` | Maximum serialized bytes returned to chat from one tool call. |
 | `ACTION_CONFIRMATION_TTL_SECONDS` | `1800` | Lifetime of an approved or denied mutating-action confirmation. |
+| `ACTION_CONFIRMATION_DENIAL_RETRIES` | `1` | Extra prompts allowed for an identical denied action within its confirmation window; `0` disables retries. |
+| `ACTION_CONFIRMATION_SESSION_DENIAL_LIMIT` | `5` | Unexpired denials per user/source/session that stop further prompts, including changed arguments; minimum `1`. Owners can still allow a live denied action on its confirmation page. |
 | `CHAT_TURN_RETENTION_SECONDS` | `600` | How long a finished turn stays replayable — the window a client has to reconnect. Not conversation history. |
 | `CHAT_TURN_STREAM_LATENCY_MS` | `200` | Target delay for flushing produced parts and polling their log. Polling backs off automatically while a turn is quiet. |
 | `CHAT_TURN_TIMEOUT_SECONDS` | `900` | How long one turn may run before its workflow gives up. A turn that hits this is recorded as failed rather than left running. |

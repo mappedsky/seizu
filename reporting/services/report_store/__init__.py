@@ -13,7 +13,12 @@ from reporting.schema.chat import (
     ScheduledChatItem,
     ScheduledChatVersion,
 )
-from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
+from reporting.schema.confirmations import (
+    ActionConfirmation,
+    ActionConfirmationTarget,
+    ConfirmationDecision,
+    ConfirmationSource,
+)
 from reporting.schema.mcp_config import (
     SkillItem,
     SkillsetListItem,
@@ -1420,11 +1425,31 @@ async def decide_action_confirmation(
     confirmation_id: str,
     user_id: str,
     decision: ConfirmationDecision,
+    allow_denial_reversal: bool = False,
 ) -> ActionConfirmation | None:
     return await get_store().decide_action_confirmation(
         confirmation_id=confirmation_id,
         user_id=user_id,
         decision=decision,
+        allow_denial_reversal=allow_denial_reversal,
+    )
+
+
+async def count_action_confirmation_denials(
+    user_id: str,
+    source: ConfirmationSource,
+    session_key: str,
+    tool_name: str,
+    target: ActionConfirmationTarget,
+    arguments_hash: str,
+) -> tuple[int, int]:
+    return await get_store().count_action_confirmation_denials(
+        user_id=user_id,
+        source=source,
+        session_key=session_key,
+        tool_name=tool_name,
+        target=target,
+        arguments_hash=arguments_hash,
     )
 
 

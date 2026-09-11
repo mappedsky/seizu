@@ -17,6 +17,7 @@ from reporting.schema.chat import (
 )
 from reporting.schema.confirmations import (
     ActionConfirmation,
+    ActionConfirmationTarget,
     ConfirmationDecision,
     ConfirmationSource,
 )
@@ -1384,8 +1385,21 @@ class ReportStore(ABC):
         confirmation_id: str,
         user_id: str,
         decision: ConfirmationDecision,
+        allow_denial_reversal: bool = False,
     ) -> ActionConfirmation | None:
         """Approve or deny a pending confirmation."""
+
+    @abstractmethod
+    async def count_action_confirmation_denials(
+        self,
+        user_id: str,
+        source: ConfirmationSource,
+        session_key: str,
+        tool_name: str,
+        target: ActionConfirmationTarget,
+        arguments_hash: str,
+    ) -> tuple[int, int]:
+        """Count unexpired denials for the session and the exact action fingerprint."""
 
     @abstractmethod
     async def claim_action_confirmation_for_execution(
@@ -1408,4 +1422,4 @@ class ReportStore(ABC):
         arguments_hash: str,
         statuses: tuple[str, ...] = ("approved", "denied"),
     ) -> ActionConfirmation | None:
-        """Return the newest unexpired match in *statuses* for this action scope."""
+        """Return an unexpired match, preferring approvals, then the newest decision."""

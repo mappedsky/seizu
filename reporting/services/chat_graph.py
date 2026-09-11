@@ -3208,6 +3208,11 @@ def _disclosed_tool_specs(tools: list[Tool], disclosed: set[str]) -> list[ChatTo
 
 
 def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
+    if any(result.blocked == ChatBlockReason.CONFIRMATION_DENIAL_LIMIT for result in results):
+        return (
+            "This chat has reached its confirmation denial limit. No blocked action was executed. "
+            "Wait for denials to expire or review an existing confirmation in Seizu."
+        )
     if any(result.blocked == ChatBlockReason.CONFIRMATION_REQUIRED for result in results):
         pending = [result for result in results if _confirmation_status(result.content) == "pending"]
         if not pending:
@@ -3253,6 +3258,8 @@ def _blocked_tool_call_reason_label(reason: ChatBlockReason | None) -> str:
         return "not available in this chat session"
     if reason == ChatBlockReason.CONFIRMATION_REQUIRED:
         return "confirmation required"
+    if reason == ChatBlockReason.CONFIRMATION_DENIAL_LIMIT:
+        return "confirmation denial limit reached"
     if reason == ChatBlockReason.AUTHENTICATION_REQUIRED:
         return "external authentication required"
     return "blocked"

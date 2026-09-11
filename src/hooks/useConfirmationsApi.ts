@@ -177,7 +177,9 @@ export function useConfirmationsApi(threadId?: string | null): {
       if (!res.ok) throw new Error('Failed to update confirmation');
       const data = (await res.json()) as ConfirmationResponse;
       setConfirmations((prev) =>
-        prev.filter((item) => item.confirmation_id !== confirmationId),
+        prev.map((item) =>
+          item.confirmation_id === confirmationId ? data.confirmation : item,
+        ),
       );
       return data.confirmation;
     },
