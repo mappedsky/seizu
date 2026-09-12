@@ -17,6 +17,9 @@
 .DS_Store
 /.env
 /.env.local
+# Any backup of a real .env holds the same credentials it does. Unanchored, so
+# a copy left in a subdirectory is covered too.
+.env.bak*
 /.env.development.local
 /.env.test.local
 /.env.production.local
