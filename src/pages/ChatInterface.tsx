@@ -324,6 +324,44 @@ function messageDetails(message: SeizuChatMessage): SeizuChatDetail[] {
     .filter((detail): detail is SeizuChatDetail => detail !== null);
 }
 
+/** A detail with the latest recorded continuation outcome folded in.
+ *
+ * The outcome is written by a later message than the tool detail it settles,
+ * so it is resolved against the whole transcript rather than one message.
+ */
+function resolveDetail(
+  detail: SeizuChatDetail,
+  outcomes: SeizuChatDetail[],
+): SeizuChatDetail {
+  return {
+    ...reconcileElicitationDetail(detail, outcomes),
+    children: detail.children?.map((child) => resolveDetail(child, outcomes)),
+  };
+}
+
+/** The recorded continuation outcomes in a conversation.
+ *
+ * Only a resumed detail settles anything, and a conversation holds a handful
+ * of those, so the list keeps its identity until one of them actually moves --
+ * ChatMessageRow is memoized on it and the transcript rebuilds this on every
+ * streamed token. Everything reconciliation reads is in the signature, so a
+ * held list is never a stale one.
+ */
+function useElicitationOutcomes(
+  messages: SeizuChatMessage[],
+): SeizuChatDetail[] {
+  const outcomes = messages
+    .flatMap(messageDetails)
+    .filter((detail) => detail.elicitation_resumed);
+  const signature = outcomes
+    .map(
+      (detail) =>
+        `${detail.detail_id ?? ''}:${detail.status ?? ''}:${detail.body ?? ''}`,
+    )
+    .join('|');
+  return useMemo(() => outcomes, [signature]);
+}
+
 function canLoadMore(message: SeizuChatMessage): boolean {
   if (messageText(message).includes('{% continuation /%}')) return false;
   return (
@@ -798,6 +836,286 @@ function DetailPre({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** One message in the transcript.
+ *
+ * Memoized because the page re-renders on every streamed token while the
+ * messages already finished keep their identity. Without this each token
+ * rebuilt every row's MUI subtree; on a six-message thread that was 521 row
+ * renders for one answer against 66 page renders.
+ *
+ * It only holds while the props stay shallow-comparable, so the callbacks are
+ * stable and everything else is a primitive.
+ */
+const ChatMessageRow = memo(function ChatMessageRow({
+  message,
+  busy,
+  copied,
+  elicitationOutcomes,
+  isStreaming,
+  isContinuationSource,
+  loadMore,
+  timestamp,
+  onCopy,
+  onLoadMore,
+}: {
+  message: SeizuChatMessage;
+  busy: boolean;
+  copied: boolean;
+  elicitationOutcomes: SeizuChatDetail[];
+  isStreaming: boolean;
+  isContinuationSource: boolean;
+  loadMore: boolean;
+  timestamp: string;
+  onCopy: (message: SeizuChatMessage) => void;
+  onLoadMore: (message: SeizuChatMessage) => void;
+}) {
+  const text = messageText(message);
+  const details = messageDetails(message).map((detail) =>
+    resolveDetail(detail, elicitationOutcomes),
+  );
+  return (
+    <Box>
+      <Box
+        sx={{
+          alignItems: message.role === 'user' ? 'flex-end' : 'flex-start',
+          display: 'flex',
+          flexDirection: 'column',
+          mb: 1.5,
+          // The user's turn keeps its time and copy action out
+          // of the way until the message is pointed at (or
+          // reached with the keyboard). Pointer-less devices
+          // never fire hover, so there they stay visible.
+          '&:hover .seizu-user-message-actions, &:focus-within .seizu-user-message-actions':
+            { opacity: 1 },
+        }}
+      >
+        <Box
+          sx={{
+            alignItems: 'center',
+            color: 'text.secondary',
+            display: 'flex',
+            gap: 0.75,
+            mb: 0.5,
+          }}
+        >
+          {message.role === 'user' ? (
+            <Person fontSize="small" />
+          ) : (
+            <SmartToy fontSize="small" />
+          )}
+          <Typography variant="caption">
+            {message.role === 'user' ? 'You' : 'Assistant'}
+          </Typography>
+        </Box>
+        {message.role === 'assistant' && details.length > 0 ? (
+          <ChatMessageDetails details={details} isStreaming={isStreaming} />
+        ) : null}
+        <Box
+          sx={{
+            bgcolor: message.role === 'user' ? 'primary.main' : 'action.hover',
+            border: message.role === 'user' ? 0 : 1,
+            borderColor: message.role === 'user' ? 'transparent' : 'divider',
+            borderRadius: 2,
+            color:
+              message.role === 'user' ? 'primary.contrastText' : 'text.primary',
+            maxWidth: { xs: '92%', md: '74%' },
+            px: 1.5,
+            py: 1,
+            whiteSpace: message.role === 'user' ? 'pre-wrap' : 'normal',
+            wordBreak: 'break-word',
+          }}
+        >
+          {message.role === 'user' ? (
+            <Typography variant="body2">
+              {text || (busy ? '...' : '')}
+            </Typography>
+          ) : (
+            <Box
+              sx={(theme) => ({
+                color: 'text.primary',
+                fontSize: theme.typography.body2.fontSize,
+                lineHeight: theme.typography.body2.lineHeight,
+                width: '100%',
+                '& > :first-child': { mt: 0 },
+                '& > :last-child': { mb: 0 },
+                '& p': {
+                  fontSize: 'inherit',
+                  lineHeight: 'inherit',
+                  mb: 1,
+                  mt: 0,
+                },
+                '& ul, & ol': {
+                  fontSize: 'inherit',
+                  lineHeight: 'inherit',
+                  my: 1,
+                  pl: 2.5,
+                },
+                '& li': { mb: 0.5, pl: 0.25 },
+                '& li > p': { mb: 0.5 },
+                '& h2, & h3, & h4, & h5, & h6': {
+                  fontSize: theme.typography.subtitle2.fontSize,
+                  fontWeight: 600,
+                  lineHeight: theme.typography.subtitle2.lineHeight,
+                  mb: 1,
+                  mt: 1.25,
+                },
+                '& hr': {
+                  border: 0,
+                  borderTop: 1,
+                  borderColor: 'divider',
+                  my: 2,
+                },
+                '& pre': {
+                  bgcolor: 'background.paper',
+                  border: 1,
+                  borderColor: 'divider',
+                  borderRadius: 1,
+                  fontFamily: '"JetBrains Mono", monospace',
+                  fontSize: theme.typography.caption.fontSize,
+                  lineHeight: 1.55,
+                  my: 1.25,
+                  overflowX: 'auto',
+                  p: 1,
+                  whiteSpace: 'pre',
+                },
+                '& code': {
+                  bgcolor: 'background.paper',
+                  borderRadius: 0.5,
+                  fontFamily: '"JetBrains Mono", monospace',
+                  fontSize: '0.9em',
+                  px: 0.5,
+                },
+                '& pre code': {
+                  bgcolor: 'transparent',
+                  borderRadius: 0,
+                  display: 'block',
+                  fontSize: 'inherit',
+                  lineHeight: 'inherit',
+                  p: 0,
+                  whiteSpace: 'inherit',
+                },
+                '& img': {
+                  height: 'auto',
+                  maxWidth: '100%',
+                },
+              })}
+            >
+              {isStreaming ? (
+                <StreamingMarkdown text={stripOutputLimitNotice(text)} />
+              ) : (
+                <MarkdocRenderer
+                  source={stripOutputLimitNotice(text) || (busy ? '...' : '')}
+                  untrustedUrls
+                />
+              )}
+              {loadMore && !isContinuationSource ? (
+                <Box sx={{ mt: 1 }}>
+                  <Button
+                    aria-label="Load more response"
+                    disabled={busy}
+                    fullWidth
+                    onClick={() => {
+                      onLoadMore(message);
+                    }}
+                    startIcon={<KeyboardDoubleArrowDown />}
+                    sx={{
+                      justifyContent: 'center',
+                    }}
+                    variant="outlined"
+                  >
+                    Continue response
+                  </Button>
+                </Box>
+              ) : null}
+              <Box
+                aria-label="Assistant response actions"
+                sx={{
+                  alignItems: 'center',
+                  display: 'flex',
+                  gap: 0.5,
+                  justifyContent: 'flex-start',
+                  mt: 1,
+                }}
+              >
+                <Tooltip title={copied ? 'Copied' : 'Copy response'}>
+                  <span>
+                    <IconButton
+                      aria-label="Copy assistant response"
+                      disabled={!text}
+                      onClick={() => {
+                        void onCopy(message);
+                      }}
+                      size="small"
+                      sx={{
+                        color: 'text.secondary',
+                        p: 0.25,
+                      }}
+                    >
+                      {copied ? (
+                        <Check sx={{ fontSize: 16 }} />
+                      ) : (
+                        <ContentCopy sx={{ fontSize: 16 }} />
+                      )}
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                {timestamp ? (
+                  <Typography
+                    variant="caption"
+                    sx={{ color: 'text.secondary' }}
+                  >
+                    {timestamp}
+                  </Typography>
+                ) : null}
+              </Box>
+            </Box>
+          )}
+        </Box>
+        {message.role === 'user' ? (
+          <Box
+            aria-label="User message actions"
+            className="seizu-user-message-actions"
+            sx={{
+              alignItems: 'center',
+              display: 'flex',
+              gap: 0.5,
+              mt: 0.25,
+              opacity: 0,
+              transition: 'opacity 120ms ease',
+              '@media (hover: none)': { opacity: 1 },
+            }}
+          >
+            {timestamp ? (
+              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                {timestamp}
+              </Typography>
+            ) : null}
+            <Tooltip title={copied ? 'Copied' : 'Copy message'}>
+              <span>
+                <IconButton
+                  aria-label="Copy your message"
+                  disabled={!text}
+                  onClick={() => {
+                    void onCopy(message);
+                  }}
+                  size="small"
+                  sx={{ color: 'text.secondary', p: 0.25 }}
+                >
+                  {copied ? (
+                    <Check sx={{ fontSize: 16 }} />
+                  ) : (
+                    <ContentCopy sx={{ fontSize: 16 }} />
+                  )}
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Box>
+        ) : null}
+      </Box>
+    </Box>
+  );
+});
+
 export default function ChatInterface() {
   const navigate = useNavigate();
   const { threadId: routeThreadId } = useParams<{ threadId?: string }>();
@@ -873,6 +1191,14 @@ export default function ChatInterface() {
     ReadonlySet<string>
   >(() => new Set());
   const [confirmationsOpen, setConfirmationsOpen] = useState(false);
+  // Inline arrows here defeat the panels' own memo: a new identity every
+  // render means both re-render on every streamed token, which is most of
+  // the work a long answer does.
+  const togglePanel = useCallback(() => setPanelOpen((open) => !open), []);
+  const toggleConfirmations = useCallback(
+    () => setConfirmationsOpen((open) => !open),
+    [],
+  );
   // Off by default every visit; bypassing confirmations is an explicit,
   // per-session opt-in for users holding chat:bypass_permissions.
   const [bypassConfirmations, setBypassConfirmations] = useState(false);
@@ -1296,14 +1622,7 @@ export default function ChatInterface() {
     () => messages.filter((message) => message.metadata?.seizu_hidden !== true),
     [messages],
   );
-  const elicitationOutcomes = useMemo(
-    () => visibleMessages.flatMap(messageDetails),
-    [visibleMessages],
-  );
-  const resolvedDetail = (detail: SeizuChatDetail): SeizuChatDetail => ({
-    ...reconcileElicitationDetail(detail, elicitationOutcomes),
-    children: detail.children?.map(resolvedDetail),
-  });
+  const elicitationOutcomes = useElicitationOutcomes(visibleMessages);
   // A message only carries a server timestamp once it comes back from
   // /chat/history; the copy the stream produces has none. So a message that is
   // neither timed nor yet persisted is stamped with the browser's clock, and
@@ -1637,7 +1956,14 @@ export default function ChatInterface() {
     setSearchParams(next, { replace: true });
   }, [activeThreadId, busy, searchParams, resumeHumanInput, setSearchParams]);
 
-  const handleCopyMessage = async (message: SeizuChatMessage) => {
+  const handleConfirmationDecisionSync = useCallback(
+    (confirmation: ActionConfirmation, decision: 'approved' | 'denied') => {
+      void handleConfirmationDecision(confirmation, decision);
+    },
+    [handleConfirmationDecision],
+  );
+
+  const handleCopyMessage = useCallback(async (message: SeizuChatMessage) => {
     const text = messageText(message);
     if (!text || !navigator.clipboard) return;
     try {
@@ -1651,7 +1977,7 @@ export default function ChatInterface() {
         current === message.id ? null : current,
       );
     }, 1800);
-  };
+  }, []);
 
   const handleLoadMore = useCallback(
     (message: SeizuChatMessage) => {
@@ -1772,7 +2098,7 @@ export default function ChatInterface() {
       >
         <ChatSessionsPanel
           open={panelOpen}
-          onToggle={() => setPanelOpen((v) => !v)}
+          onToggle={togglePanel}
           sessions={sessions}
           loading={sessionsLoading}
           activeThreadId={activeThreadId}
@@ -1813,7 +2139,7 @@ export default function ChatInterface() {
       >
         <ChatSessionsPanel
           open={panelOpen}
-          onToggle={() => setPanelOpen((v) => !v)}
+          onToggle={togglePanel}
           sessions={sessions}
           loading={sessionsLoading}
           activeThreadId={activeThreadId}
@@ -1879,7 +2205,7 @@ export default function ChatInterface() {
     >
       <ChatSessionsPanel
         open={panelOpen}
-        onToggle={() => setPanelOpen((v) => !v)}
+        onToggle={togglePanel}
         sessions={sessions}
         loading={sessionsLoading}
         activeThreadId={activeThreadId}
@@ -1955,286 +2281,23 @@ export default function ChatInterface() {
                 </Box>
               ) : (
                 <>
-                  {visibleMessages.map((message) => {
-                    const text = messageText(message);
-                    const details = messageDetails(message).map(resolvedDetail);
-                    const copied = copiedMessageId === message.id;
-                    const loadMore = continuableMessage?.id === message.id;
-                    const isContinuationSource =
-                      pendingContinuationTargetMessageId === message.id;
-                    const timestamp = messageTime(message);
-                    return (
-                      <Box key={message.id}>
-                        <Box
-                          sx={{
-                            alignItems:
-                              message.role === 'user'
-                                ? 'flex-end'
-                                : 'flex-start',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            mb: 1.5,
-                            // The user's turn keeps its time and copy action out
-                            // of the way until the message is pointed at (or
-                            // reached with the keyboard). Pointer-less devices
-                            // never fire hover, so there they stay visible.
-                            '&:hover .seizu-user-message-actions, &:focus-within .seizu-user-message-actions':
-                              { opacity: 1 },
-                          }}
-                        >
-                          <Box
-                            sx={{
-                              alignItems: 'center',
-                              color: 'text.secondary',
-                              display: 'flex',
-                              gap: 0.75,
-                              mb: 0.5,
-                            }}
-                          >
-                            {message.role === 'user' ? (
-                              <Person fontSize="small" />
-                            ) : (
-                              <SmartToy fontSize="small" />
-                            )}
-                            <Typography variant="caption">
-                              {message.role === 'user' ? 'You' : 'Assistant'}
-                            </Typography>
-                          </Box>
-                          {message.role === 'assistant' &&
-                          details.length > 0 ? (
-                            <ChatMessageDetails
-                              details={details}
-                              isStreaming={message.id === streamingMessageId}
-                            />
-                          ) : null}
-                          <Box
-                            sx={{
-                              bgcolor:
-                                message.role === 'user'
-                                  ? 'primary.main'
-                                  : 'action.hover',
-                              border: message.role === 'user' ? 0 : 1,
-                              borderColor:
-                                message.role === 'user'
-                                  ? 'transparent'
-                                  : 'divider',
-                              borderRadius: 2,
-                              color:
-                                message.role === 'user'
-                                  ? 'primary.contrastText'
-                                  : 'text.primary',
-                              maxWidth: { xs: '92%', md: '74%' },
-                              px: 1.5,
-                              py: 1,
-                              whiteSpace:
-                                message.role === 'user' ? 'pre-wrap' : 'normal',
-                              wordBreak: 'break-word',
-                            }}
-                          >
-                            {message.role === 'user' ? (
-                              <Typography variant="body2">
-                                {text || (busy ? '...' : '')}
-                              </Typography>
-                            ) : (
-                              <Box
-                                sx={(theme) => ({
-                                  color: 'text.primary',
-                                  fontSize: theme.typography.body2.fontSize,
-                                  lineHeight: theme.typography.body2.lineHeight,
-                                  width: '100%',
-                                  '& > :first-child': { mt: 0 },
-                                  '& > :last-child': { mb: 0 },
-                                  '& p': {
-                                    fontSize: 'inherit',
-                                    lineHeight: 'inherit',
-                                    mb: 1,
-                                    mt: 0,
-                                  },
-                                  '& ul, & ol': {
-                                    fontSize: 'inherit',
-                                    lineHeight: 'inherit',
-                                    my: 1,
-                                    pl: 2.5,
-                                  },
-                                  '& li': { mb: 0.5, pl: 0.25 },
-                                  '& li > p': { mb: 0.5 },
-                                  '& h2, & h3, & h4, & h5, & h6': {
-                                    fontSize:
-                                      theme.typography.subtitle2.fontSize,
-                                    fontWeight: 600,
-                                    lineHeight:
-                                      theme.typography.subtitle2.lineHeight,
-                                    mb: 1,
-                                    mt: 1.25,
-                                  },
-                                  '& hr': {
-                                    border: 0,
-                                    borderTop: 1,
-                                    borderColor: 'divider',
-                                    my: 2,
-                                  },
-                                  '& pre': {
-                                    bgcolor: 'background.paper',
-                                    border: 1,
-                                    borderColor: 'divider',
-                                    borderRadius: 1,
-                                    fontFamily: '"JetBrains Mono", monospace',
-                                    fontSize: theme.typography.caption.fontSize,
-                                    lineHeight: 1.55,
-                                    my: 1.25,
-                                    overflowX: 'auto',
-                                    p: 1,
-                                    whiteSpace: 'pre',
-                                  },
-                                  '& code': {
-                                    bgcolor: 'background.paper',
-                                    borderRadius: 0.5,
-                                    fontFamily: '"JetBrains Mono", monospace',
-                                    fontSize: '0.9em',
-                                    px: 0.5,
-                                  },
-                                  '& pre code': {
-                                    bgcolor: 'transparent',
-                                    borderRadius: 0,
-                                    display: 'block',
-                                    fontSize: 'inherit',
-                                    lineHeight: 'inherit',
-                                    p: 0,
-                                    whiteSpace: 'inherit',
-                                  },
-                                  '& img': {
-                                    height: 'auto',
-                                    maxWidth: '100%',
-                                  },
-                                })}
-                              >
-                                {message.id === streamingMessageId ? (
-                                  <StreamingMarkdown
-                                    text={stripOutputLimitNotice(text)}
-                                  />
-                                ) : (
-                                  <MarkdocRenderer
-                                    source={
-                                      stripOutputLimitNotice(text) ||
-                                      (busy ? '...' : '')
-                                    }
-                                    untrustedUrls
-                                  />
-                                )}
-                                {loadMore && !isContinuationSource ? (
-                                  <Box sx={{ mt: 1 }}>
-                                    <Button
-                                      aria-label="Load more response"
-                                      disabled={busy}
-                                      fullWidth
-                                      onClick={() => {
-                                        handleLoadMore(message);
-                                      }}
-                                      startIcon={<KeyboardDoubleArrowDown />}
-                                      sx={{
-                                        justifyContent: 'center',
-                                      }}
-                                      variant="outlined"
-                                    >
-                                      Continue response
-                                    </Button>
-                                  </Box>
-                                ) : null}
-                                <Box
-                                  aria-label="Assistant response actions"
-                                  sx={{
-                                    alignItems: 'center',
-                                    display: 'flex',
-                                    gap: 0.5,
-                                    justifyContent: 'flex-start',
-                                    mt: 1,
-                                  }}
-                                >
-                                  <Tooltip
-                                    title={copied ? 'Copied' : 'Copy response'}
-                                  >
-                                    <span>
-                                      <IconButton
-                                        aria-label="Copy assistant response"
-                                        disabled={!text}
-                                        onClick={() => {
-                                          void handleCopyMessage(message);
-                                        }}
-                                        size="small"
-                                        sx={{
-                                          color: 'text.secondary',
-                                          p: 0.25,
-                                        }}
-                                      >
-                                        {copied ? (
-                                          <Check sx={{ fontSize: 16 }} />
-                                        ) : (
-                                          <ContentCopy sx={{ fontSize: 16 }} />
-                                        )}
-                                      </IconButton>
-                                    </span>
-                                  </Tooltip>
-                                  {timestamp ? (
-                                    <Typography
-                                      variant="caption"
-                                      sx={{ color: 'text.secondary' }}
-                                    >
-                                      {timestamp}
-                                    </Typography>
-                                  ) : null}
-                                </Box>
-                              </Box>
-                            )}
-                          </Box>
-                          {message.role === 'user' ? (
-                            <Box
-                              aria-label="User message actions"
-                              className="seizu-user-message-actions"
-                              sx={{
-                                alignItems: 'center',
-                                display: 'flex',
-                                gap: 0.5,
-                                mt: 0.25,
-                                opacity: 0,
-                                transition: 'opacity 120ms ease',
-                                '@media (hover: none)': { opacity: 1 },
-                              }}
-                            >
-                              {timestamp ? (
-                                <Typography
-                                  variant="caption"
-                                  sx={{ color: 'text.secondary' }}
-                                >
-                                  {timestamp}
-                                </Typography>
-                              ) : null}
-                              <Tooltip
-                                title={copied ? 'Copied' : 'Copy message'}
-                              >
-                                <span>
-                                  <IconButton
-                                    aria-label="Copy your message"
-                                    disabled={!text}
-                                    onClick={() => {
-                                      void handleCopyMessage(message);
-                                    }}
-                                    size="small"
-                                    sx={{ color: 'text.secondary', p: 0.25 }}
-                                  >
-                                    {copied ? (
-                                      <Check sx={{ fontSize: 16 }} />
-                                    ) : (
-                                      <ContentCopy sx={{ fontSize: 16 }} />
-                                    )}
-                                  </IconButton>
-                                </span>
-                              </Tooltip>
-                            </Box>
-                          ) : null}
-                        </Box>
-                      </Box>
-                    );
-                  })}
+                  {visibleMessages.map((message) => (
+                    <ChatMessageRow
+                      key={message.id}
+                      busy={busy}
+                      copied={copiedMessageId === message.id}
+                      elicitationOutcomes={elicitationOutcomes}
+                      isContinuationSource={
+                        pendingContinuationTargetMessageId === message.id
+                      }
+                      isStreaming={message.id === streamingMessageId}
+                      loadMore={continuableMessage?.id === message.id}
+                      message={message}
+                      onCopy={handleCopyMessage}
+                      onLoadMore={handleLoadMore}
+                      timestamp={messageTime(message)}
+                    />
+                  ))}
                   {elicitations.items.map((item) => (
                     <ChatElicitationCard
                       key={item.elicitation_id}
@@ -2404,10 +2467,8 @@ export default function ChatInterface() {
         error={confirmationsError}
         open={confirmationsOpen}
         decidingId={decidingConfirmationId}
-        onToggle={() => setConfirmationsOpen((v) => !v)}
-        onDecision={(confirmation, decision) => {
-          void handleConfirmationDecision(confirmation, decision);
-        }}
+        onToggle={toggleConfirmations}
+        onDecision={handleConfirmationDecisionSync}
       />
     </Box>
   );
