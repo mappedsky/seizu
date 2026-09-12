@@ -449,6 +449,7 @@ Settings: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `TEMP
 | `sqs` | ElasticMQ (local SQS) |
 | `authentik-*` | OIDC provider (`auth` profile) |
 | `external-mcp-deps` | deps.dev package-metadata MCP server (`external-mcp` profile) |
+| `external-mcp-elicitation-tester` | Elicitation scenario catalogue for manual testing (`external-mcp` profile) |
 | `cartography` | Graph data sync (`nostart` profile) |
 
 Dev URLs: frontend `:3000`, backend `:8080`, Authentik `:9000`, Temporal UI `:8233`.

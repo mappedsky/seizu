@@ -313,6 +313,31 @@ services:
       - DEPSDEVMCP_CACHE_CAPACITY
     networks:
       database:
+  # An MCP server that exists to be answered badly: a catalogue of elicitation
+  # shapes, most of which a conforming client is expected to refuse. It is a
+  # manual-testing fixture, so it stays out of MCP_EXTERNAL_PROXIES until
+  # someone puts it there; see .env.example.
+  external-mcp-elicitation-tester:
+    image: ghcr.io/mappedsky/elicitationtestermcp:0.2.0
+    command:
+      - -http-address
+      - 0.0.0.0:8080
+      # Every URL scenario is derived from this one value, and it must be the
+      # origin the proxy's user_authorization.reauthorize_url names. The port is
+      # published because both sides need to reach it: the backend resolves the
+      # origin, and a person opens the link the chat renders.
+      - -allowed-url
+      - ${DEV_ELICITATION_TESTER_URL:-http://localhost:8090/authorize}
+      # Fixed rather than per-process, so restarting the container does not
+      # strand an input request a user already parked.
+      - -state-secret
+      - ${DEV_ELICITATION_TESTER_STATE_SECRET:-seizu-dev}
+    profiles:
+      - external-mcp
+    ports:
+      - ${DEV_ELICITATION_TESTER_PORT:-8090}:8080
+    networks:
+      database:
   external-mcp-github:
     image: ghcr.io/github/github-mcp-server:latest
     command: ["http"]

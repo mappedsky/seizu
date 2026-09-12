@@ -341,6 +341,25 @@ stack has real tools to discover rather than a stub:
   graph records, and neither of which the sandbox can fetch, since it has no
   egress. Read-only and unauthenticated; only a package name and version leave
   the network.
+- [`mappedsky/elicitationtestermcp`](https://github.com/mappedsky/elicitationtestermcp),
+  a catalogue of elicitation shapes for testing this client against. Most of them
+  are shapes a conforming client should **refuse**, so a refusal is the pass
+  condition rather than a failure; each scenario states which it is. It is a
+  manual-testing fixture and is not in the example `MCP_EXTERNAL_PROXIES` above.
+
+  Wiring it takes two proxies, because one endpoint cannot serve both protocols:
+  `/mcp` carries input requests in the tool result, and `/mcp/legacy` negotiates
+  the older revision where the server sends elicitation requests during the call.
+  Both entries need `elicitation.form`/`elicitation.url` alongside
+  `MCP_EXTERNAL_ELICITATION_ENABLED`, and their `user_authorization.reauthorize_url`
+  has to match the tester's `-allowed-url`: every URL scenario is derived from
+  that one value, so a mismatch refuses all of them including the ones meant to
+  pass. `.env.example` carries a ready entry.
+
+  The bundled `elicitation-testing` Agent Plugin declares both proxies' tools so
+  the scenarios are reachable with progressive disclosure on. It ships
+  **disabled**, since its skills are useless, and their dependencies unresolvable,
+  wherever the tester is not running.
 
 The profile also runs
 [`obot-platform/mcp-oauth-proxy`](https://github.com/obot-platform/mcp-oauth-proxy)

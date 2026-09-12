@@ -1,0 +1,36 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "description": "Manual testing against the elicitation tester MCP, which serves a catalogue of elicitation shapes most of which a conforming client should refuse. Off by default; it is a fixture, not a capability.",
+  "extensions": {
+    "com.mappedsky.seizu": {
+      "skills": {
+        "elicitation-scenarios": {
+          "aliases": [
+            "elicitation_testing__elicitation_scenarios"
+          ],
+          "title": "Elicitation Scenarios",
+          "triggers": [
+            "run an elicitation scenario",
+            "test elicitation handling",
+            "elicitation tester",
+            "exercise the elicitation catalogue",
+            "check how a form or url elicitation is rendered"
+          ]
+        },
+        "elicitation-scenarios-legacy": {
+          "aliases": [
+            "elicitation_testing__elicitation_scenarios_legacy"
+          ],
+          "title": "Elicitation Scenarios (legacy protocol)",
+          "triggers": [
+            "test legacy elicitation",
+            "elicitation over the older protocol",
+            "synchronous elicitation create"
+          ]
+        }
+      }
+    }
+  },
+  "name": "elicitation-testing",
+  "version": "1.0.0"
+}
