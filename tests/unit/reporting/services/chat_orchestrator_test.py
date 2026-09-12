@@ -769,6 +769,11 @@ async def test_worker_step_always_disclosed_tools_available_after_skill_renders(
     # restricts active_specs to only the required skill spec.  Previously, a skill
     # with tools_required=[] would render, and the follow-up sandbox__delegate call
     # would fail because sandbox__delegate was absent from available.
+    #
+    # The regression only exists on the disclosure path, so the setting is
+    # pinned rather than inherited: with it off in the environment the step
+    # gets every tool anyway and the test asserts nothing.
+    mocker.patch("reporting.settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE", True)
     skill = chat_graph.ChatToolSpec(
         name="cve_response__cve_severity_analysis",
         kind="skill",
