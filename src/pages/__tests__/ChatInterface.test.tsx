@@ -18,6 +18,7 @@ import * as useChatHistoryModule from 'src/hooks/useChatHistory';
 import * as useChatSessionsModule from 'src/hooks/useChatSessions';
 import * as useModelProfilesApiModule from 'src/hooks/useModelProfilesApi';
 import * as useConfirmationsApiModule from 'src/hooks/useConfirmationsApi';
+import * as useChatElicitationsModule from 'src/hooks/useChatElicitations';
 import { useChat } from '@ai-sdk/react';
 import { type ChatOnFinishCallback, type UIMessage } from 'ai';
 import { SeizuChatTransport } from 'src/api/chatTransport';
@@ -152,6 +153,7 @@ const theme = createTheme();
 type ChatRenderOptions = {
   accessToken?: string | null;
   chatEnabled?: boolean;
+  elicitationEnabled?: boolean;
   initialPath?: string;
 };
 
@@ -160,6 +162,7 @@ type ChatRenderOptions = {
 function chatTree({
   accessToken = 'token-123',
   chatEnabled = true,
+  elicitationEnabled = false,
   initialPath = '/app/chat/thread-1',
 }: ChatRenderOptions = {}) {
   return (
@@ -172,7 +175,11 @@ function chatTree({
         }}
       >
         <FeaturesContext.Provider
-          value={{ ...DEFAULT_FEATURES, chat: chatEnabled }}
+          value={{
+            ...DEFAULT_FEATURES,
+            chat: chatEnabled,
+            chat_elicitation: elicitationEnabled,
+          }}
         >
           <AuthContext.Provider value={{ accessToken, isLoading: false }}>
             <ThemeProvider theme={theme}>
@@ -630,6 +637,86 @@ describe('ChatInterface', () => {
       { body: { resume_confirmation_id: 'confirm-1' } },
     );
   });
+
+  for (const status of ['pending', 'accepted'] as const) {
+    it(`resumes a ${status} elicitation through an ID-only chat command`, async () => {
+      const respond = jest.fn().mockResolvedValue(undefined);
+      const sendMessage = jest.fn();
+      mockUseChat.mockReturnValue({
+        id: 'thread-1',
+        messages: [
+          {
+            id: 'user-1',
+            role: 'user',
+            parts: [{ type: 'text', text: 'Run the tool' }],
+          },
+        ],
+        sendMessage,
+        regenerate: jest.fn(),
+        stop: jest.fn(),
+        resumeStream: jest.fn(),
+        addToolResult: jest.fn(),
+        addToolOutput: jest.fn(),
+        addToolApprovalResponse: jest.fn(),
+        status: 'ready',
+        error: undefined,
+        setMessages: jest.fn(),
+        clearError: jest.fn(),
+      });
+      const item: useChatElicitationsModule.ChatElicitation = {
+        elicitation_id: 'input-1',
+        group_id: 'group-1',
+        thread_id: 'thread-1',
+        proxy_name: 'demo',
+        tool_name: 'demo__ask',
+        kind: 'form',
+        message: 'Choose a label',
+        status,
+        expires_at: '2099-01-01T00:00:00Z',
+        requested_schema: {
+          properties: { label: { type: 'string', title: 'Label' } },
+        },
+      };
+      jest
+        .spyOn(useChatElicitationsModule, 'useChatElicitations')
+        .mockReturnValue({
+          items: [item],
+          error: null,
+          respond,
+        });
+      renderChat({ elicitationEnabled: true });
+      const button = await screen.findByRole('button', {
+        name: status === 'pending' ? 'Submit' : 'Continue chat',
+      });
+      if (status === 'pending') {
+        fireEvent.change(screen.getByLabelText('Label'), {
+          target: { value: 'private answer' },
+        });
+      }
+      fireEvent.click(button);
+      await waitFor(() =>
+        expect(sendMessage).toHaveBeenCalledWith(
+          {
+            id: 'resume-input-1',
+            role: 'user',
+            metadata: { seizu_hidden: true },
+            parts: [],
+          },
+          { body: { resume_elicitation_id: 'input-1' } },
+        ),
+      );
+      if (status === 'pending') {
+        expect(respond).toHaveBeenCalledWith('input-1', 'accept', {
+          label: 'private answer',
+        });
+      } else {
+        expect(respond).not.toHaveBeenCalled();
+      }
+      expect(
+        mockUseChatSessions.mock.results.at(-1)!.value.touchSession,
+      ).toHaveBeenCalledWith('thread-1');
+    });
+  }
 
   it('shows a not-found state for a missing linked session', async () => {
     renderChat({ initialPath: '/app/chat/missing-session' });

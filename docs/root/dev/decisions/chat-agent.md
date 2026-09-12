@@ -3129,3 +3129,26 @@ receipts survive; its earlier model loop does not (SBX-005, SBX-008).
 **Why:** retaining or reconstructing a subagent transcript would introduce a
 second continuation lifecycle. The persistent sandbox already carries work
 into a new delegation.
+
+## AGT-056 — Human-input resumes share dispatch, not approval semantics
+
+**Applies to:** `useChatHumanInputResume`, `ChatInterface`
+
+Approval decisions, external-input responses, and approval recovery links use
+one browser dispatcher for hidden ID-only continuation messages. Dispatch
+checks the originating conversation against the current conversation and sends
+exactly one kind-specific resume field. Decisions and response values remain
+in their respective owner-scoped APIs; their pending-group rules, cancellation
+semantics, and server-side execution claims remain separate.
+
+**Why:** the duplicated send paths had already diverged: approval resumes
+touched the session and carried a second, mutable fallback ID, while elicitation
+resumes did neither. A shared dispatcher removes that drift and prevents an
+answer finishing after navigation from resuming into another thread. Routing
+the agent through Seizu's own MCP endpoint would add transport, identity, and
+capability handling around the already shared runtime (AGT-050). Answering an
+external form supplies input, not an action grant, so combining the decision
+stores or treating acceptance as approval would erase a security boundary.
+
+**Don't:** put response values in the hidden message, use MCP loopback for
+first-party approvals, or make a generic resume bypass either kind's checks.

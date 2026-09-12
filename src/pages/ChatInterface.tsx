@@ -65,6 +65,7 @@ import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
 import ChatElicitationCard from 'src/components/ChatElicitationCard';
 import { useChatElicitations } from 'src/hooks/useChatElicitations';
+import { useChatHumanInputResume } from 'src/hooks/useChatHumanInputResume';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { pageContentSx } from 'src/theme/layout';
 
@@ -320,15 +321,6 @@ function stripOutputLimitNotice(text: string): string {
     .replace(OUTPUT_LIMIT_NOTICE, '')
     .replace(OUTPUT_LIMIT_TOOL_NOTICE, '')
     .trimEnd();
-}
-
-function hiddenResumeMessage(confirmationId: string): SeizuChatMessage {
-  return {
-    id: `resume-${confirmationId}`,
-    role: 'user',
-    metadata: { seizu_hidden: true },
-    parts: [],
-  };
 }
 
 // Split a streaming response into completed blocks (separated by blank lines)
@@ -897,7 +889,6 @@ export default function ChatInterface() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const accessTokenRef = useRef(accessToken);
   const chatIdRef = useRef('__pending__');
-  const resumeConfirmationIdRef = useRef<string | null>(null);
   const consumedResumeParamRef = useRef<string | null>(null);
   // resumeStream comes back from useChat, which is declared after the onFinish
   // callback that needs it.
@@ -1091,7 +1082,7 @@ export default function ChatInterface() {
           const resumeConfirmationId =
             typeof body?.resume_confirmation_id === 'string'
               ? body.resume_confirmation_id
-              : resumeConfirmationIdRef.current;
+              : null;
           const continueResponse = body?.continue_response === true;
           const resumeElicitationId =
             typeof body?.resume_elicitation_id === 'string'
@@ -1101,7 +1092,6 @@ export default function ChatInterface() {
             typeof body?.continue_message_id === 'string'
               ? body.continue_message_id
               : undefined;
-          resumeConfirmationIdRef.current = null;
           return {
             message:
               resumeConfirmationId || resumeElicitationId || continueResponse
@@ -1522,6 +1512,11 @@ export default function ChatInterface() {
     useFeature('chat_elicitation') ? activeThreadId : null,
     busy,
   );
+  const resumeHumanInput = useChatHumanInputResume(
+    activeThreadId,
+    sendMessage,
+    touchSession,
+  );
 
   const handleConfirmationDecision = useCallback(
     async (
@@ -1554,13 +1549,11 @@ export default function ChatInterface() {
           !hasPendingConfirmation && !hasDeniedBatchConfirmation;
         await fetchConfirmations();
         if (decision === 'approved' && activeThreadId && canResume) {
-          resumeConfirmationIdRef.current = confirmation.confirmation_id;
-          touchSession(activeThreadId);
-          await Promise.resolve(
-            sendMessage(hiddenResumeMessage(confirmation.confirmation_id), {
-              body: { resume_confirmation_id: confirmation.confirmation_id },
-            }),
-          );
+          await resumeHumanInput({
+            kind: 'confirmation',
+            id: confirmation.confirmation_id,
+            threadId: activeThreadId,
+          });
         }
       } catch {
         setConfirmationError('Failed to approve or resume this confirmation.');
@@ -1573,8 +1566,7 @@ export default function ChatInterface() {
       confirmations,
       decideConfirmation,
       fetchConfirmations,
-      sendMessage,
-      touchSession,
+      resumeHumanInput,
     ],
   );
 
@@ -1584,30 +1576,17 @@ export default function ChatInterface() {
     if (!resumeConfirmationId) return;
     if (consumedResumeParamRef.current === resumeConfirmationId) return;
     consumedResumeParamRef.current = resumeConfirmationId;
-    resumeConfirmationIdRef.current = resumeConfirmationId;
-    touchSession(activeThreadId);
-    try {
-      void Promise.resolve(
-        sendMessage(hiddenResumeMessage(resumeConfirmationId), {
-          body: { resume_confirmation_id: resumeConfirmationId },
-        }),
-      ).catch(() => {
-        setConfirmationError('Failed to resume the approved confirmation.');
-      });
-    } catch {
+    void resumeHumanInput({
+      kind: 'confirmation',
+      id: resumeConfirmationId,
+      threadId: activeThreadId,
+    }).catch(() => {
       setConfirmationError('Failed to resume the approved confirmation.');
-    }
+    });
     const next = new URLSearchParams(searchParams);
     next.delete('resume_confirmation_id');
     setSearchParams(next, { replace: true });
-  }, [
-    activeThreadId,
-    busy,
-    searchParams,
-    sendMessage,
-    setSearchParams,
-    touchSession,
-  ]);
+  }, [activeThreadId, busy, searchParams, resumeHumanInput, setSearchParams]);
 
   const handleCopyMessage = async (message: SeizuChatMessage) => {
     const text = messageText(message);
@@ -2226,25 +2205,19 @@ export default function ChatInterface() {
                               other.status === 'pending',
                           )
                         ) {
-                          await sendMessage(
-                            hiddenResumeMessage(item.elicitation_id),
-                            {
-                              body: {
-                                resume_elicitation_id: item.elicitation_id,
-                              },
-                            },
-                          );
+                          await resumeHumanInput({
+                            kind: 'elicitation',
+                            id: item.elicitation_id,
+                            threadId: item.thread_id,
+                          });
                         }
                       }}
                       onResume={async () => {
-                        await sendMessage(
-                          hiddenResumeMessage(item.elicitation_id),
-                          {
-                            body: {
-                              resume_elicitation_id: item.elicitation_id,
-                            },
-                          },
-                        );
+                        await resumeHumanInput({
+                          kind: 'elicitation',
+                          id: item.elicitation_id,
+                          threadId: item.thread_id,
+                        });
                       }}
                     />
                   ))}
