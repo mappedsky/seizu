@@ -887,13 +887,17 @@ async def _call_tool_once(
                 # synthetic tool is stale and the user can retry discovery.
                 await session.list_tools()
                 return ExternalToolResult(json.dumps({"authenticated": True, "proxy": proxy.name}))
-            result = await session.call_tool(remote_name, arguments, allow_input_required=True, **continuation)
+            result = await session.call_tool(
+                remote_name, arguments, allow_input_required=True, **continuation.call_kwargs
+            )
             modern = session.discover_result is not None if isinstance(result, InputRequiredResult) else False
     except ExternalMCPAuthenticationRequired:
         raise
 
     if isinstance(result, InputRequiredResult):
-        if any(response.action != "accept" for response in continuation.get("input_responses", {}).values()):
+        if any(
+            response.action != "accept" for response in continuation.call_kwargs.get("input_responses", {}).values()
+        ):
             return ExternalToolResult("The input request was declined or cancelled. Do not retry.")
         requests = list((result.input_requests or {}).values())
         if not 1 <= len(requests) <= MAX_ELICITATIONS:
@@ -941,15 +945,14 @@ async def _call_tool_once(
         rendered.append(json.dumps(structured, indent=2, default=str))
     text = "\n\n".join(rendered) or "(external tool returned no content)"
     # Upstream output may echo supplied values; keep those off the transcript.
-    for response in continuation.get("input_responses", {}).values():
-        for value in (response.content or {}).values():
-            for representation in (
-                json.dumps(value, ensure_ascii=False),
-                json.dumps(value, ensure_ascii=True),
-                str(value),
-            ):
-                if representation:
-                    text = text.replace(representation, "[redacted form value]")
+    # Only the inner text is replaced, never a surrounding JSON quote, so a
+    # redacted result stays parseable by whatever reads it next.
+    for secret in continuation.secrets:
+        for representation in dict.fromkeys(
+            (secret, json.dumps(secret, ensure_ascii=False)[1:-1], json.dumps(secret, ensure_ascii=True)[1:-1])
+        ):
+            if representation:
+                text = text.replace(representation, "[redacted form value]")
     if max_bytes is not None and max_bytes > 0 and len(text.encode("utf-8")) > max_bytes:
         marker = "\n\n[external MCP result truncated to the configured byte limit]"
         marker_bytes = marker.encode("utf-8")
@@ -961,5 +964,5 @@ async def _call_tool_once(
     return ExternalToolResult(
         text=text,
         is_error=bool(getattr(result, "is_error", False)),
-        continuation_used=bool(continuation),
+        continuation_used=bool(continuation.call_kwargs),
     )

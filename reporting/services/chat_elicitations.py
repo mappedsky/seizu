@@ -3,7 +3,7 @@
 import json
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -24,6 +24,51 @@ form_capability: ContextVar[bool] = ContextVar("elicitation_form_capability", de
 replay: ContextVar[ChatElicitationRecord | None] = ContextVar("elicitation_replay", default=None)
 worker_config: ContextVar[RunnableConfig | None] = ContextVar("elicitation_worker_config", default=None)
 worker_step_id: ContextVar[str | None] = ContextVar("elicitation_worker_step_id", default=None)
+
+# Below this, a submitted string is too short to be a credential and too likely
+# to occur inside an unrelated word. Redacting it would corrupt the tool result
+# without protecting anything.
+MIN_REDACTED_LENGTH = 8
+
+
+class Continuation(NamedTuple):
+    """The replay arguments for a parked call, and what must not echo back.
+
+    ``call_kwargs`` is splatted into ``call_tool``. ``secrets`` holds the
+    submitted values a caller must remove from the returned text; it is
+    deliberately narrower than the set of submitted values (see
+    ``echoed_secrets``).
+    """
+
+    call_kwargs: dict[str, Any]
+    secrets: tuple[str, ...]
+
+    def __bool__(self) -> bool:
+        # A tuple is truthy whatever it holds, and "nothing was parked" has to
+        # stay falsy: the retry loop reads it to tell a fresh call from a replay.
+        return bool(self.call_kwargs)
+
+
+def echoed_secrets(schema: dict[str, Any] | None, response: ElicitationResponse) -> set[str]:
+    """Return the submitted values that must not survive in returned text.
+
+    Only free-text strings qualify. A number or a boolean cannot carry a secret
+    on its own, and its text form occurs throughout ordinary output. A value the
+    upstream itself offered -- an ``enum`` member or a field ``default`` -- is
+    already known to it, so removing it protects nothing.
+    """
+    properties = (schema or {}).get("properties", {})
+    secrets = set()
+    for key, value in (response.content or {}).items():
+        field = properties.get(key, {}) if isinstance(properties, dict) else {}
+        if not isinstance(field, dict):
+            field = {}
+        if type(value) is not str or len(value) < MIN_REDACTED_LENGTH:
+            continue
+        if value in (field.get("enum") or []) or value == field.get("default"):
+            continue
+        secrets.add(value)
+    return secrets
 
 
 class InputRequired(Exception):
@@ -246,7 +291,7 @@ async def continuation(
     user: CurrentUser,
     *,
     delegated: bool = False,
-) -> dict[str, Any]:
+) -> Continuation:
     record = replay.get()
     if record is None and delegated and enabled(proxy):
         context = interactive_context()
@@ -264,7 +309,7 @@ async def continuation(
                 record = candidate
                 break
     if record is None:
-        return {}
+        return Continuation({}, ())
     private = json.loads(record.private_json)
     if (
         record.user_id != user.user.user_id
@@ -276,12 +321,18 @@ async def continuation(
     rows = await store.group(record, claim=True)
     if not rows:
         raise ValueError("Continuation already consumed or unavailable")
-    return {
-        "request_state": private["request_state"],
-        "input_responses": {
-            json.loads(row.private_json)["request_id"]: ElicitResult(
-                **ElicitationResponse.model_validate_json(row.response_json or "{}").model_dump()
-            )
-            for row in rows
+    responses = [(row, ElicitationResponse.model_validate_json(row.response_json or "{}")) for row in rows]
+    secrets: set[str] = set()
+    for row, response in responses:
+        secrets |= echoed_secrets(store.public(row).requested_schema, response)
+    return Continuation(
+        {
+            "request_state": private["request_state"],
+            "input_responses": {
+                json.loads(row.private_json)["request_id"]: ElicitResult(**response.model_dump())
+                for row, response in responses
+            },
         },
-    }
+        # Longest first, so a value that contains another is replaced whole.
+        tuple(sorted(secrets, key=len, reverse=True)),
+    )

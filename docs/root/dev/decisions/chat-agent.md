@@ -3101,8 +3101,19 @@ resumes the parked call without restarting the remote step's model loop.
 
 Responses are owner-only data, never messages or tool arguments in model state.
 Only the elicitation IDs and a fixed explanation enter the transcript. The
-response is forwarded through `input_responses`; literal echoes are redacted
-from returned tool text. Form schemas are a bounded flat primitive subset,
+response is forwarded through `input_responses`; echoes of it are redacted
+from returned tool text, but only where redaction can protect something.
+
+A submitted value is removed from the result only when it is a free-text
+string of at least `MIN_REDACTED_LENGTH` characters that the upstream did not
+already know, and only its inner text is replaced, never a surrounding JSON
+quote. The broader rule this replaces removed every submitted value by
+substring: the integer `1` rewrote `"round": 1` and `"chars": 10`, a boolean
+rewrote every literal `true`, and `dev` rewrote the middle of `developer`,
+which left the resumed call returning text the model could not parse. A
+number, a boolean, an `enum` member and a field `default` are all either
+unable to carry a secret or already held by the upstream that sent them, so
+redacting them costs the result and buys nothing. Form schemas are a bounded flat primitive subset,
 rendered as escaped text. URLs retain the operator-pinned origin and are
 revalidated with the proxy configuration before display.
 

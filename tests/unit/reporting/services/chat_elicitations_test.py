@@ -266,7 +266,7 @@ async def test_later_delegation_consumes_only_the_matching_call(database):
     assert not await service.continuation(p, "different", {"scope": "same"}, user(), delegated=True)
     assert not await service.continuation(p, "read", {"scope": "other"}, user(), delegated=True)
     resumed = await service.continuation(p, "read", {"scope": "same"}, user(), delegated=True)
-    assert resumed["input_responses"]["input-1"].content == {"answer": "private"}
+    assert resumed.call_kwargs["input_responses"]["input-1"].content == {"answer": "private"}
     assert not await service.continuation(p, "read", {"scope": "same"}, user(), delegated=True)
 
 
@@ -443,3 +443,89 @@ async def test_owner_routes_rehydrate_and_validate(database, mocker):
         assert (await client.post(path, json={"action": "cancel"})).status_code == 409
         owner.user.user_id = "different-owner"
         assert (await client.post(path, json={"action": "cancel"})).status_code == 404
+
+
+def test_only_free_text_strings_are_treated_as_secrets():
+    schema = {
+        "type": "object",
+        "properties": {
+            "token": {"type": "string"},
+            "environment": {"type": "string", "enum": ["production", "development"]},
+            "note": {"type": "string", "default": "prefilled-default"},
+            "count": {"type": "integer"},
+            "confirm": {"type": "boolean"},
+            "tag": {"type": "string"},
+        },
+    }
+    response = ElicitationResponse(
+        action="accept",
+        content={
+            "token": "s3cret-value-long",
+            "environment": "development",
+            "note": "prefilled-default",
+            "count": 1,
+            "confirm": True,
+            "tag": "dev",
+        },
+    )
+
+    # A number or a boolean is not a secret and its text occurs everywhere; a
+    # short string hides inside ordinary words; an enum member and a default
+    # were sent by the upstream, so removing them protects nothing.
+    assert service.echoed_secrets(schema, response) == {"s3cret-value-long"}
+
+
+def test_no_schema_still_redacts_long_free_text():
+    response = ElicitationResponse(action="accept", content={"answer": "long-enough-secret", "pin": "1234"})
+    assert service.echoed_secrets(None, response) == {"long-enough-secret"}
+
+
+async def test_redaction_leaves_the_rest_of_the_result_intact(database, mocker):
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}, "count": {"type": "integer"}},
+        "required": ["answer"],
+    }
+    p = proxy(require_confirmation=False, elicitation={"form": True})
+    owner = user()
+    owner.permissions = frozenset({Permission.CHAT_TOOLS_CALL.value})
+    ids = await service.park(p, "read", {"scope": "original"}, owner, input_result(schema=schema))
+    record = await store.get(ids[0], "owner")
+    await store.respond(
+        record, ElicitationResponse(action="accept", content={"answer": "private-answer-text", "count": 1})
+    )
+    mocker.patch.object(external_mcp, "parse_namespaced_tool_name", return_value=(p, "read"))
+    mocker.patch.object(
+        external_mcp,
+        "list_proxy_tools",
+        return_value=[
+            Tool(
+                name="ext__gateway__read",
+                input_schema={"type": "object"},
+                annotations=ToolAnnotations(read_only_hint=True),
+            )
+        ],
+    )
+    # The upstream echoes the free-text answer, and separately reports numbers
+    # and prose that merely contain the submitted digit.
+    upstream = '{"round": 1, "rounds": 1, "chars": 10, "digest": "b5bea41b", "echo": "private-answer-text"}'
+    call = AsyncMock(return_value=CallToolResult(content=[TextContent(type="text", text=upstream)]))
+
+    @asynccontextmanager
+    async def session(*args):
+        yield type("Session", (), {"call_tool": call})()
+
+    mocker.patch.object(external_mcp, "_session", session)
+    kind, output = await service.resume(ids[0], owner, "123")
+
+    assert kind == "run"
+    assert "private-answer-text" not in output
+    # Redacting the string must not damage anything around it: the result is
+    # still the JSON the upstream sent, with one value replaced.
+    assert json.loads(output) == {
+        "round": 1,
+        "rounds": 1,
+        "chars": 10,
+        "digest": "b5bea41b",
+        "echo": "[redacted form value]",
+    }
