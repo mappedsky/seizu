@@ -8,8 +8,8 @@ import {
   useState,
 } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { useChat } from '@ai-sdk/react';
-import { type ChatOnFinishCallback, type UIMessage } from 'ai';
+import { Chat, useChat } from '@ai-sdk/react';
+import { type ChatOnFinishCallback, type ChatStatus, type UIMessage } from 'ai';
 import { SeizuChatTransport } from 'src/api/chatTransport';
 import {
   Alert,
@@ -66,6 +66,10 @@ import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
 import ChatElicitationCard from 'src/components/ChatElicitationCard';
 import { reconcileElicitationDetail } from 'src/utils/elicitationDetails';
 import { useChatElicitations } from 'src/hooks/useChatElicitations';
+import type {
+  ChatElicitation,
+  InputAction,
+} from 'src/hooks/useChatElicitations';
 import { useChatHumanInputResume } from 'src/hooks/useChatHumanInputResume';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { pageContentSx } from 'src/theme/layout';
@@ -1116,6 +1120,263 @@ const ChatMessageRow = memo(function ChatMessageRow({
   );
 });
 
+/** The conversation itself: the only part of the page that reads messages.
+ *
+ * It subscribes on the page's behalf. useChat subscribes to messages, status
+ * and error together, so whatever calls it re-renders on every streamed token;
+ * keeping that here means the page around it does not.
+ */
+const ChatTranscript = memo(function ChatTranscript({
+  chat,
+  sessionsLoading,
+  historyLoading,
+  historyPolling,
+  copiedMessageId,
+  pendingContinuationTargetMessageId,
+  elicitations,
+  elicitationError,
+  elicitationResumeError,
+  onCopy,
+  onElicitationRespond,
+  onElicitationAnswered,
+  onElicitationResume,
+  onLoadMore,
+  scrollRef,
+}: {
+  chat: Chat<SeizuChatMessage>;
+  sessionsLoading: boolean;
+  historyLoading: boolean;
+  historyPolling: boolean;
+  copiedMessageId: string | null;
+  pendingContinuationTargetMessageId: string | null;
+  elicitations: ChatElicitation[];
+  elicitationError: string | null;
+  elicitationResumeError: string | null;
+  onCopy: (message: SeizuChatMessage) => void;
+  onElicitationRespond: (
+    id: string,
+    action: InputAction,
+    content?: Record<string, unknown>,
+  ) => Promise<void>;
+  onElicitationAnswered: (item: ChatElicitation) => void;
+  onElicitationResume: (item: ChatElicitation) => void;
+  onLoadMore: (message: SeizuChatMessage) => void;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const { messages, status } = useChat<SeizuChatMessage>({
+    chat,
+    experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
+  });
+  const busy = status === 'submitted' || status === 'streaming';
+  const visibleMessages = useMemo(
+    () => messages.filter((message) => message.metadata?.seizu_hidden !== true),
+    [messages],
+  );
+  const elicitationOutcomes = useElicitationOutcomes(visibleMessages);
+
+  // A message only carries a server timestamp once it comes back from
+  // /chat/history; the copy the stream produces has none. So a message that is
+  // neither timed nor yet persisted is stamped with the browser's clock, and
+  // that stands in until the thread is reloaded. Server metadata always wins.
+  //
+  // A message the server has persisted but not timed is a turn from before
+  // timestamps were recorded: it gets no time at all rather than today's date,
+  // which is what stamping every untimed message did to every old conversation.
+  const [liveTimestamps, setLiveTimestamps] = useState<Record<string, string>>(
+    {},
+  );
+  useEffect(() => {
+    const now = new Date().toISOString();
+    setLiveTimestamps((current) => {
+      let added = false;
+      const next: Record<string, string> = {};
+      for (const message of messages) {
+        if (message.metadata?.created_at || message.metadata?.seizu_persisted)
+          continue;
+        const stamp = current[message.id];
+        next[message.id] = stamp ?? now;
+        added ||= stamp === undefined;
+      }
+      // Rebuilt from the current conversation, so switching threads or
+      // hydrating history also drops the stamps those messages no longer need.
+      // Identity is preserved when nothing moved, or this would re-run forever.
+      const unchanged =
+        !added && Object.keys(next).length === Object.keys(current).length;
+      return unchanged ? current : next;
+    });
+  }, [messages]);
+  const messageTime = useCallback(
+    (message: SeizuChatMessage): string =>
+      formatMessageTime(
+        message.metadata?.created_at ?? liveTimestamps[message.id],
+      ),
+    [liveTimestamps],
+  );
+
+  // Id of the assistant message currently being streamed. It renders through
+  // <StreamingMarkdown> (plain text while tokens arrive, parsed on quiesce)
+  // rather than feeding the whole growing response to Markdoc every token.
+  const streamingMessageId =
+    status === 'streaming' ? (messages.at(-1)?.id ?? null) : null;
+  const continuableMessage = useMemo(() => {
+    const lastMessage = messages.at(-1);
+    return lastMessage && canLoadMore(lastMessage) ? lastMessage : null;
+  }, [messages]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollIntoView({ block: 'end' });
+  }, [historyPolling, messages, scrollRef]);
+
+  return (
+    <Box
+      sx={{
+        flex: 1,
+        minHeight: 0,
+        overflowY: 'auto',
+        px: { xs: 1.5, md: 2 },
+        py: 1.5,
+      }}
+    >
+      {sessionsLoading || (historyLoading && visibleMessages.length === 0) ? (
+        <Box
+          sx={{
+            alignItems: 'center',
+            display: 'flex',
+            height: '100%',
+            justifyContent: 'center',
+          }}
+        >
+          <ConstellationSpinner size={64} />
+        </Box>
+      ) : visibleMessages.length === 0 ? (
+        <Box
+          sx={{
+            alignItems: 'center',
+            color: 'text.secondary',
+            display: 'flex',
+            height: '100%',
+            justifyContent: 'center',
+            textAlign: 'center',
+          }}
+        >
+          <Typography variant="body2">
+            Start a conversation with the graph assistant.
+          </Typography>
+        </Box>
+      ) : (
+        <>
+          {visibleMessages.map((message) => (
+            <ChatMessageRow
+              key={message.id}
+              busy={busy}
+              copied={copiedMessageId === message.id}
+              elicitationOutcomes={elicitationOutcomes}
+              isContinuationSource={
+                pendingContinuationTargetMessageId === message.id
+              }
+              isStreaming={message.id === streamingMessageId}
+              loadMore={continuableMessage?.id === message.id}
+              message={message}
+              onCopy={onCopy}
+              onLoadMore={onLoadMore}
+              timestamp={messageTime(message)}
+            />
+          ))}
+          {elicitations.map((item) => (
+            <ChatElicitationCard
+              key={item.elicitation_id}
+              item={item}
+              busy={busy}
+              onRespond={(action, content) =>
+                onElicitationRespond(item.elicitation_id, action, content)
+              }
+              onAnswered={() => onElicitationAnswered(item)}
+              onResume={() => onElicitationResume(item)}
+            />
+          ))}
+          {elicitationError && (
+            <Alert severity="error">{elicitationError}</Alert>
+          )}
+          {elicitationResumeError && (
+            <Alert severity="error">{elicitationResumeError}</Alert>
+          )}
+          {busy ? (
+            <Box
+              sx={{
+                alignItems: 'center',
+                color: 'text.secondary',
+                display: 'flex',
+                gap: 1,
+                mb: 1.5,
+              }}
+            >
+              <ConstellationSpinner size={28} />
+              <Typography variant="body2">Assistant is working...</Typography>
+            </Box>
+          ) : historyPolling ? (
+            <Box
+              sx={{
+                alignItems: 'center',
+                color: 'text.secondary',
+                display: 'flex',
+                gap: 1,
+                mb: 1.5,
+              }}
+            >
+              <ConstellationSpinner size={28} />
+              <Typography variant="body2">
+                Waiting for the response...
+              </Typography>
+            </Box>
+          ) : null}
+        </>
+      )}
+      <div ref={scrollRef} />
+    </Box>
+  );
+});
+
+/** Reports the handful of chat values the page still renders from.
+ *
+ * Renders nothing. It re-renders on every streamed token like any subscriber,
+ * and hands up only values that change a few times per turn -- so the page
+ * itself re-renders a few times per turn rather than a hundred.
+ */
+const ChatSubscriptionBridge = memo(function ChatSubscriptionBridge({
+  chat,
+  resume,
+  onStatusChange,
+  onErrorChange,
+  onSummaryChange,
+}: {
+  chat: Chat<SeizuChatMessage>;
+  resume: boolean;
+  onStatusChange: (status: ChatStatus) => void;
+  onErrorChange: (error: Error | undefined) => void;
+  onSummaryChange: (summary: {
+    hasMessages: boolean;
+    firstUserText: string;
+  }) => void;
+}) {
+  const { messages, status, error } = useChat<SeizuChatMessage>({
+    chat,
+    experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
+    resume,
+  });
+  useEffect(() => onStatusChange(status), [status, onStatusChange]);
+  useEffect(() => onErrorChange(error), [error, onErrorChange]);
+  const firstUserMessage = messages.find((message) => message.role === 'user');
+  const firstUserText = firstUserMessage
+    ? messageText(firstUserMessage).trim()
+    : '';
+  const hasMessages = messages.length > 0;
+  useEffect(
+    () => onSummaryChange({ hasMessages, firstUserText }),
+    [hasMessages, firstUserText, onSummaryChange],
+  );
+  return null;
+});
+
 export default function ChatInterface() {
   const navigate = useNavigate();
   const { threadId: routeThreadId } = useParams<{ threadId?: string }>();
@@ -1537,46 +1798,55 @@ export default function ChatInterface() {
     [pendingAttach],
   );
 
-  const {
-    messages,
-    sendMessage,
-    setMessages,
-    status,
-    stop,
-    error,
-    clearError,
-    resumeStream,
-  } = useChat<SeizuChatMessage>({
-    id: chatId,
-    messages: initialMessages,
-    experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
-    onFinish: handleChatFinish,
-    transport,
-    // Reattach to a turn that outlived the last page view.
-    //
-    // Gated on the real thread id rather than hardcoded true: useChat's resume
-    // effect depends on this flag, not on the chat id, so passing true up front
-    // would fire it once against the placeholder id and never again once the
-    // real one arrived — reload recovery would silently do nothing.
-    //
-    // Gated on hydration too, because history is fetched concurrently. Resuming
-    // first lets the replay start building the assistant message into an empty
-    // chat, and applyHistory then overwrites it when the history it fetched
-    // turns out to be longer. Waiting means the messages present when resume
-    // fires are the persisted ones, which only ever contain finished turns —
-    // so there is never a partial message to resume into.
-    //
-    // A session started from the landing gets here the same way a reload does:
-    // its turn is already admitted, so the transport knows the id and
-    // `reconnectToStream` attaches to it. Calling `resumeStream` by hand instead
-    // did not show the turn at all, and the reload path is the one known to
-    // work — so there is one route into it, not two.
-    resume: activeThreadId !== null && !historyLoading,
-  });
+  // The Chat instance is owned here rather than minted inside useChat, so that
+  // the parts of this page that only *act* on it can do so without subscribing
+  // to it. Everything the hook returns is a member of the instance, so a caller
+  // that never renders from messages never has to re-render for them.
+  //
+  // onFinish reaches it through a ref: the instance is rebuilt only when the
+  // chat id changes, and the callback's identity moves with its own deps.
+  const handleChatFinishRef = useRef(handleChatFinish);
+  handleChatFinishRef.current = handleChatFinish;
+  const chat = useMemo(
+    () =>
+      new Chat<SeizuChatMessage>({
+        id: chatId,
+        messages: initialMessages,
+        onFinish: (event) => handleChatFinishRef.current(event),
+        transport,
+      }),
+    // initialMessages seeds the instance at construction, exactly as it seeded
+    // useChat before; re-reading it later would rebuild a live conversation.
 
-  messagesRef.current = messages;
+    [chatId, transport],
+  );
+
+  // Nothing here subscribes to the chat. ChatSubscriptionBridge does, and
+  // hands up the few values this component renders from; everything else is
+  // called on the instance, which needs no subscription at all.
+  const [status, setStatus] = useState<ChatStatus>('ready');
+  const [error, setChatError] = useState<Error | undefined>(undefined);
+  const [chatSummary, setChatSummary] = useState({
+    hasMessages: false,
+    firstUserText: '',
+  });
+  const { sendMessage, stop, clearError } = chat;
+  const setMessages = useCallback(
+    (
+      next:
+        | SeizuChatMessage[]
+        | ((messages: SeizuChatMessage[]) => SeizuChatMessage[]),
+    ) => {
+      chat.messages = typeof next === 'function' ? next(chat.messages) : next;
+    },
+    [chat],
+  );
+  const busy = status === 'submitted' || status === 'streaming';
+  const resumeAttached = activeThreadId !== null && !historyLoading;
+
+  messagesRef.current = chat.messages;
   setMessagesRef.current = setMessages;
-  resumeStreamRef.current = resumeStream;
+  resumeStreamRef.current = () => chat.resumeStream();
 
   const [retrying, setRetrying] = useState(false);
   const handleRetryUnresolved = useCallback(() => {
@@ -1617,92 +1887,29 @@ export default function ChatInterface() {
     stop();
   }, [stop, transport]);
 
-  const busy = status === 'submitted' || status === 'streaming';
-  const visibleMessages = useMemo(
-    () => messages.filter((message) => message.metadata?.seizu_hidden !== true),
-    [messages],
-  );
-  const elicitationOutcomes = useElicitationOutcomes(visibleMessages);
-  // A message only carries a server timestamp once it comes back from
-  // /chat/history; the copy the stream produces has none. So a message that is
-  // neither timed nor yet persisted is stamped with the browser's clock, and
-  // that stands in until the thread is reloaded. Server metadata always wins.
-  //
-  // A message the server has persisted but not timed is a turn from before
-  // timestamps were recorded: it gets no time at all rather than today's date,
-  // which is what stamping every untimed message did to every old conversation.
-  const [liveTimestamps, setLiveTimestamps] = useState<Record<string, string>>(
-    {},
-  );
-  useEffect(() => {
-    const now = new Date().toISOString();
-    setLiveTimestamps((current) => {
-      let added = false;
-      const next: Record<string, string> = {};
-      for (const message of messages) {
-        if (message.metadata?.created_at || message.metadata?.seizu_persisted)
-          continue;
-        const stamp = current[message.id];
-        next[message.id] = stamp ?? now;
-        added ||= stamp === undefined;
-      }
-      // Rebuilt from the current conversation, so switching threads or
-      // hydrating history also drops the stamps those messages no longer need.
-      // Identity is preserved when nothing moved, or this would re-run forever.
-      const unchanged =
-        !added && Object.keys(next).length === Object.keys(current).length;
-      return unchanged ? current : next;
-    });
-  }, [messages]);
-  const messageTime = useCallback(
-    (message: SeizuChatMessage): string =>
-      formatMessageTime(
-        message.metadata?.created_at ?? liveTimestamps[message.id],
-      ),
-    [liveTimestamps],
-  );
-
-  // Id of the assistant message currently being streamed. It renders through
-  // <StreamingMarkdown> (plain text while tokens arrive, parsed on quiesce)
-  // rather than feeding the whole growing response to Markdoc every token.
-  const streamingMessageId =
-    status === 'streaming' ? (messages.at(-1)?.id ?? null) : null;
-  const continuableMessage = useMemo(() => {
-    const lastMessage = messages.at(-1);
-    return lastMessage && canLoadMore(lastMessage) ? lastMessage : null;
-  }, [messages]);
-
   // Auto-title: update session title from first user message when title is empty.
   const activeSession = useMemo(
     () => sessions.find((s) => s.thread_id === activeThreadId),
     [activeThreadId, sessions],
   );
-  const firstUserMessageText = useMemo(() => {
-    const firstUserMessage = messages.find((m) => m.role === 'user');
-    return firstUserMessage ? messageText(firstUserMessage).trim() : '';
-  }, [messages]);
   useEffect(() => {
     if (!activeSession || activeSession.title || !activeThreadId) return;
     if (autoTitleAttemptRef.current === activeThreadId) return;
-    if (!firstUserMessageText) return;
+    if (!chatSummary.firstUserText) return;
     // Store the full opening message (up to the API's limit) rather than a
     // 40-character preview: the sidebar truncates visually with CSS, so a
     // pre-truncated title left the hover tooltip showing the ellipsis too.
     const title =
-      firstUserMessageText.length > MAX_SESSION_TITLE_LENGTH
-        ? `${firstUserMessageText.slice(0, MAX_SESSION_TITLE_LENGTH - 1).trimEnd()}…`
-        : firstUserMessageText;
+      chatSummary.firstUserText.length > MAX_SESSION_TITLE_LENGTH
+        ? `${chatSummary.firstUserText.slice(0, MAX_SESSION_TITLE_LENGTH - 1).trimEnd()}…`
+        : chatSummary.firstUserText;
     autoTitleAttemptRef.current = activeThreadId;
     setAutoTitleError(null);
     void updateSession(activeThreadId, title).catch(() => {
       autoTitleAttemptRef.current = null;
       setAutoTitleError('Failed to name this session automatically.');
     });
-  }, [firstUserMessageText, activeSession, activeThreadId, updateSession]);
-
-  useEffect(() => {
-    scrollRef.current?.scrollIntoView({ block: 'end' });
-  }, [historyPolling, messages]);
+  }, [chatSummary.firstUserText, activeSession, activeThreadId, updateSession]);
 
   const handleSelectSession = useCallback(
     (threadId: string) => {
@@ -1886,6 +2093,22 @@ export default function ChatInterface() {
     [elicitations, resumeHumanInput],
   );
 
+  const handleElicitationAnswered = useCallback(
+    (item: ChatElicitation) => {
+      // A group is answered together, so the last answer is what releases the
+      // call; the others only close their own card.
+      const waiting = elicitations.items.some(
+        (other) =>
+          other.group_id === item.group_id &&
+          other.elicitation_id !== item.elicitation_id &&
+          other.status === 'pending',
+      );
+      if (waiting) elicitations.dismiss(item.elicitation_id);
+      else resumeElicitation(item);
+    },
+    [elicitations, resumeElicitation],
+  );
+
   const handleConfirmationDecision = useCallback(
     async (
       confirmation: ActionConfirmation,
@@ -2028,7 +2251,7 @@ export default function ChatInterface() {
       ?.default_reasoning_effort ??
     '';
   const lockedProfileId =
-    activeSession?.model_profile_locked || messages.length > 0
+    activeSession?.model_profile_locked || chatSummary.hasMessages
       ? (activeSession?.model_profile_id ?? null)
       : null;
   const activeProfileControl = useMemo(
@@ -2137,6 +2360,13 @@ export default function ChatInterface() {
           overflow: 'hidden',
         }}
       >
+        <ChatSubscriptionBridge
+          chat={chat}
+          onErrorChange={setChatError}
+          onStatusChange={setStatus}
+          onSummaryChange={setChatSummary}
+          resume={resumeAttached}
+        />
         <ChatSessionsPanel
           open={panelOpen}
           onToggle={togglePanel}
@@ -2203,6 +2433,13 @@ export default function ChatInterface() {
     <Box
       sx={{ display: 'flex', height: 'calc(100vh - 64px)', overflow: 'hidden' }}
     >
+      <ChatSubscriptionBridge
+        chat={chat}
+        onErrorChange={setChatError}
+        onStatusChange={setStatus}
+        onSummaryChange={setChatSummary}
+        resume={resumeAttached}
+      />
       <ChatSessionsPanel
         open={panelOpen}
         onToggle={togglePanel}
@@ -2243,130 +2480,25 @@ export default function ChatInterface() {
               minHeight: 0,
             }}
           >
-            <Box
-              sx={{
-                flex: 1,
-                minHeight: 0,
-                overflowY: 'auto',
-                px: { xs: 1.5, md: 2 },
-                py: 1.5,
-              }}
-            >
-              {sessionsLoading ||
-              (historyLoading && visibleMessages.length === 0) ? (
-                <Box
-                  sx={{
-                    alignItems: 'center',
-                    display: 'flex',
-                    height: '100%',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <ConstellationSpinner size={64} />
-                </Box>
-              ) : visibleMessages.length === 0 ? (
-                <Box
-                  sx={{
-                    alignItems: 'center',
-                    color: 'text.secondary',
-                    display: 'flex',
-                    height: '100%',
-                    justifyContent: 'center',
-                    textAlign: 'center',
-                  }}
-                >
-                  <Typography variant="body2">
-                    Start a conversation with the graph assistant.
-                  </Typography>
-                </Box>
-              ) : (
-                <>
-                  {visibleMessages.map((message) => (
-                    <ChatMessageRow
-                      key={message.id}
-                      busy={busy}
-                      copied={copiedMessageId === message.id}
-                      elicitationOutcomes={elicitationOutcomes}
-                      isContinuationSource={
-                        pendingContinuationTargetMessageId === message.id
-                      }
-                      isStreaming={message.id === streamingMessageId}
-                      loadMore={continuableMessage?.id === message.id}
-                      message={message}
-                      onCopy={handleCopyMessage}
-                      onLoadMore={handleLoadMore}
-                      timestamp={messageTime(message)}
-                    />
-                  ))}
-                  {elicitations.items.map((item) => (
-                    <ChatElicitationCard
-                      key={item.elicitation_id}
-                      item={item}
-                      busy={busy}
-                      onRespond={(action, content) =>
-                        elicitations.respond(
-                          item.elicitation_id,
-                          action,
-                          content,
-                        )
-                      }
-                      onAnswered={() => {
-                        // A group is answered together, so the last answer is
-                        // what releases the call; the others only close their
-                        // own card.
-                        const waiting = elicitations.items.some(
-                          (other) =>
-                            other.group_id === item.group_id &&
-                            other.elicitation_id !== item.elicitation_id &&
-                            other.status === 'pending',
-                        );
-                        if (waiting) elicitations.dismiss(item.elicitation_id);
-                        else resumeElicitation(item);
-                      }}
-                      onResume={() => resumeElicitation(item)}
-                    />
-                  ))}
-                  {elicitations.error && (
-                    <Alert severity="error">{elicitations.error}</Alert>
-                  )}
-                  {elicitationResumeError && (
-                    <Alert severity="error">{elicitationResumeError}</Alert>
-                  )}
-                  {busy ? (
-                    <Box
-                      sx={{
-                        alignItems: 'center',
-                        color: 'text.secondary',
-                        display: 'flex',
-                        gap: 1,
-                        mb: 1.5,
-                      }}
-                    >
-                      <ConstellationSpinner size={28} />
-                      <Typography variant="body2">
-                        Assistant is working...
-                      </Typography>
-                    </Box>
-                  ) : historyPolling ? (
-                    <Box
-                      sx={{
-                        alignItems: 'center',
-                        color: 'text.secondary',
-                        display: 'flex',
-                        gap: 1,
-                        mb: 1.5,
-                      }}
-                    >
-                      <ConstellationSpinner size={28} />
-                      <Typography variant="body2">
-                        Waiting for the response...
-                      </Typography>
-                    </Box>
-                  ) : null}
-                </>
-              )}
-              <div ref={scrollRef} />
-            </Box>
+            <ChatTranscript
+              chat={chat}
+              copiedMessageId={copiedMessageId}
+              elicitationError={elicitations.error}
+              elicitationResumeError={elicitationResumeError}
+              elicitations={elicitations.items}
+              historyLoading={historyLoading}
+              historyPolling={historyPolling}
+              onCopy={handleCopyMessage}
+              onElicitationAnswered={handleElicitationAnswered}
+              onElicitationRespond={elicitations.respond}
+              onElicitationResume={resumeElicitation}
+              onLoadMore={handleLoadMore}
+              pendingContinuationTargetMessageId={
+                pendingContinuationTargetMessageId
+              }
+              scrollRef={scrollRef}
+              sessionsLoading={sessionsLoading}
+            />
           </Card>
         </Box>
 
