@@ -70,7 +70,16 @@ import { useChatHumanInputResume } from 'src/hooks/useChatHumanInputResume';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { pageContentSx } from 'src/theme/layout';
 
-const CHAT_MESSAGE_THROTTLE_MS = 50;
+// How often the streamed answer is written into React state.
+//
+// Higher under the dev server, because React's development build makes every
+// commit several times more expensive than production. At 50ms the store is
+// rewritten before a dev commit finishes, so `useSyncExternalStore` forces a
+// synchronous re-render out of each commit and React throws its nested-update
+// error part way through any answer past roughly fifty commits. A production
+// build commits fast enough that this never arises -- measured with no long
+// tasks at all -- so it keeps the responsive cadence.
+const CHAT_MESSAGE_THROTTLE_MS = import.meta.env.DEV ? 250 : 50;
 // Matches the API's max_length on the session title (reporting/schema/chat.py).
 const MAX_SESSION_TITLE_LENGTH = 200;
 const CHAT_HISTORY_POLL_INTERVAL_MS = 2000;
