@@ -25,10 +25,28 @@ async def test_migrations_run_on_a_fresh_database(tmp_path):
         await run_schema_migrations(engine)
 
         tables = await _inspect(engine, lambda i: set(i.get_table_names()))
-        assert {"spaces", "subspaces", "reports", "external_mcp_connections"} <= tables
+        assert {"spaces", "subspaces", "reports", "external_mcp_connections", "chat_elicitations"} <= tables
 
         report_columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("reports")})
         assert {"space_id", "subspace_id"} <= report_columns
+    finally:
+        await engine.dispose()
+
+
+async def test_chat_elicitations_upgrade_from_previous_revision(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'chat-input-upgrade.db'}")
+    try:
+        await run_schema_migrations(engine)
+        async with engine.begin() as connection:
+            await connection.execute(sa.text("DROP TABLE chat_elicitations"))
+            await connection.execute(
+                sa.text("UPDATE alembic_version SET version_num = '0013_external_mcp_elicitation'")
+            )
+        await run_schema_migrations(engine)
+        columns = await _inspect(
+            engine, lambda inspector: {c["name"] for c in inspector.get_columns("chat_elicitations")}
+        )
+        assert {"elicitation_id", "group_id", "user_id", "arguments_hash", "response_json"} <= columns
     finally:
         await engine.dispose()
 

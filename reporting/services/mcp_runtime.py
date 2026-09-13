@@ -51,10 +51,12 @@ ConfirmationResponder = Callable[[ActionConfirmation], Awaitable[bool]]
 
 
 async def _ensure_tool_confirmation(
-    *, respond: ConfirmationResponder | None = None, **kwargs: Any
+    *, respond: ConfirmationResponder | None = None, retry_denied: bool = True, **kwargs: Any
 ) -> ActionConfirmation | None:
     """Resolve the gate; a responder returns True when the decision must be re-read."""
-    confirmation = await action_confirmations.ensure_confirmation(retry_denied=respond is None, **kwargs)
+    confirmation = await action_confirmations.ensure_confirmation(
+        retry_denied=retry_denied and respond is None, **kwargs
+    )
     if confirmation is not None and confirmation.status == "pending" and respond is not None:
         if await respond(confirmation):
             # Consume approval through the ordinary atomic execution claim.
@@ -77,6 +79,7 @@ class ChatBlockReason(StrEnum):
     CONFIRMATION_REQUIRED = "confirmation_required"
     CONFIRMATION_DENIAL_LIMIT = "confirmation_denial_limit"
     AUTHENTICATION_REQUIRED = "authentication_required"
+    INPUT_REQUIRED = "input_required"
 
 
 @dataclass(frozen=True)
@@ -594,6 +597,8 @@ async def _call_tool_core(
 
     external = external_mcp.parse_namespaced_tool_name(name)
     if external is not None:
+        from reporting.services import chat_elicitations
+
         proxy, remote_name = external
         if not chat_safe_only:
             return (
@@ -644,6 +649,7 @@ async def _call_tool_core(
             assert confirmation_source is not None
             confirmation = await _ensure_tool_confirmation(
                 respond=confirmation_responder,
+                retry_denied=chat_elicitations.replay.get() is None,
                 user_id=current_user.user.user_id,
                 source=confirmation_source,
                 session_key=confirmation_session_key,
@@ -673,7 +679,15 @@ async def _call_tool_core(
                 args,
                 current_user,
                 max_bytes=_effective_limits(result_max_rows, result_max_bytes).max_bytes,
+                interactive=include_chat_only,
             )
+        except chat_elicitations.InputRequired as exc:
+            return text_response(
+                {
+                    "elicitation_ids": exc.ids,
+                    "message": "External input requested. The call is paused; do not retry. Answer in chat.",
+                }
+            ), ChatBlockReason.INPUT_REQUIRED
         except external_mcp.ExternalMCPAuthenticationRequired as exc:
             return text_response(external_mcp.authentication_payload(exc)), ChatBlockReason.AUTHENTICATION_REQUIRED
         except external_mcp.ExternalMCPError as exc:

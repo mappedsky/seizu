@@ -19,6 +19,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import (
     ElicitRequest,
+    ElicitRequestFormParams,
     ElicitRequestURLParams,
     ElicitResult,
     InputRequiredResult,
@@ -109,6 +110,7 @@ class ExternalMCPGatewayBlocked(ExternalMCPAuthenticationRequired):
 class ExternalToolResult:
     text: str
     is_error: bool = False
+    continuation_used: bool = False
 
 
 def namespaced_tool_name(proxy_name: str, remote_name: str) -> str:
@@ -397,7 +399,7 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
             item = safe_elicitation(proxy, params)
             if item is not None and item not in pending and len(pending) < MAX_ELICITATIONS:
                 pending.append(item)
-        # Detached turns have no user present to accept or provide form data.
+        # Legacy callbacks cancel; URL requests retain owner recovery data.
         return ElicitResult(action="cancel")
 
     acquired_token = None
@@ -424,7 +426,7 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
             async with ClientSession(
                 *streams,
                 read_timeout_seconds=proxy.read_timeout_seconds,
-                elicitation_callback=elicit if proxy.user_authorization else None,
+                elicitation_callback=elicit,
             ) as session:
                 if proxy.transport == ExternalMCPTransport.STREAMABLE_HTTP and proxy.protocol_mode == "auto":
                     async with asyncio.timeout(proxy.read_timeout_seconds):
@@ -821,6 +823,7 @@ async def call_tool(
     current_user: CurrentUser,
     *,
     max_bytes: int | None = None,
+    interactive: bool = False,
 ) -> ExternalToolResult:
     """Call one external tool, waiting out a rate limit the upstream names.
 
@@ -833,8 +836,18 @@ async def call_tool(
     attempts = max(0, settings.MCP_EXTERNAL_RATE_LIMIT_RETRIES) + 1
     cap = float(max(0, settings.MCP_EXTERNAL_RATE_LIMIT_MAX_WAIT_SECONDS))
     for attempt in range(attempts):
-        result = await _call_tool_once(proxy, remote_name, arguments, current_user, max_bytes=max_bytes)
-        if not result.is_error or attempt == attempts - 1:
+        from reporting.services import chat_elicitations
+
+        token = chat_elicitations.form_capability.set(
+            interactive and chat_elicitations.enabled(proxy) and proxy.elicitation.form
+        )
+        try:
+            result = await _call_tool_once(
+                proxy, remote_name, arguments, current_user, max_bytes=max_bytes, interactive=interactive
+            )
+        finally:
+            chat_elicitations.form_capability.reset(token)
+        if result.continuation_used or not result.is_error or attempt == attempts - 1:
             return result
         delay = _rate_limit_delay(result.text)
         if delay is None or delay > cap:
@@ -860,7 +873,13 @@ async def _call_tool_once(
     current_user: CurrentUser,
     *,
     max_bytes: int | None = None,
+    interactive: bool = False,
 ) -> ExternalToolResult:
+    from reporting.services import chat_elicitations
+
+    continuation = await chat_elicitations.continuation(
+        proxy, remote_name, arguments, current_user, delegated=not interactive
+    )
     try:
         async with _session(proxy, current_user) as session:
             if remote_name == AUTHENTICATE_TOOL_NAME:
@@ -868,20 +887,48 @@ async def _call_tool_once(
                 # synthetic tool is stale and the user can retry discovery.
                 await session.list_tools()
                 return ExternalToolResult(json.dumps({"authenticated": True, "proxy": proxy.name}))
-            result = await session.call_tool(remote_name, arguments, allow_input_required=True)
-            if isinstance(result, InputRequiredResult):
-                if not proxy.user_authorization:
-                    raise ExternalMCPError("External MCP server requested unsupported user interaction")
-                pending = []
-                for request in list((result.input_requests or {}).values())[:MAX_ELICITATIONS]:
-                    if isinstance(request, ElicitRequest) and isinstance(request.params, ElicitRequestURLParams):
-                        recovery = safe_elicitation(proxy, request.params)
-                        if recovery is not None:
-                            pending.append(recovery)
-                # No automatic continuation or replay of the original operation.
-                raise ExternalMCPGatewayBlocked(proxy, "interaction_required", pending)
+            result = await session.call_tool(remote_name, arguments, allow_input_required=True, **continuation)
+            modern = session.discover_result is not None if isinstance(result, InputRequiredResult) else False
     except ExternalMCPAuthenticationRequired:
         raise
+
+    if isinstance(result, InputRequiredResult):
+        if any(response.action != "accept" for response in continuation.get("input_responses", {}).values()):
+            return ExternalToolResult("The input request was declined or cancelled. Do not retry.")
+        requests = list((result.input_requests or {}).values())
+        if not 1 <= len(requests) <= MAX_ELICITATIONS:
+            raise ExternalMCPError("Invalid external input request count")
+        if any(not isinstance(request, ElicitRequest) for request in requests):
+            raise ExternalMCPError("External sampling and roots input requests are unsupported")
+        allowed = all(
+            isinstance(request, ElicitRequest)
+            and (
+                isinstance(request.params, ElicitRequestFormParams)
+                and proxy.elicitation.form
+                or isinstance(request.params, ElicitRequestURLParams)
+                and proxy.elicitation.url
+            )
+            for request in requests
+        )
+        if not (modern and chat_elicitations.enabled(proxy) and allowed):
+            if not proxy.user_authorization:
+                raise ExternalMCPError("External MCP server requested unsupported user interaction")
+            pending = []
+            for request in requests:
+                if isinstance(request, ElicitRequest) and isinstance(request.params, ElicitRequestURLParams):
+                    recovery = safe_elicitation(proxy, request.params)
+                    if recovery is not None:
+                        pending.append(recovery)
+            invalidate_discovery_cache(current_user)
+            await external_mcp_connections.observe(proxy, current_user, "interaction_required", elicitations=pending)
+            raise ExternalMCPGatewayBlocked(proxy, "interaction_required", pending)
+        try:
+            pending_ids = await chat_elicitations.park(
+                proxy, remote_name, arguments, current_user, result, delegated=not interactive
+            )
+        except ValueError as exc:
+            raise ExternalMCPError(str(exc)) from None
+        raise chat_elicitations.InputRequired(pending_ids)
 
     rendered: list[str] = []
     for item in getattr(result, "content", []) or []:
@@ -901,4 +948,8 @@ async def _call_tool_once(
         else:
             allowance = max_bytes - len(marker_bytes)
             text = text.encode("utf-8")[:allowance].decode("utf-8", errors="ignore") + marker
-    return ExternalToolResult(text=text, is_error=bool(getattr(result, "is_error", False)))
+    return ExternalToolResult(
+        text=text,
+        is_error=bool(getattr(result, "is_error", False)),
+        continuation_used=bool(continuation),
+    )

@@ -254,7 +254,7 @@ async def test_external_read_only_tool_executes_with_current_user(mocker):
     )
 
     assert result == mcp_runtime.ChatActionOutcome(text="files found")
-    call.assert_awaited_once_with(proxy, "search", {"query": "budget"}, current, max_bytes=500)
+    call.assert_awaited_once_with(proxy, "search", {"query": "budget"}, current, max_bytes=500, interactive=False)
 
 
 async def test_external_read_only_annotation_overrides_confirmation_fallback(mocker):

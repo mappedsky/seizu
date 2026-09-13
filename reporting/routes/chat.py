@@ -21,9 +21,11 @@ from reporting.schema.chat import (
     CreateChatSessionRequest,
     UpdateChatSessionRequest,
 )
+from reporting.schema.chat_elicitations import ChatElicitation, ChatElicitationsResponse, ElicitationResponse
 from reporting.services import chat_turns, model_profiles, report_store, session_reaper
 from reporting.services.chat_graph import load_thread_messages
 from reporting.services.chat_messages import created_at, message_text
+from reporting.services.report_store import elicitations as elicitation_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -38,6 +40,44 @@ _STREAM_HEADERS = {
     "X-Accel-Buffering": "no",
     "x-vercel-ai-ui-message-stream": "v1",
 }
+
+
+@router.get("/api/v1/chat/elicitations", response_model=ChatElicitationsResponse)
+async def list_chat_elicitations(
+    thread_id: str = Query(min_length=1, max_length=CHAT_THREAD_ID_MAX_LENGTH, pattern=CHAT_THREAD_ID_PATTERN),
+    current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
+) -> ChatElicitationsResponse:
+    if await report_store.get_chat_session(current.user.user_id, thread_id) is None:
+        raise HTTPException(404, "Session not found")
+    from reporting.services.chat_elicitations import visible
+
+    items = await elicitation_store.list_for_thread(current.user.user_id, thread_id)
+    return ChatElicitationsResponse(elicitations=[item for item in items if visible(item)])
+
+
+@router.post("/api/v1/chat/elicitations/{elicitation_id}/response", response_model=ChatElicitation)
+async def respond_chat_elicitation(
+    elicitation_id: str,
+    body: ElicitationResponse,
+    current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
+) -> ChatElicitation:
+    from reporting.services.chat_elicitations import visible
+
+    record = await elicitation_store.get(elicitation_id, current.user.user_id)
+    if record is None or not visible(elicitation_store.public(record)):
+        raise HTTPException(404, "Input request not found")
+    session = await report_store.get_chat_session(current.user.user_id, record.thread_id)
+    if session is None or session.origin != "interactive":
+        raise HTTPException(404, "Session not found")
+    try:
+        changed = await elicitation_store.respond(record, body)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    if not changed:
+        raise HTTPException(409, "Input request was already answered or expired")
+    updated = await elicitation_store.get(elicitation_id, current.user.user_id)
+    assert updated is not None
+    return elicitation_store.public(updated)
 
 
 def _stream_response(source: AsyncIterator[str]) -> StreamingResponse:
@@ -360,6 +400,11 @@ def _safe_history_detail(detail: object, *, allow_children: bool = True) -> dict
     if not isinstance(title, str) or kind not in _HISTORY_DETAIL_KINDS:
         return None
     safe: dict[str, object] = {"kind": kind, "title": title}
+    ids = detail.get("elicitation_ids")
+    if isinstance(ids, list):
+        safe["elicitation_ids"] = [value for value in ids[:8] if isinstance(value, str)]
+    if detail.get("elicitation_resumed") is True:
+        safe["elicitation_resumed"] = True
     for key in ("status", "arguments", "body", "step_id", "route", "detail_id", "parent_id"):
         value = detail.get(key)
         if isinstance(value, str):

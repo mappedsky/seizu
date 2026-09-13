@@ -34,6 +34,23 @@ def _single_agent_path(mocker):
     mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_ENABLED", False)
 
 
+@pytest.fixture(autouse=True)
+def _no_linked_elicitation(mocker):
+    """Answer the linked-elicitation lookup without reaching PostgreSQL.
+
+    Resuming a confirmation first asks whether that approval belongs to a
+    parked external input request. These tests are about the confirmation
+    path, where the answer is always no; without this, an ambient
+    MCP_EXTERNAL_ELICITATION_ENABLED=true sends the lookup to a real database
+    and the module stops being hermetic. The linked path has its own coverage
+    in chat_elicitations_test.
+    """
+    mocker.patch(
+        "reporting.services.report_store.elicitations.for_confirmation",
+        mocker.AsyncMock(return_value=None),
+    )
+
+
 def _user() -> CurrentUser:
     return CurrentUser(
         user=User(

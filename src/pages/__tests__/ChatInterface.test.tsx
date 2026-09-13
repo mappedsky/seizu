@@ -18,6 +18,7 @@ import * as useChatHistoryModule from 'src/hooks/useChatHistory';
 import * as useChatSessionsModule from 'src/hooks/useChatSessions';
 import * as useModelProfilesApiModule from 'src/hooks/useModelProfilesApi';
 import * as useConfirmationsApiModule from 'src/hooks/useConfirmationsApi';
+import * as useChatElicitationsModule from 'src/hooks/useChatElicitations';
 import { useChat } from '@ai-sdk/react';
 import { type ChatOnFinishCallback, type UIMessage } from 'ai';
 import { SeizuChatTransport } from 'src/api/chatTransport';
@@ -152,6 +153,7 @@ const theme = createTheme();
 type ChatRenderOptions = {
   accessToken?: string | null;
   chatEnabled?: boolean;
+  elicitationEnabled?: boolean;
   initialPath?: string;
 };
 
@@ -160,6 +162,7 @@ type ChatRenderOptions = {
 function chatTree({
   accessToken = 'token-123',
   chatEnabled = true,
+  elicitationEnabled = false,
   initialPath = '/app/chat/thread-1',
 }: ChatRenderOptions = {}) {
   return (
@@ -172,7 +175,11 @@ function chatTree({
         }}
       >
         <FeaturesContext.Provider
-          value={{ ...DEFAULT_FEATURES, chat: chatEnabled }}
+          value={{
+            ...DEFAULT_FEATURES,
+            chat: chatEnabled,
+            chat_elicitation: elicitationEnabled,
+          }}
         >
           <AuthContext.Provider value={{ accessToken, isLoading: false }}>
             <ThemeProvider theme={theme}>
@@ -631,6 +638,154 @@ describe('ChatInterface', () => {
     );
   });
 
+  for (const status of ['pending', 'accepted'] as const) {
+    it(`resumes a ${status} elicitation through an ID-only chat command`, async () => {
+      const respond = jest.fn().mockResolvedValue(undefined);
+      const sendMessage = jest.fn();
+      mockUseChat.mockReturnValue({
+        id: 'thread-1',
+        messages: [
+          {
+            id: 'user-1',
+            role: 'user',
+            parts: [{ type: 'text', text: 'Run the tool' }],
+          },
+        ],
+        sendMessage,
+        regenerate: jest.fn(),
+        stop: jest.fn(),
+        resumeStream: jest.fn(),
+        addToolResult: jest.fn(),
+        addToolOutput: jest.fn(),
+        addToolApprovalResponse: jest.fn(),
+        status: 'ready',
+        error: undefined,
+        setMessages: jest.fn(),
+        clearError: jest.fn(),
+      });
+      const item: useChatElicitationsModule.ChatElicitation = {
+        elicitation_id: 'input-1',
+        group_id: 'group-1',
+        thread_id: 'thread-1',
+        proxy_name: 'demo',
+        tool_name: 'demo__ask',
+        kind: 'form',
+        message: 'Choose a label',
+        status,
+        expires_at: '2099-01-01T00:00:00Z',
+        requested_schema: {
+          properties: { label: { type: 'string', title: 'Label' } },
+        },
+      };
+      const dismiss = jest.fn();
+      jest
+        .spyOn(useChatElicitationsModule, 'useChatElicitations')
+        .mockReturnValue({
+          items: [item],
+          error: null,
+          respond,
+          dismiss,
+          restore: jest.fn(),
+        });
+      renderChat({ elicitationEnabled: true });
+      const button = await screen.findByRole('button', {
+        name: status === 'pending' ? 'Submit' : 'Continue chat',
+      });
+      if (status === 'pending') {
+        fireEvent.change(screen.getByLabelText('Label'), {
+          target: { value: 'private answer' },
+        });
+      }
+      fireEvent.click(button);
+      await waitFor(
+        () =>
+          expect(sendMessage).toHaveBeenCalledWith(
+            {
+              id: 'resume-input-1',
+              role: 'user',
+              metadata: { seizu_hidden: true },
+              parts: [],
+            },
+            { body: { resume_elicitation_id: 'input-1' } },
+          ),
+        { timeout: 10_000 },
+      );
+      // The card closes as the turn is dispatched, not when it finishes.
+      expect(dismiss).toHaveBeenCalledWith('input-1');
+      if (status === 'pending') {
+        expect(respond).toHaveBeenCalledWith('input-1', 'accept', {
+          label: 'private answer',
+        });
+      } else {
+        expect(respond).not.toHaveBeenCalled();
+      }
+      expect(
+        mockUseChatSessions.mock.results.at(-1)!.value.touchSession,
+      ).toHaveBeenCalledWith('thread-1');
+    });
+  }
+
+  it('brings the card back when the answer was never delivered', async () => {
+    const sendMessage = jest.fn().mockRejectedValue(new Error('offline'));
+    mockUseChat.mockReturnValue({
+      id: 'thread-1',
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          parts: [{ type: 'text', text: 'Run the tool' }],
+        },
+      ],
+      sendMessage,
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+    const restore = jest.fn();
+    jest
+      .spyOn(useChatElicitationsModule, 'useChatElicitations')
+      .mockReturnValue({
+        items: [
+          {
+            elicitation_id: 'input-1',
+            group_id: 'group-1',
+            thread_id: 'thread-1',
+            proxy_name: 'demo',
+            tool_name: 'demo__ask',
+            kind: 'form',
+            message: 'Choose a label',
+            status: 'accepted',
+            expires_at: '2099-01-01T00:00:00Z',
+          },
+        ],
+        error: null,
+        respond: jest.fn(),
+        dismiss: jest.fn(),
+        restore,
+      });
+    renderChat({ elicitationEnabled: true });
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Continue chat' }),
+    );
+
+    // Nothing reached the server, so the answer is still recoverable and the
+    // card is the only way back to it.
+    await waitFor(() => expect(restore).toHaveBeenCalledWith('input-1'));
+    expect(
+      await screen.findByText(
+        'Could not continue the conversation with that answer. Try again.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('shows a not-found state for a missing linked session', async () => {
     renderChat({ initialPath: '/app/chat/missing-session' });
 
@@ -1069,6 +1224,74 @@ describe('ChatInterface', () => {
       },
       { timeout: 10_000 },
     );
+  }, 15_000);
+
+  it('settles a parked tool detail onto the outcome its continuation recorded', async () => {
+    const detail = (id: string, data: Record<string, unknown>) => ({
+      type: 'data-seizu-detail' as const,
+      id,
+      data,
+    });
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'parked-turn',
+          role: 'assistant',
+          parts: [
+            detail('detail-parked', {
+              kind: 'tool',
+              title: 'Tool: ext__demo__ask',
+              status: 'blocked',
+              arguments: '{}',
+              body: '{"elicitation_ids":["input-1"],"message":"External input requested."}',
+              elicitation_ids: ['input-1'],
+            }),
+            { type: 'text', text: 'Waiting on your answer.' },
+          ],
+        },
+        {
+          id: 'resumed-turn',
+          role: 'assistant',
+          parts: [
+            detail('detail-resumed', {
+              kind: 'tool',
+              title: 'Tool: ext__demo__ask',
+              status: 'completed',
+              body: 'Finished successfully',
+              elicitation_ids: ['input-1'],
+              elicitation_resumed: true,
+            }),
+            { type: 'text', text: 'The tool ran.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    // The parked turn's own row, not the continuation's, which stays collapsed.
+    fireEvent.click(
+      screen.getAllByRole('button', { name: /Tool: ext__demo__ask/ })[0],
+    );
+
+    await waitFor(
+      () => expect(screen.getByText('Finished successfully')).toBeVisible(),
+      { timeout: 10_000 },
+    );
+    expect(screen.queryByText(/elicitation_ids/)).not.toBeInTheDocument();
   }, 15_000);
 
   it("opens a turn's details by default and moves them only on a click", async () => {

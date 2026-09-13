@@ -17,6 +17,7 @@ class ChatTurnRequest(BaseModel):
     # checkpoint (and, once a model is wired in, can't blow the token budget).
     message: str = Field(default="", max_length=32000)
     resume_confirmation_id: str | None = Field(default=None, min_length=1, max_length=64)
+    resume_elicitation_id: str | None = Field(default=None, min_length=1, max_length=64)
     continue_response: bool = False
     continue_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     # Client-minted key making admission idempotent. A repeat of this request
@@ -35,8 +36,19 @@ class ChatTurnRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_message_or_resume(self) -> "ChatTurnRequest":
-        if not self.message and not self.resume_confirmation_id and not self.continue_response:
-            raise ValueError("message, resume_confirmation_id, or continue_response is required")
+        if (
+            sum(
+                bool(value)
+                for value in (
+                    self.message,
+                    self.resume_confirmation_id,
+                    self.resume_elicitation_id,
+                    self.continue_response,
+                )
+            )
+            != 1
+        ):
+            raise ValueError("Exactly one message or resume action is required")
         return self
 
 
@@ -50,6 +62,7 @@ class ChatTurnCommand(BaseModel):
 
     message: str = Field(default="", max_length=32000)
     resume_confirmation_id: str | None = Field(default=None, min_length=1, max_length=64)
+    resume_elicitation_id: str | None = Field(default=None, min_length=1, max_length=64)
     continue_response: bool = False
     continue_message_id: str | None = Field(default=None, min_length=1, max_length=128)
     bypass_confirmations: bool = False

@@ -216,6 +216,7 @@ def test_the_seed_ships_skills_as_packages_rather_than_legacy_skillsets() -> Non
     assert config.get("skillsets") is None
     assert set(config["plugins"]) == {
         "cve_response",
+        "elicitation_testing",
         "github_security_investigations",
         "portable_security_review",
         "report_authoring",

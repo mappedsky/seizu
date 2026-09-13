@@ -3079,3 +3079,99 @@ bounding a patient caller. The existing TTL gives operators one window to tune.
 The new budget refusal is an MCP error and a distinct chat block reason.
 Existing pending/denied result `isError` semantics remain unchanged; changing
 those for every client is separate from the denial policy in this issue.
+
+## AGT-055 — External input parks a call and resumes through an owner action
+
+**Applies to:** `chat_elicitations`, `external_mcp`, chat resume commands,
+orchestrated step results, `ChatElicitationCard`
+
+Interactive MCP 2026-07-28 input requests are stored as a bounded group, end
+the turn, and resume with the original arguments and opaque continuation state
+after the owner answers. Legacy callbacks still cancel. Form capability is
+advertised only for an opted-in interactive top-level or orchestrated call;
+discovery, detached runs, and sandbox subagents keep it stripped. URL capability
+remains available for AGT-048 recovery, including when interactive elicitation
+is disabled. Sampling and roots input requests are unsupported.
+
+**Why:** a Temporal activity has no inbound form channel (AGT-008), and a legacy
+callback needs an open upstream session. The modern continuation survives both
+the activity ending and a browser reload without holding a worker slot. Reusing
+the confirmation pause keeps distributed worker results portable: the coordinator
+resumes the parked call without restarting the remote step's model loop.
+
+Response records are owner-scoped and forwarded through `input_responses`,
+rather than inserted directly into model arguments or messages. Upstream tool
+results may include those values and enter chat history and model context.
+Forms warn users not to enter passwords, API keys, access tokens, or verification
+codes. Credential collection belongs in URL elicitation on the external site.
+
+**Why:** MCP forms are for ordinary input, not secrets. Substring redaction
+corrupted legitimate results, while length/type heuristics and exact matching
+could not guarantee confidentiality. Removing redaction preserves results and
+makes the UI and documentation state the actual data flow.
+
+Form schemas remain a bounded flat primitive subset rendered as escaped text.
+URLs retain the operator-pinned origin and are revalidated with the proxy
+configuration before display. Global and per-proxy opt-ins do not make upstream
+schemas trusted UI.
+
+Replay checks current permissions, current tool discovery and confirmation
+policy, and atomically consumes the group once. An approval needed during
+resume is linked to the continuation, so approval cannot run a fresh call.
+Declined, cancelled and expired requests are terminal without re-prompting.
+Resumed reads undergo normal verification, but are not retried.
+
+**Why:** answering a form is not an authorization grant. Verification may reject
+evidence without repeating a call that may already have had effects. This
+refines AGT-048 only for owner-initiated interactive continuations; detached runs
+still never replay. A one-shot decline path needs no additional denial budget.
+
+A sandbox delegation that unexpectedly elicits records the request and returns.
+After the owner answers, a later delegation may consume the continuation for
+the exact same tool, arguments, owner, thread and proxy. Its sandbox files and
+receipts survive; its earlier model loop does not (SBX-005, SBX-008).
+
+**Why:** retaining or reconstructing a subagent transcript would introduce a
+second continuation lifecycle. The persistent sandbox already carries work
+into a new delegation.
+
+Input-required tool details are awaiting input. A continuation records its
+outcome against the original elicitation group; the UI applies that outcome to
+the paused detail across turns and history reloads. Within a step's own trace
+the outcome is folded into the parked entry rather than appended, so a call is
+one row carrying both its arguments and its result. An answered card confirms
+in place and then closes, before the turn it releases starts; dismissal is
+local to the view, so a reload brings an unclaimed card back and a delivery
+that never dispatches restores it immediately. Consumed cards are hidden, while
+accepted cards remain available until the continuation is claimed.
+
+**Why:** consumption is not proof that an upstream operation succeeded. Using
+the recorded outcome avoids showing a failed continuation as successful, and
+retaining unconsumed answers preserves recovery after interrupted delivery.
+Appending instead replayed the wait beside its own answer on every reload,
+which live delivery never showed. Closing the card on the delivery promise
+holds it open for the whole turn: that promise settles when the turn does, not
+when it is dispatched.
+
+## AGT-056 — Human-input resumes share dispatch, not approval semantics
+
+**Applies to:** `useChatHumanInputResume`, `ChatInterface`
+
+Approval decisions, external-input responses, and approval recovery links use
+one browser dispatcher for hidden ID-only continuation messages. Dispatch
+checks the originating conversation against the current conversation and sends
+exactly one kind-specific resume field. Decisions and response values remain
+in their respective owner-scoped APIs; their pending-group rules, cancellation
+semantics, and server-side execution claims remain separate.
+
+**Why:** the duplicated send paths had already diverged: approval resumes
+touched the session and carried a second, mutable fallback ID, while elicitation
+resumes did neither. A shared dispatcher removes that drift and prevents an
+answer finishing after navigation from resuming into another thread. Routing
+the agent through Seizu's own MCP endpoint would add transport, identity, and
+capability handling around the already shared runtime (AGT-050). Answering an
+external form supplies input, not an action grant, so combining the decision
+stores or treating acceptance as approval would erase a security boundary.
+
+**Don't:** put response values in the hidden message, use MCP loopback for
+first-party approvals, or make a generic resume bypass either kind's checks.

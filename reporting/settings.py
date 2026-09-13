@@ -1174,6 +1174,12 @@ MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
 # docs/root/install/external-mcp.md. Parsing at startup makes malformed security
 # mappings a configuration error rather than silently dropping a proxy.
 MCP_EXTERNAL_ENABLED = bool_env("MCP_EXTERNAL_ENABLED", False)
+# Interactive MCP forms and URL completion; each proxy also opts in.
+MCP_EXTERNAL_ELICITATION_ENABLED = bool_env("MCP_EXTERNAL_ELICITATION_ENABLED", False)
+# Pending and answered input lifetime in seconds, clamped to 1–86400.
+CHAT_ELICITATION_TTL_SECONDS = max(1, min(86400, int_env("CHAT_ELICITATION_TTL_SECONDS", 3600)))
+# Maximum form fields, clamped to 1–32.
+CHAT_ELICITATION_MAX_FIELDS = max(1, min(32, int_env("CHAT_ELICITATION_MAX_FIELDS", 32)))
 # Entries may acquire M2M tokens through client_credentials or use a shared
 # token_env. user_authorization enables per-owner gateway status and recovery;
 # the gateway owns upstream grants (AGT-048).

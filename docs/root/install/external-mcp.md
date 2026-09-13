@@ -17,6 +17,70 @@ does not re-export them from `/api/v1/mcp`. Tool names are rewritten as
 `ext__<proxy-name>__<remote-tool-name>`, preventing collisions with built-ins,
 stored toolsets, or another proxy.
 
+## In-chat input requests
+
+Set `MCP_EXTERNAL_ELICITATION_ENABLED=true` on the web and Temporal worker
+services, and opt each proxy into `"elicitation": {"form": true, "url": true}`.
+Both kinds default to false. URL requests also require `user_authorization` with
+a `reauthorize_url` on the same origin as the requested browser URL.
+
+Interactive modern MCP calls display input cards in chat. Answer every card in
+a group; submitting the last answer resumes the conversation. Once the resumed
+call has taken the answers, its card clears and the paused entry in the turn's
+details shows what the call returned. After a reload, an answered card's
+**Continue chat** button resumes without resubmitting values.
+The call uses its saved arguments and continuation state and checks permissions
+and action approvals again. Expired or rejected upstream continuations require
+a new request. Decline and Cancel are final decisions for that request.
+
+`CHAT_ELICITATION_TTL_SECONDS` controls pending and answered request lifetime
+(default 3600 seconds, bounded to 1–86400). `CHAT_ELICITATION_MAX_FIELDS` controls
+the maximum field count (default and hard ceiling 32). Forms support flat
+strings, numbers, integers, booleans and bounded enums, with at most 4096
+characters per string. Unsupported schemas are rejected. A call may request
+eight inputs; live limits are sixteen per turn and sixty-four per thread.
+
+Submitted values go to the external server through protocol input responses.
+They may appear in tool results, chat history, or AI model context; tool results
+are not redacted. Do not enter passwords, API keys, access tokens, or verification
+codes in forms. Use URL elicitation for credential collection directly on the
+external service’s site. Answers are stored until consumption or expiry collection.
+Database backups may retain earlier copies.
+Deleting a chat removes its input records. Expired rows are collected while
+interactive elicitation is enabled.
+
+Legacy callbacks, discovery, scheduled runs and other detached work retain the
+Chat Connections recovery flow. Sandbox subagents do not advertise forms. If
+one nevertheless receives an input request, it returns with its existing work;
+a later delegation can continue the matching call after the owner answers.
+
+### Local elicitation fixture
+
+Run the unauthenticated fixture only on a development machine:
+
+```bash
+docker compose run --rm --no-deps --name seizu-elicitation-demo -p 127.0.0.1:8099:8099 seizu uv run --frozen --no-sync python scripts/elicitation_mcp_server.py
+```
+
+Append this entry to `MCP_EXTERNAL_PROXIES`, enable
+`MCP_EXTERNAL_ELICITATION_ENABLED`, and recreate the web and Temporal worker:
+
+```json
+{
+  "name": "elicitation-demo",
+  "url": "http://seizu-elicitation-demo:8099/mcp/",
+  "transport": "streamable_http",
+  "require_confirmation": false,
+  "elicitation": {"form": true, "url": true},
+  "user_authorization": {"reauthorize_url": "http://localhost:8099/complete"}
+}
+```
+
+Ask chat to call `ext__elicitation-demo__ask_form` or
+`ext__elicitation-demo__ask_url`. Submit, decline, cancel, and reload with a
+pending card. The fixture returns the action without echoing field values.
+Use the same proxy in a scheduled chat to check its recovery-only behavior.
+
 ## Proxy configuration
 
 Set `MCP_EXTERNAL_ENABLED=true` and `MCP_EXTERNAL_PROXIES` to a JSON array. The web service and
@@ -282,6 +346,25 @@ stack has real tools to discover rather than a stub:
   graph records, and neither of which the sandbox can fetch, since it has no
   egress. Read-only and unauthenticated; only a package name and version leave
   the network.
+- [`mappedsky/elicitationtestermcp`](https://github.com/mappedsky/elicitationtestermcp),
+  a catalogue of elicitation shapes for testing this client against. Most of them
+  are shapes a conforming client should **refuse**, so a refusal is the pass
+  condition rather than a failure; each scenario states which it is. It is a
+  manual-testing fixture and is not in the example `MCP_EXTERNAL_PROXIES` above.
+
+  Wiring it takes two proxies, because one endpoint cannot serve both protocols:
+  `/mcp` carries input requests in the tool result, and `/mcp/legacy` negotiates
+  the older revision where the server sends elicitation requests during the call.
+  Both entries need `elicitation.form`/`elicitation.url` alongside
+  `MCP_EXTERNAL_ELICITATION_ENABLED`, and their `user_authorization.reauthorize_url`
+  has to match the tester's `-allowed-url`: every URL scenario is derived from
+  that one value, so a mismatch refuses all of them including the ones meant to
+  pass. `.env.example` carries a ready entry.
+
+  The bundled `elicitation-testing` Agent Plugin declares both proxies' tools so
+  the scenarios are reachable with progressive disclosure on. It ships
+  **disabled**, since its skills are useless, and their dependencies unresolvable,
+  wherever the tester is not running.
 
 The profile also runs
 [`obot-platform/mcp-oauth-proxy`](https://github.com/obot-platform/mcp-oauth-proxy)
