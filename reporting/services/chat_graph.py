@@ -360,6 +360,7 @@ _HEADLESS_PROMPT_ADDENDUM = (
     "Carry out the task exactly as directed by the prompt and any rendered skills, making "
     "reasonable decisions yourself where a skill leaves room. If an action is blocked because it "
     "requires interactive confirmation, note it in your summary and move on rather than retrying. "
+    "External input requests cannot be answered in this run; report the block and any connection recovery guidance. "
     "Finish with a concise summary of what you did and found."
 )
 
@@ -633,7 +634,24 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     provider = _chat_provider()
     current_user = _current_user_from_config(config)
     resume_confirmation_id = _resume_confirmation_id(state["messages"])
+    from reporting.services import chat_elicitations
+
+    if elicitation_id := chat_elicitations.resume_id(state["messages"]):
+        return await _resume_elicited_tool_turn(state, config, current_user, elicitation_id)
     if resume_confirmation_id:
+        from reporting.services.report_store import elicitations
+
+        linked = (
+            await elicitations.for_confirmation(
+                resume_confirmation_id,
+                current_user.user.user_id,
+                _client_thread_id_from_config(config),
+            )
+            if current_user is not None and settings.MCP_EXTERNAL_ELICITATION_ENABLED
+            else None
+        )
+        if linked is not None:
+            return await _resume_elicited_tool_turn(state, config, current_user, linked.elicitation_id)
         return await _resume_confirmed_tool_turn(state, config, current_user, resume_confirmation_id)
     if provider == "mock":
         return await mock_agent_node(state, config)
@@ -1372,7 +1390,10 @@ async def _execute_confirmations(
         )
         if outcome.blocked is not None:
             errors.append(f"`{c.tool_name}`: {_blocked_tool_call_body(outcome.text)}")
-            detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="blocked"))
+            detail = _confirmation_tool_detail_data(c, outcome.text, status="blocked")
+            if outcome.blocked == ChatBlockReason.INPUT_REQUIRED:
+                detail["elicitation_ids"] = json.loads(outcome.text)["elicitation_ids"]
+            detail_events.append(detail)
         elif error_text := _tool_result_error_text(outcome.text):
             errors.append(f"`{c.tool_name}`: {error_text}")
             detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="blocked"))
@@ -1392,6 +1413,53 @@ async def _execute_confirmations(
 
     await asyncio.gather(*(_run_one_limited(c) for c in to_run))
     return outcomes, errors, detail_events
+
+
+async def _resume_elicited_tool_turn(
+    state: ChatState,
+    config: RunnableConfig,
+    current_user: CurrentUser | None,
+    elicitation_id: str,
+) -> ChatState:
+    from reporting.services import chat_elicitations
+
+    writer = get_stream_writer()
+    details = []
+    if current_user is None:
+        response = "The input request requires an authenticated user."
+    else:
+        kind, response = await chat_elicitations.resume(
+            elicitation_id,
+            current_user,
+            _client_thread_id_from_config(config),
+        )
+        detail = await chat_elicitations.resume_detail(elicitation_id, current_user, kind, response)
+        if detail is not None:
+            details.append(detail)
+            writer({"kind": "detail", "id": f"elicitation-{elicitation_id}", "data": detail})
+        if kind == "run" and _chat_provider() != "mock":
+            model = get_chat_model()
+            result = await _run_llm_tool_turn(
+                model,
+                _combined_system_prompt(
+                    build_system_prompt(_chat_provider(), current_user),
+                    "The owner answered the external input request. Summarize the tool result. Do not call more tools.",
+                ),
+                [
+                    *_llm_context_messages(state["messages"], model),
+                    HumanMessage(content="External tool result:\n" + response),
+                ],
+                [],
+                config,
+                writer,
+                phase="assistant",
+            )
+            response = message_text(result.message.content)
+            if not result.streamed:
+                writer({"kind": "token", "content": response})
+            return _chat_state_with_ai_response(state, response, details=[*details, *result.details])
+    writer({"kind": "token", "content": response})
+    return _chat_state_with_ai_response(state, response, details=details)
 
 
 async def _resume_confirmed_tool_turn(
@@ -3037,9 +3105,7 @@ def _context_model() -> Any:
 
 def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
     action = "Skill" if result.request.spec.kind == "skill" else "Tool"
-    # A confirmation gate is a genuine wait (the UI shows it as "awaiting"); any
-    # other block is a failure ("blocked").
-    if result.blocked == ChatBlockReason.CONFIRMATION_REQUIRED:
+    if result.blocked in {ChatBlockReason.CONFIRMATION_REQUIRED, ChatBlockReason.INPUT_REQUIRED}:
         status = "awaiting"
     elif result.blocked is not None:
         status = "blocked"
@@ -3053,6 +3119,8 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         "arguments": _truncate_text(_json_dump(result.request.arguments), _DETAIL_ARGUMENTS_MAX_CHARS),
         "body": _truncate_text(result.content, _DETAIL_BODY_MAX_CHARS),
     }
+    if result.blocked == ChatBlockReason.INPUT_REQUIRED:
+        detail["elicitation_ids"] = json.loads(result.content)["elicitation_ids"]
     if result.request.spec.kind == "skill" and (inputs := skill_inputs_block(result.content)):
         # The values this invocation actually ran with, defaults included --
         # which the arguments do not show, and the truncated body no longer
@@ -3208,6 +3276,11 @@ def _disclosed_tool_specs(tools: list[Tool], disclosed: set[str]) -> list[ChatTo
 
 
 def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
+    if any(result.blocked == ChatBlockReason.INPUT_REQUIRED for result in results):
+        return (
+            "An external server requested input. Answer the input cards in this chat to continue. "
+            "The call is paused; do not retry it."
+        )
     if any(result.blocked == ChatBlockReason.CONFIRMATION_DENIAL_LIMIT for result in results):
         return (
             "This chat has reached its confirmation denial limit. No blocked action was executed. "
@@ -3979,7 +4052,11 @@ def _last_user_request(messages: list[Any]) -> str:
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
             kwargs = getattr(message, "additional_kwargs", None) or {}
-            if isinstance(kwargs, dict) and (kwargs.get("resume_confirmation_id") or kwargs.get("continue_response")):
+            if isinstance(kwargs, dict) and (
+                kwargs.get("resume_confirmation_id")
+                or kwargs.get("resume_elicitation_id")
+                or kwargs.get("continue_response")
+            ):
                 continue
             return str(message.content)
         if isinstance(message, dict) and message.get("role") == "user":

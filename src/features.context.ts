@@ -7,6 +7,7 @@ export interface Features {
   chat: boolean;
   chat_schedules: boolean;
   chat_connections: boolean;
+  chat_elicitation?: boolean;
 }
 
 // Disabled defaults prevent feature UI from flashing before GET /api/v1/config
@@ -27,5 +28,5 @@ export const BACKEND_DEFAULT_FEATURES: Features = {
 export const FeaturesContext = createContext<Features>(DEFAULT_FEATURES);
 
 export function useFeature(name: keyof Features): boolean {
-  return useContext(FeaturesContext)[name];
+  return useContext(FeaturesContext)[name] === true;
 }

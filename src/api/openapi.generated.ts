@@ -1878,6 +1878,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/chat/elicitations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Chat Elicitations */
+        get: operations["list_chat_elicitations_api_v1_chat_elicitations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chat/elicitations/{elicitation_id}/response": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Respond Chat Elicitation */
+        post: operations["respond_chat_elicitation_api_v1_chat_elicitations__elicitation_id__response_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/chat/threads/{thread_id}/turns": {
         parameters: {
             query?: never;
@@ -2345,6 +2379,51 @@ export interface components {
             /** Results */
             results: unknown[];
         };
+        /** ChatElicitation */
+        ChatElicitation: {
+            /** Elicitation Id */
+            elicitation_id: string;
+            /** Group Id */
+            group_id: string;
+            /** Thread Id */
+            thread_id: string;
+            /** Turn Id */
+            turn_id: string;
+            /** Proxy Name */
+            proxy_name: string;
+            /** Proxy Fingerprint */
+            proxy_fingerprint: string;
+            /** Tool Name */
+            tool_name: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "form" | "url";
+            /** Message */
+            message: string;
+            /** Requested Schema */
+            requested_schema?: {
+                [key: string]: unknown;
+            } | null;
+            /** Url */
+            url?: string | null;
+            /**
+             * Status
+             * @default pending
+             * @enum {string}
+             */
+            status: "pending" | "accepted" | "declined" | "cancelled" | "expired" | "consumed";
+            /** Created At */
+            created_at: string;
+            /** Expires At */
+            expires_at: string;
+        };
+        /** ChatElicitationsResponse */
+        ChatElicitationsResponse: {
+            /** Elicitations */
+            elicitations?: components["schemas"]["ChatElicitation"][];
+        };
         /** ChatHistoryMessage */
         ChatHistoryMessage: {
             /** Id */
@@ -2455,6 +2534,8 @@ export interface components {
             message: string;
             /** Resume Confirmation Id */
             resume_confirmation_id?: string | null;
+            /** Resume Elicitation Id */
+            resume_elicitation_id?: string | null;
             /**
              * Continue Response
              * @default false
@@ -2802,6 +2883,18 @@ export interface components {
              * @enum {string}
              */
             reasoning_effort: "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+        };
+        /** ElicitationResponse */
+        ElicitationResponse: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "accept" | "decline" | "cancel";
+            /** Content */
+            content?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** ExternalMCPConnection */
         ExternalMCPConnection: {
@@ -8926,6 +9019,72 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_chat_elicitations_api_v1_chat_elicitations_get: {
+        parameters: {
+            query: {
+                thread_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatElicitationsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    respond_chat_elicitation_api_v1_chat_elicitations__elicitation_id__response_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                elicitation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElicitationResponse"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatElicitation"];
+                };
             };
             /** @description Validation Error */
             422: {

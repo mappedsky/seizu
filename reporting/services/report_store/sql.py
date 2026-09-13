@@ -441,6 +441,25 @@ class QueryHistoryRecord(SQLModel, table=True):  # type: ignore
     executed_at: str
 
 
+class ChatElicitationRecord(SQLModel, **{"table": True}):
+    __tablename__ = "chat_elicitations"
+    elicitation_id: str = Field(primary_key=True)
+    user_id: str = Field(index=True)
+    thread_id: str = Field(index=True)
+    turn_id: str = Field(index=True)
+    group_id: str = Field(index=True)
+    confirmation_id: str | None = Field(default=None, index=True)
+    arguments_hash: str
+    step_id: str | None = None
+    status: str = "pending"
+    created_at: str
+    expires_at: str = Field(index=True)
+    decided_at: str | None = None
+    public_json: str
+    private_json: str
+    response_json: str | None = None
+
+
 class ChatSessionRecord(SQLModel, table=True):  # type: ignore
     __tablename__ = "chat_sessions"
     __table_args__ = (
@@ -4341,6 +4360,12 @@ class SQLModelReportStore(ReportStore):
             )
             result = await session.execute(stmt)
             if result.rowcount > 0:
+                await session.execute(
+                    delete(ChatElicitationRecord).where(
+                        col(ChatElicitationRecord.user_id) == user_id,
+                        col(ChatElicitationRecord.thread_id) == thread_id,
+                    )
+                )
                 # A turn log is only reachable through its session; deleting one
                 # without the other leaves rows nothing will ever look for.
                 turn_ids = (

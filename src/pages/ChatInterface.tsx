@@ -63,6 +63,10 @@ import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import ChatInput from 'src/components/ChatInput';
 import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
+import ChatElicitationCard from 'src/components/ChatElicitationCard';
+import { reconcileElicitationDetail } from 'src/utils/elicitationDetails';
+import { useChatElicitations } from 'src/hooks/useChatElicitations';
+import { useChatHumanInputResume } from 'src/hooks/useChatHumanInputResume';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { pageContentSx } from 'src/theme/layout';
 
@@ -112,6 +116,8 @@ type SeizuChatDetail = {
   parent_id?: string;
   // Inner rows of a subagent run, rendered nested under this entry.
   children?: SeizuChatDetail[];
+  elicitation_ids?: string[];
+  elicitation_resumed?: boolean;
 };
 
 const KNOWN_DETAIL_KINDS = [
@@ -299,6 +305,12 @@ function parseDetail(raw: unknown): SeizuChatDetail | null {
     step_id: str('step_id'),
     detail_id: str('detail_id'),
     parent_id: str('parent_id'),
+    elicitation_ids: Array.isArray(detail.elicitation_ids)
+      ? detail.elicitation_ids.filter(
+          (id): id is string => typeof id === 'string',
+        )
+      : undefined,
+    elicitation_resumed: detail.elicitation_resumed === true,
     children: children && children.length > 0 ? children : undefined,
   };
 }
@@ -327,15 +339,6 @@ function stripOutputLimitNotice(text: string): string {
     .replace(OUTPUT_LIMIT_NOTICE, '')
     .replace(OUTPUT_LIMIT_TOOL_NOTICE, '')
     .trimEnd();
-}
-
-function hiddenResumeMessage(confirmationId: string): SeizuChatMessage {
-  return {
-    id: `resume-${confirmationId}`,
-    role: 'user',
-    metadata: { seizu_hidden: true },
-    parts: [],
-  };
 }
 
 // Split a streaming response into completed blocks (separated by blank lines)
@@ -860,6 +863,9 @@ export default function ChatInterface() {
   // either way, so the UI would otherwise look exactly as if it had worked
   // while the turn keeps generating.
   const [stopError, setStopError] = useState<string | null>(null);
+  const [elicitationResumeError, setElicitationResumeError] = useState<
+    string | null
+  >(null);
   // Every thread whose last send never resolved. A set, not one value: a second
   // ambiguous send in another conversation would otherwise hide the recovery
   // the first one still needs. Mirrors transport state so the banner re-renders.
@@ -904,7 +910,6 @@ export default function ChatInterface() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const accessTokenRef = useRef(accessToken);
   const chatIdRef = useRef('__pending__');
-  const resumeConfirmationIdRef = useRef<string | null>(null);
   const consumedResumeParamRef = useRef<string | null>(null);
   // resumeStream comes back from useChat, which is declared after the onFinish
   // callback that needs it.
@@ -1098,22 +1103,28 @@ export default function ChatInterface() {
           const resumeConfirmationId =
             typeof body?.resume_confirmation_id === 'string'
               ? body.resume_confirmation_id
-              : resumeConfirmationIdRef.current;
+              : null;
           const continueResponse = body?.continue_response === true;
+          const resumeElicitationId =
+            typeof body?.resume_elicitation_id === 'string'
+              ? body.resume_elicitation_id
+              : null;
           const continueMessageId =
             typeof body?.continue_message_id === 'string'
               ? body.continue_message_id
               : undefined;
-          resumeConfirmationIdRef.current = null;
           return {
             message:
-              resumeConfirmationId || continueResponse
+              resumeConfirmationId || resumeElicitationId || continueResponse
                 ? ''
                 : latestUserText(messages),
             ...(resumeConfirmationId
               ? { resume_confirmation_id: resumeConfirmationId }
               : {}),
             ...(continueResponse ? { continue_response: true } : {}),
+            ...(resumeElicitationId
+              ? { resume_elicitation_id: resumeElicitationId }
+              : {}),
             ...(continueMessageId
               ? { continue_message_id: continueMessageId }
               : {}),
@@ -1285,6 +1296,14 @@ export default function ChatInterface() {
     () => messages.filter((message) => message.metadata?.seizu_hidden !== true),
     [messages],
   );
+  const elicitationOutcomes = useMemo(
+    () => visibleMessages.flatMap(messageDetails),
+    [visibleMessages],
+  );
+  const resolvedDetail = (detail: SeizuChatDetail): SeizuChatDetail => ({
+    ...reconcileElicitationDetail(detail, elicitationOutcomes),
+    children: detail.children?.map(resolvedDetail),
+  });
   // A message only carries a server timestamp once it comes back from
   // /chat/history; the copy the stream produces has none. So a message that is
   // neither timed nor yet persisted is stamped with the browser's clock, and
@@ -1518,6 +1537,36 @@ export default function ChatInterface() {
     touchSession(activeThreadId);
   }, [pendingAttach, activeThreadId, touchSession]);
 
+  const elicitations = useChatElicitations(
+    useFeature('chat_elicitation') ? activeThreadId : null,
+    busy,
+  );
+  const resumeHumanInput = useChatHumanInputResume(
+    activeThreadId,
+    sendMessage,
+    touchSession,
+  );
+
+  const resumeElicitation = useCallback(
+    (item: { elicitation_id: string; thread_id: string }) => {
+      setElicitationResumeError(null);
+      elicitations.dismiss(item.elicitation_id);
+      void resumeHumanInput({
+        kind: 'elicitation',
+        id: item.elicitation_id,
+        threadId: item.thread_id,
+      }).catch(() => {
+        // Nothing was delivered, so the answer is still recoverable and the
+        // card is how the owner reaches it.
+        elicitations.restore(item.elicitation_id);
+        setElicitationResumeError(
+          'Could not continue the conversation with that answer. Try again.',
+        );
+      });
+    },
+    [elicitations, resumeHumanInput],
+  );
+
   const handleConfirmationDecision = useCallback(
     async (
       confirmation: ActionConfirmation,
@@ -1549,13 +1598,11 @@ export default function ChatInterface() {
           !hasPendingConfirmation && !hasDeniedBatchConfirmation;
         await fetchConfirmations();
         if (decision === 'approved' && activeThreadId && canResume) {
-          resumeConfirmationIdRef.current = confirmation.confirmation_id;
-          touchSession(activeThreadId);
-          await Promise.resolve(
-            sendMessage(hiddenResumeMessage(confirmation.confirmation_id), {
-              body: { resume_confirmation_id: confirmation.confirmation_id },
-            }),
-          );
+          await resumeHumanInput({
+            kind: 'confirmation',
+            id: confirmation.confirmation_id,
+            threadId: activeThreadId,
+          });
         }
       } catch {
         setConfirmationError('Failed to approve or resume this confirmation.');
@@ -1568,8 +1615,7 @@ export default function ChatInterface() {
       confirmations,
       decideConfirmation,
       fetchConfirmations,
-      sendMessage,
-      touchSession,
+      resumeHumanInput,
     ],
   );
 
@@ -1579,30 +1625,17 @@ export default function ChatInterface() {
     if (!resumeConfirmationId) return;
     if (consumedResumeParamRef.current === resumeConfirmationId) return;
     consumedResumeParamRef.current = resumeConfirmationId;
-    resumeConfirmationIdRef.current = resumeConfirmationId;
-    touchSession(activeThreadId);
-    try {
-      void Promise.resolve(
-        sendMessage(hiddenResumeMessage(resumeConfirmationId), {
-          body: { resume_confirmation_id: resumeConfirmationId },
-        }),
-      ).catch(() => {
-        setConfirmationError('Failed to resume the approved confirmation.');
-      });
-    } catch {
+    void resumeHumanInput({
+      kind: 'confirmation',
+      id: resumeConfirmationId,
+      threadId: activeThreadId,
+    }).catch(() => {
       setConfirmationError('Failed to resume the approved confirmation.');
-    }
+    });
     const next = new URLSearchParams(searchParams);
     next.delete('resume_confirmation_id');
     setSearchParams(next, { replace: true });
-  }, [
-    activeThreadId,
-    busy,
-    searchParams,
-    sendMessage,
-    setSearchParams,
-    touchSession,
-  ]);
+  }, [activeThreadId, busy, searchParams, resumeHumanInput, setSearchParams]);
 
   const handleCopyMessage = async (message: SeizuChatMessage) => {
     const text = messageText(message);
@@ -1924,7 +1957,7 @@ export default function ChatInterface() {
                 <>
                   {visibleMessages.map((message) => {
                     const text = messageText(message);
-                    const details = messageDetails(message);
+                    const details = messageDetails(message).map(resolvedDetail);
                     const copied = copiedMessageId === message.id;
                     const loadMore = continuableMessage?.id === message.id;
                     const isContinuationSource =
@@ -2202,6 +2235,40 @@ export default function ChatInterface() {
                       </Box>
                     );
                   })}
+                  {elicitations.items.map((item) => (
+                    <ChatElicitationCard
+                      key={item.elicitation_id}
+                      item={item}
+                      busy={busy}
+                      onRespond={(action, content) =>
+                        elicitations.respond(
+                          item.elicitation_id,
+                          action,
+                          content,
+                        )
+                      }
+                      onAnswered={() => {
+                        // A group is answered together, so the last answer is
+                        // what releases the call; the others only close their
+                        // own card.
+                        const waiting = elicitations.items.some(
+                          (other) =>
+                            other.group_id === item.group_id &&
+                            other.elicitation_id !== item.elicitation_id &&
+                            other.status === 'pending',
+                        );
+                        if (waiting) elicitations.dismiss(item.elicitation_id);
+                        else resumeElicitation(item);
+                      }}
+                      onResume={() => resumeElicitation(item)}
+                    />
+                  ))}
+                  {elicitations.error && (
+                    <Alert severity="error">{elicitations.error}</Alert>
+                  )}
+                  {elicitationResumeError && (
+                    <Alert severity="error">{elicitationResumeError}</Alert>
+                  )}
                   {busy ? (
                     <Box
                       sx={{

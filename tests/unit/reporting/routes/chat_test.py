@@ -145,6 +145,14 @@ def _chat_turn_log(mocker):
     mocker.patch("reporting.services.chat_turns.TURN_STOP_WAIT_SECONDS", 0.3)
     mocker.patch("reporting.services.chat_turns._last_sweep_monotonic", 0.0)
     mocker.patch("reporting.services.chat_turns._TURN_SWEEP_INTERVAL_SECONDS", 0.0)
+    # The same sweep purges expired external input requests, and those live in
+    # their own store rather than behind the seam this fixture replaces. Without
+    # this, an ambient MCP_EXTERNAL_ELICITATION_ENABLED=true sends every
+    # producing test to a real database.
+    mocker.patch(
+        "reporting.services.report_store.elicitations.purge_expired",
+        mocker.AsyncMock(return_value=None),
+    )
 
     turns: dict[str, ChatTurnItem] = {}
     events: dict[str, dict[int, str]] = {}

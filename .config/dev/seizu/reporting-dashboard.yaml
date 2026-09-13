@@ -1952,6 +1952,12 @@ plugins:
   cve_response:
     source: plugins/cve-response
     enabled: true
+  elicitation_testing:
+    source: plugins/elicitation-testing
+    # A fixture, not a capability: it only does anything when the tester is
+    # running under the external-mcp profile and named in MCP_EXTERNAL_PROXIES.
+    # Enabling it otherwise offers the model skills whose tools do not resolve.
+    enabled: false
   report_authoring:
     source: plugins/report-authoring
     enabled: true

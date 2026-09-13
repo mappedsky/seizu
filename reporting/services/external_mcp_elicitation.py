@@ -1,4 +1,4 @@
-"""Negotiation and bounded URL recovery for detached MCP clients (AGT-048/049)."""
+"""Negotiation, elicitation capabilities and bounded URL recovery (AGT-048/049/055)."""
 
 from collections.abc import Callable
 from typing import Any
@@ -17,7 +17,7 @@ MAX_ELICITATIONS = 8
 
 
 class ClientSession(SDKClientSession):
-    """Constrain SDK negotiation fallback and advertise only URL elicitation."""
+    """Constrain SDK fallback and advertise elicitation supported by the caller."""
 
     _discovery_guard: Callable[[], int | None] | None = None
 
@@ -49,8 +49,10 @@ class ClientSession(SDKClientSession):
                 self._discovery_guard()
 
     def _build_capabilities(self, version: str) -> ClientCapabilities:
+        from reporting.services.chat_elicitations import form_capability
+
         capabilities = super()._build_capabilities(version)
-        if capabilities.elicitation is not None:
+        if capabilities.elicitation is not None and not (version in MODERN_PROTOCOL_VERSIONS and form_capability.get()):
             capabilities.elicitation.form = None
         return capabilities
 

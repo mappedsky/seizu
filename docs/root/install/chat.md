@@ -6,6 +6,22 @@ The chat assistant is an LLM agent built into the web app at `/app/chat`. It ans
 
 The assistant also powers the headless features documented separately: [scheduled chats](chat-schedules.html), agent sessions started by [workflows](built-in-workflows.html), and [sandbox delegation](sandbox.html).
 
+## External input cards
+
+An external MCP server may ask for input during a tool call. When your operator
+enables [in-chat elicitation](external-mcp.html#in-chat-input-requests), a card
+names the server and tool and displays its question. Form cards support Submit,
+Decline and Cancel. URL cards show the destination host: open the link yourself,
+complete the external interaction, then choose Completed.
+
+The conversation resumes after all cards for that call are answered. Pending
+and answered cards survive a reload; **Continue chat** resumes an answered
+request if delivery was interrupted. Values are sent to the named external
+server and may appear in chat or be processed by the AI model. Do not enter
+passwords, API keys, access tokens, or verification codes in forms. Credential
+collection uses URL elicitation on the external site. Expired requests cannot
+be answered or replayed.
+
 ## Enabling chat
 
 Most of this page is reference material: orchestration, run budgets, context
