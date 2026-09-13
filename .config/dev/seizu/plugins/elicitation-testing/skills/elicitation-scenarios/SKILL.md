@@ -8,7 +8,7 @@ allowed-tools: mcp__elicit__list_scenarios mcp__elicit__run_scenario mcp__elicit
 Exercise the elicitation tester on behalf of whoever asked. This skill exists to
 make the tester's tools callable; the tester itself decides what happens.
 
-The tester serves a catalogue of elicitation shapes. Roughly a quarter are shapes
+The tester serves a catalogue of elicitation shapes. Roughly a third are shapes
 a conforming client should render. **The rest are shapes it should refuse, and a
 refusal is the expected result, not a failure.** Each scenario says which it is in
 its own `expect` text. Report what happened and let the reader judge it; never
@@ -24,8 +24,9 @@ What the tools do:
   the tester will use. Start here when a scenario behaves unexpectedly.
 - `custom_form` and `custom_url` — send a schema or a URL supplied verbatim, for
   probing something the catalogue does not cover.
-- `exchange_log` — what the tester sent and what came back. This is the read-back
-  when submitted values are redacted from the transcript. It takes
+- `exchange_log` — what the tester sent and what came back. `run_scenario`
+  reports each submitted value as a type, a length and a digest rather than the
+  value, so this is the read-back when a digest is not enough. It takes
   `include_values`, which prints the submitted values into the conversation; ask
   for it only when confirming a value arrived intact.
 - `reset_log` — discard that log.

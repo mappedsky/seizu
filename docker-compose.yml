@@ -318,7 +318,7 @@ services:
   # manual-testing fixture, so it stays out of MCP_EXTERNAL_PROXIES until
   # someone puts it there; see .env.example.
   external-mcp-elicitation-tester:
-    image: ghcr.io/mappedsky/elicitationtestermcp:0.2.0
+    image: ghcr.io/mappedsky/elicitationtestermcp:0.3.0
     command:
       - -http-address
       - 0.0.0.0:8080
