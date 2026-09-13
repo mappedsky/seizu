@@ -2241,6 +2241,23 @@ def route_from_dispatcher(state: ChatState) -> str:
     return "synthesizer"
 
 
+def _settle_resumed_detail(result: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
+    """Fold a continuation's outcome into the trace entry of the call it answers.
+
+    A step keeps one entry per call: the parked entry holds the arguments, the
+    continuation holds what the call returned. Appending instead would replay
+    the wait beside its own answer every time the turn is reloaded.
+    """
+    details: list[dict[str, Any]] = result.setdefault("tool_details", [])
+    ids = set(detail.get("elicitation_ids") or [])
+    for index, existing in enumerate(details):
+        if ids & set(existing.get("elicitation_ids") or []):
+            details[index] = {**existing, **detail}
+            return details[index]
+    details.append(detail)
+    return detail
+
+
 async def _resume_awaiting_steps(
     plan: list[dict[str, Any]],
     results: list[dict[str, Any]],
@@ -2270,6 +2287,10 @@ async def _resume_awaiting_steps(
             failures = list(result.get("elicitation_failures", []))
             for eid in result.get("elicitation_ids") or [result["elicitation_id"]]:
                 kind, output = await chat_elicitations.resume(eid, current_user, session_key)
+                detail = await chat_elicitations.resume_detail(eid, current_user, kind, output)
+                if detail is not None:
+                    detail["step_id"] = step["id"]
+                    _emit(writer, _settle_resumed_detail(result, detail), f"elicitation-{eid}")
                 if kind == "wait":
                     result["elicitation_message"] = output
                     try:

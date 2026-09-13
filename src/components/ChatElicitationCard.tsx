@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -11,15 +11,28 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import type {
   ChatElicitation,
   InputAction,
 } from 'src/hooks/useChatElicitations';
 
+// How long the answer is confirmed in place before the card closes. Long
+// enough to read, short enough that the turn it releases is the next thing to
+// happen rather than something the reader is left waiting through.
+const CONFIRMATION_MS = 1000;
+
+const CONFIRMATIONS: Record<InputAction, string> = {
+  accept: 'Answer sent',
+  decline: 'Request declined',
+  cancel: 'Request cancelled',
+};
+
 export default function ChatElicitationCard({
   item,
   busy,
   onRespond,
+  onAnswered,
   onResume,
 }: {
   item: ChatElicitation;
@@ -28,11 +41,29 @@ export default function ChatElicitationCard({
     action: InputAction,
     content?: Record<string, unknown>,
   ) => Promise<void>;
-  onResume: () => Promise<void>;
+  // The answer is recorded and confirmed; the card is done. Delivering it is
+  // the caller's to start, and is deliberately not awaited here -- that
+  // promise settles when the whole turn does, which would hold the card open
+  // for the answer it already has.
+  onAnswered: (action: InputAction) => void;
+  onResume: () => void;
 }) {
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState<InputAction | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Held in a ref so a re-render of the page does not restart the timer and
+  // leave a confirmed card sitting open.
+  const answeredRef = useRef(onAnswered);
+  answeredRef.current = onAnswered;
+  useEffect(() => {
+    if (!sent) return;
+    const timer = window.setTimeout(
+      () => answeredRef.current(sent),
+      CONFIRMATION_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [sent]);
   const expired = new Date(item.expires_at).getTime() <= Date.now();
   const pending = item.status === 'pending' && !expired;
   const fields = item.requested_schema?.properties ?? {};
@@ -55,9 +86,9 @@ export default function ChatElicitationCard({
           : undefined;
       await onRespond(action, content);
       setValues({});
+      setSent(action);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not submit input.');
-    } finally {
       setSending(false);
     }
   };
@@ -75,7 +106,16 @@ export default function ChatElicitationCard({
         {item.message}
       </Typography>
       {error && <Alert severity="error">{error}</Alert>}
-      {pending ? (
+      {sent ? (
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{ alignItems: 'center', color: 'success.main', mt: 2 }}
+        >
+          <CheckCircleIcon fontSize="small" />
+          <Typography variant="body2">{CONFIRMATIONS[sent]}</Typography>
+        </Stack>
+      ) : pending ? (
         <Box
           component="form"
           onSubmit={(event) => {
@@ -197,9 +237,7 @@ export default function ChatElicitationCard({
               disabled={sending || busy}
               onClick={() => {
                 setSending(true);
-                void onResume()
-                  .catch(() => setError('Could not resume. Try again.'))
-                  .finally(() => setSending(false));
+                onResume();
               }}
             >
               Continue chat

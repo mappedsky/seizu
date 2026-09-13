@@ -41,6 +41,7 @@ export type InputAction = 'accept' | 'decline' | 'cancel';
 export function useChatElicitations(threadId: string | null, busy: boolean) {
   const { authHeaders, checkAuthReady } = useAuthHeaders();
   const [items, setItems] = useState<ChatElicitation[]>([]);
+  const [dismissed, setDismissed] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const currentThread = useRef(threadId);
   currentThread.current = threadId;
@@ -69,6 +70,7 @@ export function useChatElicitations(threadId: string | null, busy: boolean) {
   }, [threadId, authHeaders, checkAuthReady]);
   useEffect(() => {
     setItems([]);
+    setDismissed([]);
     setError(null);
   }, [threadId]);
   useEffect(() => {
@@ -99,9 +101,28 @@ export function useChatElicitations(threadId: string | null, busy: boolean) {
     },
     [authHeaders, refresh],
   );
+  // Answering a request and delivering that answer are separate steps, and the
+  // gap between them is a whole turn: the record stays unconsumed until the
+  // resumed call claims it, which is what makes recovery possible after an
+  // interrupted delivery. Dismissal closes the card over that gap without
+  // giving the recovery up -- it is local to this view, so a reload brings an
+  // unclaimed card back, and a delivery that fails to dispatch restores it.
+  const dismiss = useCallback((id: string) => {
+    setDismissed((old) => (old.includes(id) ? old : [...old, id]));
+  }, []);
+  const restore = useCallback((id: string) => {
+    setDismissed((old) => old.filter((value) => value !== id));
+  }, []);
   return {
-    items: items.filter((item) => item.thread_id === threadId),
+    items: items.filter(
+      (item) =>
+        item.thread_id === threadId &&
+        item.status !== 'consumed' &&
+        !dismissed.includes(item.elicitation_id),
+    ),
     error,
     respond,
+    dismiss,
+    restore,
   };
 }

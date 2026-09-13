@@ -239,6 +239,22 @@ async def resume(elicitation_id: str, user: CurrentUser, thread_id: str | None) 
     return "run", outcome.text
 
 
+async def resume_detail(elicitation_id: str, user: CurrentUser, kind: str, output: str) -> dict[str, Any] | None:
+    """Describe a resumed call using the IDs of its original input group."""
+    record = await store.get(elicitation_id, user.user.user_id)
+    if record is None:
+        return None
+    rows = await store.group(record)
+    return {
+        "kind": "tool",
+        "title": f"Tool: {store.public(record).tool_name}",
+        "status": {"run": "completed", "wait": "awaiting", "abort": "blocked"}[kind],
+        "body": output[:6000],
+        "elicitation_ids": [row.elicitation_id for row in rows],
+        "elicitation_resumed": True,
+    }
+
+
 async def continuation(
     proxy: ExternalMCPProxy,
     remote_name: str,

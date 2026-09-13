@@ -25,8 +25,10 @@ Both kinds default to false. URL requests also require `user_authorization` with
 a `reauthorize_url` on the same origin as the requested browser URL.
 
 Interactive modern MCP calls display input cards in chat. Answer every card in
-a group; submitting the last answer resumes the conversation. After a reload,
-an answered card's **Continue chat** button resumes without resubmitting values.
+a group; submitting the last answer resumes the conversation. Once the resumed
+call has taken the answers, its card clears and the paused entry in the turn's
+details shows what the call returned. After a reload, an answered card's
+**Continue chat** button resumes without resubmitting values.
 The call uses its saved arguments and continuation state and checks permissions
 and action approvals again. Expired or rejected upstream continuations require
 a new request. Decline and Cancel are final decisions for that request.

@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -38,6 +39,7 @@ describe('ChatElicitationCard', () => {
         item={item}
         busy={false}
         onRespond={onRespond}
+        onAnswered={jest.fn()}
         onResume={onResume}
       />,
     );
@@ -71,6 +73,7 @@ describe('ChatElicitationCard', () => {
           item={item}
           busy={false}
           onRespond={onRespond}
+          onAnswered={jest.fn()}
           onResume={jest.fn()}
         />,
       );
@@ -84,6 +87,43 @@ describe('ChatElicitationCard', () => {
     },
   );
 
+  it('confirms the answer in place, then hands off without waiting on the turn', async () => {
+    jest.useFakeTimers();
+    try {
+      const onAnswered = jest.fn();
+      render(
+        <ChatElicitationCard
+          item={item}
+          busy={false}
+          onRespond={jest.fn().mockResolvedValue(undefined)}
+          onAnswered={onAnswered}
+          onResume={jest.fn()}
+        />,
+      );
+      fireEvent.change(screen.getByRole('textbox', { name: /Answer/ }), {
+        target: { value: 'private answer' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+
+      // The confirmation replaces the form and stands on its own: the card is
+      // finished with the answer before anything is delivered.
+      await waitFor(() =>
+        expect(screen.getByText('Answer sent')).toBeVisible(),
+      );
+      expect(
+        screen.queryByRole('button', { name: 'Submit' }),
+      ).not.toBeInTheDocument();
+      expect(onAnswered).not.toHaveBeenCalled();
+
+      await act(async () => {
+        jest.advanceTimersByTime(1000);
+      });
+      expect(onAnswered).toHaveBeenCalledWith('accept');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('requires an explicit click to visit a URL and separates completion', () => {
     const onRespond = jest.fn();
     render(
@@ -95,6 +135,7 @@ describe('ChatElicitationCard', () => {
         }}
         busy={false}
         onRespond={onRespond}
+        onAnswered={jest.fn()}
         onResume={jest.fn()}
       />,
     );
@@ -114,6 +155,7 @@ describe('ChatElicitationCard', () => {
         item={{ ...item, status: 'accepted' }}
         busy={false}
         onRespond={jest.fn()}
+        onAnswered={jest.fn()}
         onResume={onResume}
       />,
     );
@@ -128,6 +170,7 @@ describe('ChatElicitationCard', () => {
         item={{ ...item, expires_at: '2000-01-01T00:00:00Z' }}
         busy={false}
         onRespond={jest.fn()}
+        onAnswered={jest.fn()}
         onResume={jest.fn()}
       />,
     );

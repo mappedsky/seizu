@@ -3135,6 +3135,24 @@ receipts survive; its earlier model loop does not (SBX-005, SBX-008).
 second continuation lifecycle. The persistent sandbox already carries work
 into a new delegation.
 
+Input-required tool details are awaiting input. A continuation records its
+outcome against the original elicitation group; the UI applies that outcome to
+the paused detail across turns and history reloads. Within a step's own trace
+the outcome is folded into the parked entry rather than appended, so a call is
+one row carrying both its arguments and its result. An answered card confirms
+in place and then closes, before the turn it releases starts; dismissal is
+local to the view, so a reload brings an unclaimed card back and a delivery
+that never dispatches restores it immediately. Consumed cards are hidden, while
+accepted cards remain available until the continuation is claimed.
+
+**Why:** consumption is not proof that an upstream operation succeeded. Using
+the recorded outcome avoids showing a failed continuation as successful, and
+retaining unconsumed answers preserves recovery after interrupted delivery.
+Appending instead replayed the wait beside its own answer on every reload,
+which live delivery never showed. Closing the card on the delivery promise
+holds it open for the whole turn: that promise settles when the turn does, not
+when it is dispatched.
+
 ## AGT-056 — Human-input resumes share dispatch, not approval semantics
 
 **Applies to:** `useChatHumanInputResume`, `ChatInterface`

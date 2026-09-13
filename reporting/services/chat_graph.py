@@ -1424,6 +1424,7 @@ async def _resume_elicited_tool_turn(
     from reporting.services import chat_elicitations
 
     writer = get_stream_writer()
+    details = []
     if current_user is None:
         response = "The input request requires an authenticated user."
     else:
@@ -1432,6 +1433,10 @@ async def _resume_elicited_tool_turn(
             current_user,
             _client_thread_id_from_config(config),
         )
+        detail = await chat_elicitations.resume_detail(elicitation_id, current_user, kind, response)
+        if detail is not None:
+            details.append(detail)
+            writer({"kind": "detail", "id": f"elicitation-{elicitation_id}", "data": detail})
         if kind == "run" and _chat_provider() != "mock":
             model = get_chat_model()
             result = await _run_llm_tool_turn(
@@ -1452,9 +1457,9 @@ async def _resume_elicited_tool_turn(
             response = message_text(result.message.content)
             if not result.streamed:
                 writer({"kind": "token", "content": response})
-            return _chat_state_with_ai_response(state, response, details=list(result.details))
+            return _chat_state_with_ai_response(state, response, details=[*details, *result.details])
     writer({"kind": "token", "content": response})
-    return _chat_state_with_ai_response(state, response)
+    return _chat_state_with_ai_response(state, response, details=details)
 
 
 async def _resume_confirmed_tool_turn(
@@ -3100,9 +3105,7 @@ def _context_model() -> Any:
 
 def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
     action = "Skill" if result.request.spec.kind == "skill" else "Tool"
-    # A confirmation gate is a genuine wait (the UI shows it as "awaiting"); any
-    # other block is a failure ("blocked").
-    if result.blocked == ChatBlockReason.CONFIRMATION_REQUIRED:
+    if result.blocked in {ChatBlockReason.CONFIRMATION_REQUIRED, ChatBlockReason.INPUT_REQUIRED}:
         status = "awaiting"
     elif result.blocked is not None:
         status = "blocked"
@@ -3116,6 +3119,8 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         "arguments": _truncate_text(_json_dump(result.request.arguments), _DETAIL_ARGUMENTS_MAX_CHARS),
         "body": _truncate_text(result.content, _DETAIL_BODY_MAX_CHARS),
     }
+    if result.blocked == ChatBlockReason.INPUT_REQUIRED:
+        detail["elicitation_ids"] = json.loads(result.content)["elicitation_ids"]
     if result.request.spec.kind == "skill" and (inputs := skill_inputs_block(result.content)):
         # The values this invocation actually ran with, defaults included --
         # which the arguments do not show, and the truncated body no longer

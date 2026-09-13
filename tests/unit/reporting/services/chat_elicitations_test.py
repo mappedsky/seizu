@@ -4,6 +4,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -128,6 +129,68 @@ async def test_owner_once_and_group_claim(database):
     claims = await asyncio.gather(store.group(record, claim=True), store.group(record, claim=True))
     assert sum(bool(claim) for claim in claims) == 1
     assert (await store.get(ids[0], "owner")).response_json is None
+
+
+def test_paused_call_detail_waits_and_names_its_group():
+    """A parked call is a wait carrying the IDs its continuation will answer."""
+    from reporting.services import chat_graph
+    from reporting.services.mcp_runtime import ChatBlockReason
+
+    request = SimpleNamespace(
+        name="ext__p__read", arguments={}, id="d1", spec=SimpleNamespace(kind="tool", name="ext__p__read")
+    )
+    content = json.dumps({"elicitation_ids": ["first", "second"], "message": "External input requested."})
+    detail = chat_graph._tool_call_detail_data(
+        SimpleNamespace(request=request, content=content, blocked=ChatBlockReason.INPUT_REQUIRED)
+    )
+
+    assert detail["status"] == "awaiting"
+    assert detail["elicitation_ids"] == ["first", "second"]
+
+
+async def test_resume_detail_survives_history_projection(database):
+    from reporting.routes.chat import _safe_history_detail
+
+    ids = await service.park(proxy(elicitation={"form": True}), "read", {}, user(), input_result())
+    detail = await service.resume_detail(ids[0], user(), "run", "Finished successfully")
+    assert detail["status"] == "completed"
+    assert detail["elicitation_ids"] == ids
+    assert _safe_history_detail(detail) == detail
+    assert await service.resume_detail(ids[0], user("other"), "run", "result") is None
+
+
+async def test_resumed_step_keeps_one_entry_per_parked_call(database, mocker):
+    """A reload must not show the wait beside the answer it was waiting for."""
+    from reporting.services import chat_orchestrator
+
+    ids = await service.park(proxy(elicitation={"form": True}), "read", {}, user(), input_result())
+    mocker.patch.object(service, "resume", return_value=("run", "Finished successfully"))
+    parked = {
+        "kind": "tool",
+        "title": "Tool: ext__p__read",
+        "status": "awaiting",
+        "arguments": "{}",
+        "body": json.dumps({"elicitation_ids": ids}),
+        "elicitation_ids": ids,
+    }
+    results = [
+        {
+            "step_id": "step",
+            "awaiting_elicitation": True,
+            "elicitation_ids": ids,
+            "tool_details": [parked],
+        }
+    ]
+
+    await chat_orchestrator._resume_awaiting_steps(
+        [{"id": "step", "status": "awaiting"}], results, 1, user(), "123", lambda event: None
+    )
+
+    (detail,) = results[0]["tool_details"]
+    assert detail["status"] == "completed"
+    assert detail["body"] == "Finished successfully"
+    # The arguments the parked entry carried are what the answer is an answer to.
+    assert detail["arguments"] == "{}"
 
 
 async def test_exact_continuation_preserves_upstream_result(database, mocker):
@@ -364,6 +427,7 @@ async def test_remote_worker_context_does_not_require_a_langgraph_task(mocker):
 async def test_coordinator_does_not_repeat_completed_parallel_calls(mocker):
     from reporting.services import chat_orchestrator
 
+    mocker.patch.object(service, "resume_detail", return_value=None)
     resume = mocker.patch.object(service, "resume", side_effect=[("run", "first result"), ("wait", "Answer second")])
     plan = [{"id": "step", "status": "awaiting"}]
     results = [
@@ -391,6 +455,7 @@ async def test_coordinator_does_not_repeat_completed_parallel_calls(mocker):
 async def test_coordinator_resumes_parked_remote_step(mocker, kind, status):
     from reporting.services import chat_orchestrator
 
+    mocker.patch.object(service, "resume_detail", return_value=None)
     mocker.patch.object(service, "resume", return_value=(kind, "safe outcome"))
     result = await chat_orchestrator._resume_awaiting_steps(
         [{"id": "remote-step", "status": "awaiting"}],

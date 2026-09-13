@@ -400,6 +400,11 @@ def _safe_history_detail(detail: object, *, allow_children: bool = True) -> dict
     if not isinstance(title, str) or kind not in _HISTORY_DETAIL_KINDS:
         return None
     safe: dict[str, object] = {"kind": kind, "title": title}
+    ids = detail.get("elicitation_ids")
+    if isinstance(ids, list):
+        safe["elicitation_ids"] = [value for value in ids[:8] if isinstance(value, str)]
+    if detail.get("elicitation_resumed") is True:
+        safe["elicitation_resumed"] = True
     for key in ("status", "arguments", "body", "step_id", "route", "detail_id", "parent_id"):
         value = detail.get(key)
         if isinstance(value, str):

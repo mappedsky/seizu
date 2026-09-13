@@ -64,6 +64,7 @@ import ChatInput from 'src/components/ChatInput';
 import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
 import ChatElicitationCard from 'src/components/ChatElicitationCard';
+import { reconcileElicitationDetail } from 'src/utils/elicitationDetails';
 import { useChatElicitations } from 'src/hooks/useChatElicitations';
 import { useChatHumanInputResume } from 'src/hooks/useChatHumanInputResume';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
@@ -106,6 +107,8 @@ type SeizuChatDetail = {
   parent_id?: string;
   // Inner rows of a subagent run, rendered nested under this entry.
   children?: SeizuChatDetail[];
+  elicitation_ids?: string[];
+  elicitation_resumed?: boolean;
 };
 
 const KNOWN_DETAIL_KINDS = [
@@ -293,6 +296,12 @@ function parseDetail(raw: unknown): SeizuChatDetail | null {
     step_id: str('step_id'),
     detail_id: str('detail_id'),
     parent_id: str('parent_id'),
+    elicitation_ids: Array.isArray(detail.elicitation_ids)
+      ? detail.elicitation_ids.filter(
+          (id): id is string => typeof id === 'string',
+        )
+      : undefined,
+    elicitation_resumed: detail.elicitation_resumed === true,
     children: children && children.length > 0 ? children : undefined,
   };
 }
@@ -845,6 +854,9 @@ export default function ChatInterface() {
   // either way, so the UI would otherwise look exactly as if it had worked
   // while the turn keeps generating.
   const [stopError, setStopError] = useState<string | null>(null);
+  const [elicitationResumeError, setElicitationResumeError] = useState<
+    string | null
+  >(null);
   // Every thread whose last send never resolved. A set, not one value: a second
   // ambiguous send in another conversation would otherwise hide the recovery
   // the first one still needs. Mirrors transport state so the banner re-renders.
@@ -1275,6 +1287,14 @@ export default function ChatInterface() {
     () => messages.filter((message) => message.metadata?.seizu_hidden !== true),
     [messages],
   );
+  const elicitationOutcomes = useMemo(
+    () => visibleMessages.flatMap(messageDetails),
+    [visibleMessages],
+  );
+  const resolvedDetail = (detail: SeizuChatDetail): SeizuChatDetail => ({
+    ...reconcileElicitationDetail(detail, elicitationOutcomes),
+    children: detail.children?.map(resolvedDetail),
+  });
   // A message only carries a server timestamp once it comes back from
   // /chat/history; the copy the stream produces has none. So a message that is
   // neither timed nor yet persisted is stamped with the browser's clock, and
@@ -1516,6 +1536,26 @@ export default function ChatInterface() {
     activeThreadId,
     sendMessage,
     touchSession,
+  );
+
+  const resumeElicitation = useCallback(
+    (item: { elicitation_id: string; thread_id: string }) => {
+      setElicitationResumeError(null);
+      elicitations.dismiss(item.elicitation_id);
+      void resumeHumanInput({
+        kind: 'elicitation',
+        id: item.elicitation_id,
+        threadId: item.thread_id,
+      }).catch(() => {
+        // Nothing was delivered, so the answer is still recoverable and the
+        // card is how the owner reaches it.
+        elicitations.restore(item.elicitation_id);
+        setElicitationResumeError(
+          'Could not continue the conversation with that answer. Try again.',
+        );
+      });
+    },
+    [elicitations, resumeHumanInput],
   );
 
   const handleConfirmationDecision = useCallback(
@@ -1908,7 +1948,7 @@ export default function ChatInterface() {
                 <>
                   {visibleMessages.map((message) => {
                     const text = messageText(message);
-                    const details = messageDetails(message);
+                    const details = messageDetails(message).map(resolvedDetail);
                     const copied = copiedMessageId === message.id;
                     const loadMore = continuableMessage?.id === message.id;
                     const isContinuationSource =
@@ -2191,38 +2231,34 @@ export default function ChatInterface() {
                       key={item.elicitation_id}
                       item={item}
                       busy={busy}
-                      onRespond={async (action, content) => {
-                        await elicitations.respond(
+                      onRespond={(action, content) =>
+                        elicitations.respond(
                           item.elicitation_id,
                           action,
                           content,
+                        )
+                      }
+                      onAnswered={() => {
+                        // A group is answered together, so the last answer is
+                        // what releases the call; the others only close their
+                        // own card.
+                        const waiting = elicitations.items.some(
+                          (other) =>
+                            other.group_id === item.group_id &&
+                            other.elicitation_id !== item.elicitation_id &&
+                            other.status === 'pending',
                         );
-                        if (
-                          !elicitations.items.some(
-                            (other) =>
-                              other.group_id === item.group_id &&
-                              other.elicitation_id !== item.elicitation_id &&
-                              other.status === 'pending',
-                          )
-                        ) {
-                          await resumeHumanInput({
-                            kind: 'elicitation',
-                            id: item.elicitation_id,
-                            threadId: item.thread_id,
-                          });
-                        }
+                        if (waiting) elicitations.dismiss(item.elicitation_id);
+                        else resumeElicitation(item);
                       }}
-                      onResume={async () => {
-                        await resumeHumanInput({
-                          kind: 'elicitation',
-                          id: item.elicitation_id,
-                          threadId: item.thread_id,
-                        });
-                      }}
+                      onResume={() => resumeElicitation(item)}
                     />
                   ))}
                   {elicitations.error && (
                     <Alert severity="error">{elicitations.error}</Alert>
+                  )}
+                  {elicitationResumeError && (
+                    <Alert severity="error">{elicitationResumeError}</Alert>
                   )}
                   {busy ? (
                     <Box
