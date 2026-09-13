@@ -23,7 +23,6 @@ import contextlib
 import json
 import logging
 import time
-import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -258,7 +257,7 @@ def build_graph_input(body: ChatTurnCommand, budget_controller: BudgetController
     if body.resume_elicitation_id:
         resume_message = HumanMessage(
             content="Resume external input request",
-            id=f"msg_{uuid.uuid4().hex}",
+            id=f"msg_{report_store.generate_id()}",
             additional_kwargs={"resume_elicitation_id": body.resume_elicitation_id},
         )
         tag_message(resume_message, MessageTag.EPHEMERAL)
@@ -266,7 +265,7 @@ def build_graph_input(body: ChatTurnCommand, budget_controller: BudgetController
     if body.resume_confirmation_id:
         resume_message = HumanMessage(
             content=f"Resume approved confirmation {body.resume_confirmation_id}",
-            id=f"msg_{uuid.uuid4().hex}",
+            id=f"msg_{report_store.generate_id()}",
             additional_kwargs={"resume_confirmation_id": body.resume_confirmation_id},
         )
         tag_message(resume_message, MessageTag.EPHEMERAL)
@@ -274,13 +273,13 @@ def build_graph_input(body: ChatTurnCommand, budget_controller: BudgetController
     if body.continue_response:
         continue_message = HumanMessage(
             content=_CONTINUE_RESPONSE_PROMPT,
-            id=f"msg_{uuid.uuid4().hex}",
+            id=f"msg_{report_store.generate_id()}",
             additional_kwargs={"continue_response": True},
         )
         tag_message(continue_message, MessageTag.EPHEMERAL)
         return {"messages": [continue_message], "budget": budget_controller.snapshot()}
     return {
-        "messages": [HumanMessage(content=body.message, id=f"msg_{uuid.uuid4().hex}")],
+        "messages": [HumanMessage(content=body.message, id=f"msg_{report_store.generate_id()}")],
         "budget": budget_controller.snapshot(),
     }
 
@@ -302,7 +301,9 @@ async def start_turn(
     # Reusing the client's message id for a continuation is what makes the
     # continued text land in the same assistant message rather than a new one.
     message_id = (
-        body.continue_message_id if body.continue_response and body.continue_message_id else f"msg_{uuid.uuid4().hex}"
+        body.continue_message_id
+        if body.continue_response and body.continue_message_id
+        else f"msg_{report_store.generate_id()}"
     )
     profile = resolved_model_profile or model_profiles.environment_snapshot()
     command = ChatTurnCommand(
@@ -320,7 +321,7 @@ async def start_turn(
         current.user.user_id,
         thread_id,
         message_id,
-        f"text_{uuid.uuid4().hex}",
+        f"text_{report_store.generate_id()}",
         body.idempotency_key,
         command,
     )

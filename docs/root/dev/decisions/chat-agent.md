@@ -3099,27 +3099,21 @@ the activity ending and a browser reload without holding a worker slot. Reusing
 the confirmation pause keeps distributed worker results portable: the coordinator
 resumes the parked call without restarting the remote step's model loop.
 
-Responses are owner-only data, never messages or tool arguments in model state.
-Only the elicitation IDs and a fixed explanation enter the transcript. The
-response is forwarded through `input_responses`; echoes of it are redacted
-from returned tool text, but only where redaction can protect something.
+Response records are owner-scoped and forwarded through `input_responses`,
+rather than inserted directly into model arguments or messages. Upstream tool
+results may include those values and enter chat history and model context.
+Forms warn users not to enter passwords, API keys, access tokens, or verification
+codes. Credential collection belongs in URL elicitation on the external site.
 
-A submitted value is removed from the result only when it is a free-text
-string of at least `MIN_REDACTED_LENGTH` characters that the upstream did not
-already know, and only its inner text is replaced, never a surrounding JSON
-quote. The broader rule this replaces removed every submitted value by
-substring: the integer `1` rewrote `"round": 1` and `"chars": 10`, a boolean
-rewrote every literal `true`, and `dev` rewrote the middle of `developer`,
-which left the resumed call returning text the model could not parse. A
-number, a boolean, an `enum` member and a field `default` are all either
-unable to carry a secret or already held by the upstream that sent them, so
-redacting them costs the result and buys nothing. Form schemas are a bounded flat primitive subset,
-rendered as escaped text. URLs retain the operator-pinned origin and are
-revalidated with the proxy configuration before display.
+**Why:** MCP forms are for ordinary input, not secrets. Substring redaction
+corrupted legitimate results, while length/type heuristics and exact matching
+could not guarantee confidentiality. Removing redaction preserves results and
+makes the UI and documentation state the actual data flow.
 
-**Why:** an upstream may request sensitive values or supply hostile schemas.
-Global and per-proxy opt-ins establish which operators enabled that surface;
-they do not turn schemas into trusted UI or responses into model context.
+Form schemas remain a bounded flat primitive subset rendered as escaped text.
+URLs retain the operator-pinned origin and are revalidated with the proxy
+configuration before display. Global and per-proxy opt-ins do not make upstream
+schemas trusted UI.
 
 Replay checks current permissions, current tool discovery and confirmation
 policy, and atomically consumes the group once. An approval needed during

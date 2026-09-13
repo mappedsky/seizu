@@ -42,6 +42,12 @@ describe('ChatElicitationCard', () => {
       />,
     );
     expect(screen.getByText(item.message)).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Do not enter passwords, API keys, access tokens, or verification codes.',
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'may appear in chat or be processed by the AI model',
+    );
     expect(container.querySelector('img')).toBeNull();
     fireEvent.change(screen.getByRole('textbox', { name: /Answer/ }), {
       target: { value: 'private answer' },

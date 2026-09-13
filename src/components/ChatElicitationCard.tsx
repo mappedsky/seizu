@@ -67,8 +67,9 @@ export default function ChatElicitationCard({
         {item.proxy_name} · {item.tool_name}
       </Typography>
       <Alert severity="warning" sx={{ my: 1 }}>
-        This request comes from an external server. Submitted values are sent to
-        that server.
+        This request comes from {item.proxy_name}. Your answers will be sent to
+        that server and may appear in chat or be processed by the AI model. Do
+        not enter passwords, API keys, access tokens, or verification codes.
       </Alert>
       <Typography sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
         {item.message}

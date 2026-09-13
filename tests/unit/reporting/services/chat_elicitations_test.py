@@ -130,7 +130,7 @@ async def test_owner_once_and_group_claim(database):
     assert (await store.get(ids[0], "owner")).response_json is None
 
 
-async def test_exact_continuation_and_secret_not_in_result(database, mocker):
+async def test_exact_continuation_preserves_upstream_result(database, mocker):
     p = proxy(require_confirmation=False, elicitation={"form": True})
     owner = user()
     owner.permissions = frozenset({Permission.CHAT_TOOLS_CALL.value})
@@ -157,7 +157,7 @@ async def test_exact_continuation_and_secret_not_in_result(database, mocker):
 
     mocker.patch.object(external_mcp, "_session", session)
     kind, output = await service.resume(ids[0], owner, "123")
-    assert kind == "run" and "private-answer" not in output
+    assert kind == "run" and output == "received private-answer"
     assert call.call_args.args == ("read", {"scope": "original"})
     assert call.call_args.kwargs["request_state"] == "opaque-state"
     assert call.call_args.kwargs["input_responses"]["input-1"].content == {"answer": "private-answer"}
@@ -203,7 +203,7 @@ async def test_turn_limit_is_bounded(database):
         await service.park(p, "read", {}, user(), input_result())
 
 
-async def test_modern_wire_parks_then_resumes_without_leaking_values(database, mocker):
+async def test_modern_wire_parks_then_resumes_with_protocol_responses(database, mocker):
     import httpx2
 
     from reporting.services import external_mcp_connections
@@ -247,7 +247,7 @@ async def test_modern_wire_parks_then_resumes_without_leaking_values(database, m
     record = await store.get(caught.value.ids[0], "owner")
     await store.respond(record, ElicitationResponse(action="accept", content={"answer": "wire-secret"}))
     kind, output = await service.resume(record.elicitation_id, owner, "123")
-    assert kind == "run" and "wire-secret" not in output
+    assert kind == "run" and output == "done wire-secret"
     calls = [body for body in requests if body["method"] == "tools/call"]
     assert len(calls) == 2
     assert all(
@@ -266,7 +266,7 @@ async def test_later_delegation_consumes_only_the_matching_call(database):
     assert not await service.continuation(p, "different", {"scope": "same"}, user(), delegated=True)
     assert not await service.continuation(p, "read", {"scope": "other"}, user(), delegated=True)
     resumed = await service.continuation(p, "read", {"scope": "same"}, user(), delegated=True)
-    assert resumed.call_kwargs["input_responses"]["input-1"].content == {"answer": "private"}
+    assert resumed["input_responses"]["input-1"].content == {"answer": "private"}
     assert not await service.continuation(p, "read", {"scope": "same"}, user(), delegated=True)
 
 
@@ -445,42 +445,7 @@ async def test_owner_routes_rehydrate_and_validate(database, mocker):
         assert (await client.post(path, json={"action": "cancel"})).status_code == 404
 
 
-def test_only_free_text_strings_are_treated_as_secrets():
-    schema = {
-        "type": "object",
-        "properties": {
-            "token": {"type": "string"},
-            "environment": {"type": "string", "enum": ["production", "development"]},
-            "note": {"type": "string", "default": "prefilled-default"},
-            "count": {"type": "integer"},
-            "confirm": {"type": "boolean"},
-            "tag": {"type": "string"},
-        },
-    }
-    response = ElicitationResponse(
-        action="accept",
-        content={
-            "token": "s3cret-value-long",
-            "environment": "development",
-            "note": "prefilled-default",
-            "count": 1,
-            "confirm": True,
-            "tag": "dev",
-        },
-    )
-
-    # A number or a boolean is not a secret and its text occurs everywhere; a
-    # short string hides inside ordinary words; an enum member and a default
-    # were sent by the upstream, so removing them protects nothing.
-    assert service.echoed_secrets(schema, response) == {"s3cret-value-long"}
-
-
-def test_no_schema_still_redacts_long_free_text():
-    response = ElicitationResponse(action="accept", content={"answer": "long-enough-secret", "pin": "1234"})
-    assert service.echoed_secrets(None, response) == {"long-enough-secret"}
-
-
-async def test_redaction_leaves_the_rest_of_the_result_intact(database, mocker):
+async def test_form_echo_preserves_the_complete_result(database, mocker):
     schema = {
         "type": "object",
         "properties": {"answer": {"type": "string"}, "count": {"type": "integer"}},
@@ -519,13 +484,11 @@ async def test_redaction_leaves_the_rest_of_the_result_intact(database, mocker):
     kind, output = await service.resume(ids[0], owner, "123")
 
     assert kind == "run"
-    assert "private-answer-text" not in output
-    # Redacting the string must not damage anything around it: the result is
-    # still the JSON the upstream sent, with one value replaced.
+    assert output == upstream
     assert json.loads(output) == {
         "round": 1,
         "rounds": 1,
         "chars": 10,
         "digest": "b5bea41b",
-        "echo": "[redacted form value]",
+        "echo": "private-answer-text",
     }

@@ -17,8 +17,10 @@ complete the external interaction, then choose Completed.
 The conversation resumes after all cards for that call are answered. Pending
 and answered cards survive a reload; **Continue chat** resumes an answered
 request if delivery was interrupted. Values are sent to the named external
-server. The assistant receives the resulting tool output, with literal echoes
-of submitted values redacted. Expired requests cannot be answered or replayed.
+server and may appear in chat or be processed by the AI model. Do not enter
+passwords, API keys, access tokens, or verification codes in forms. Credential
+collection uses URL elicitation on the external site. Expired requests cannot
+be answered or replayed.
 
 ## Enabling chat
 

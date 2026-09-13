@@ -38,9 +38,12 @@ strings, numbers, integers, booleans and bounded enums, with at most 4096
 characters per string. Unsupported schemas are rejected. A call may request
 eight inputs; live limits are sixteen per turn and sixty-four per thread.
 
-Submitted values go to the external server. They are stored until consumption
-or expiry collection and do not enter model message history; literal echoes in
-tool responses are redacted. Database backups may retain earlier copies.
+Submitted values go to the external server through protocol input responses.
+They may appear in tool results, chat history, or AI model context; tool results
+are not redacted. Do not enter passwords, API keys, access tokens, or verification
+codes in forms. Use URL elicitation for credential collection directly on the
+external service’s site. Answers are stored until consumption or expiry collection.
+Database backups may retain earlier copies.
 Deleting a chat removes its input records. Expired rows are collected while
 interactive elicitation is enabled.
 
