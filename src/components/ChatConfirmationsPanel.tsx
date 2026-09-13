@@ -11,7 +11,7 @@ import {
   useMediaQuery,
   useTheme,
 } from '@mui/material';
-import { Fragment } from 'react';
+import { memo, Fragment } from 'react';
 import CheckCircle from '@mui/icons-material/CheckCircle';
 import Close from '@mui/icons-material/Close';
 import GppMaybe from '@mui/icons-material/GppMaybe';
@@ -37,7 +37,7 @@ interface ChatConfirmationsPanelProps {
   ) => void;
 }
 
-export default function ChatConfirmationsPanel({
+function ChatConfirmationsPanel({
   confirmations = [],
   loading,
   error,
@@ -360,3 +360,5 @@ export default function ChatConfirmationsPanel({
     </Box>
   );
 }
+
+export default memo(ChatConfirmationsPanel);
