@@ -3175,3 +3175,29 @@ stores or treating acceptance as approval would erase a security boundary.
 
 **Don't:** put response values in the hidden message, use MCP loopback for
 first-party approvals, or make a generic resume bypass either kind's checks.
+
+## AGT-057 — An elicitation resume offers the finish tool, and never answers with nothing
+
+**Applies to:** `chat_graph._resume_elicited_tool_turn`
+
+The turn that summarizes an answered external-input request is offered
+`respond_to_user`, and reads its answer from that call before falling back to
+the message content. If both are empty it answers with the tool result itself
+rather than persisting an empty assistant message.
+
+**Why:** the resume turn is post-action, and the base system prompt requires a
+post-action answer to arrive through `respond_to_user`. The turn ran with no
+tools at all, so the model obeyed the prompt, its call was dropped with the
+tools it was never given, and `content` was empty — one LLM call, a stream
+carrying `text-start`/`text-end` with no delta, and an empty message in the
+checkpoint. An empty assistant message is then dropped from history, so the
+turn disappeared on reload and the parked tool detail, having no recorded
+outcome to reconcile against (AGT-055), reverted to awaiting. Live delivery
+showed the settled result and a reload took it away, which reads as the answer
+never arriving. Observed intermittently, on whichever turns the model chose the
+tool over prose. The confirmation resume never showed this because it already
+falls back to the combined tool results.
+
+**Don't:** run a post-action summary turn with no terminal tool while the
+system prompt demands one, or let any resume path persist an empty answer — the
+message is what carries the turn, and history drops it when it is blank.
