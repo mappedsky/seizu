@@ -4673,3 +4673,82 @@ def test_streamed_thinking_keeps_the_most_recent_window():
     assert len(text) == 60 + len(chat_graph._REASONING_ELISION)
     # Under the bound nothing is marked or dropped.
     assert chat_graph._append_reasoning("a", "b", max_chars=60) == "ab"
+
+
+class _ElicitationResumeModel:
+    """A model that answers through respond_to_user, as the system prompt asks."""
+
+    def __init__(self, *, answer: str | None, text: str = ""):
+        self.answer = answer
+        self.text = text
+
+    async def astream(self, input, config=None, **kwargs):
+        if self.answer is None:
+            # Content-free: the model put nothing in `content` and called nothing.
+            yield AIMessageChunk(content=self.text)
+            return
+        yield AIMessageChunk(
+            content=self.text,
+            tool_calls=[
+                {
+                    "name": chat_graph.FINAL_ANSWER_TOOL.name,
+                    "args": {"answer": self.answer},
+                    "id": "call_final",
+                }
+            ],
+        )
+
+
+async def _resume_elicitation(mocker, model) -> tuple[str, list[dict[str, Any]]]:
+    """Drive _resume_elicited_tool_turn and return (persisted answer, stream events)."""
+    mocker.patch(
+        "reporting.services.chat_elicitations.resume",
+        mocker.AsyncMock(return_value=("run", "SCENARIO RESULT")),
+    )
+    mocker.patch(
+        "reporting.services.chat_elicitations.resume_detail",
+        mocker.AsyncMock(return_value=None),
+    )
+    mocker.patch.object(chat_graph, "_chat_provider", return_value="deepseek")
+    mocker.patch.object(chat_graph, "get_chat_model", return_value=model)
+    mocker.patch.object(chat_graph, "build_system_prompt", return_value="system")
+    mocker.patch.object(chat_graph, "_llm_context_messages", side_effect=lambda messages, model: list(messages))
+    events: list[dict[str, Any]] = []
+    mocker.patch.object(chat_graph, "get_stream_writer", return_value=events.append)
+
+    state = {"messages": [HumanMessage(content="Run the scenario")]}
+    result = await chat_graph._resume_elicited_tool_turn(
+        state,
+        {},
+        _user(),
+        "elicit-1",
+    )
+    answer = chat_graph.message_text(result["messages"][-1].content)
+    return answer, events
+
+
+async def test_elicitation_resume_reads_the_answer_from_respond_to_user(mocker):
+    """The resume turn is post-action, so its answer arrives as a tool call.
+
+    Without respond_to_user on the turn the model still calls it -- the base
+    system prompt requires it -- and the answer is discarded (AGT-057).
+    """
+    answer, events = await _resume_elicitation(mocker, _ElicitationResumeModel(answer="The scenario completed."))
+
+    assert answer == "The scenario completed."
+    tokens = "".join(e["content"] for e in events if e["kind"] == "token")
+    assert tokens == "The scenario completed."
+
+
+async def test_elicitation_resume_never_persists_an_empty_answer(mocker):
+    """A content-free turn reports the tool result rather than nothing.
+
+    An empty assistant message is dropped from history, which loses the turn and
+    leaves the parked tool detail with no outcome to settle against (AGT-057).
+    """
+    answer, events = await _resume_elicitation(mocker, _ElicitationResumeModel(answer=None))
+
+    assert answer
+    assert "SCENARIO RESULT" in answer
+    tokens = "".join(e["content"] for e in events if e["kind"] == "token")
+    assert "SCENARIO RESULT" in tokens

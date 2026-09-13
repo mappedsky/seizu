@@ -1439,25 +1439,45 @@ async def _resume_elicited_tool_turn(
             writer({"kind": "detail", "id": f"elicitation-{elicitation_id}", "data": detail})
         if kind == "run" and _chat_provider() != "mock":
             model = get_chat_model()
+            # The tool result is an action that has run, so the base system prompt
+            # requires the answer to arrive through respond_to_user. Offering it
+            # here is what lets that answer be read (AGT-057).
+            specs = _with_provider_tool_names(_terminal_specs(True))
             result = await _run_llm_tool_turn(
                 model,
                 _combined_system_prompt(
                     build_system_prompt(_chat_provider(), current_user),
-                    "The owner answered the external input request. Summarize the tool result. Do not call more tools.",
+                    "The owner answered the external input request. Summarize the tool result. "
+                    "Do not call any data-fetching tool.",
                 ),
                 [
                     *_llm_context_messages(state["messages"], model),
                     HumanMessage(content="External tool result:\n" + response),
                 ],
-                [],
+                specs,
                 config,
                 writer,
                 phase="assistant",
             )
-            response = message_text(result.message.content)
-            if not result.streamed:
-                writer({"kind": "token", "content": response})
-            return _chat_state_with_ai_response(state, response, details=[*details, *result.details])
+            finish_request, _ = FINAL_ANSWER_TOOL.partition(_tool_call_requests(result.message, specs))
+            answer = (
+                (FINAL_ANSWER_TOOL.result_text(finish_request) if finish_request is not None else "")
+                or message_text(result.message.content)
+                # The owner is waiting on the answer their input unblocked, so a
+                # turn that produced none reports the result itself. Persisting an
+                # empty message instead loses the turn: an empty assistant message
+                # is dropped from history, and the parked tool detail then has no
+                # recorded outcome to settle against (AGT-057).
+                or "The external input request was answered.\n\nResult:\n" + response
+            )
+            if answer != result.streamed:
+                if not result.streamed:
+                    writer({"kind": "token", "content": answer})
+                elif answer.startswith(result.streamed):
+                    writer({"kind": "token", "content": _stream_tail(result.streamed, answer[len(result.streamed) :])})
+                else:
+                    writer({"kind": "token", "content": _stream_tail(result.streamed, answer, separator="\n\n")})
+            return _chat_state_with_ai_response(state, answer, details=[*details, *result.details])
     writer({"kind": "token", "content": response})
     return _chat_state_with_ai_response(state, response, details=details)
 
