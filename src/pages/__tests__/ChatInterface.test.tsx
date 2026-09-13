@@ -19,7 +19,7 @@ import * as useChatSessionsModule from 'src/hooks/useChatSessions';
 import * as useModelProfilesApiModule from 'src/hooks/useModelProfilesApi';
 import * as useConfirmationsApiModule from 'src/hooks/useConfirmationsApi';
 import * as useChatElicitationsModule from 'src/hooks/useChatElicitations';
-import { useChat } from '@ai-sdk/react';
+import { Chat, useChat } from '@ai-sdk/react';
 import { type ChatOnFinishCallback, type UIMessage } from 'ai';
 import { SeizuChatTransport } from 'src/api/chatTransport';
 
@@ -43,9 +43,53 @@ jest.mock('src/hooks/useConfirmationsApi', () => ({
   useConfirmationsApi: jest.fn(),
 }));
 
-jest.mock('@ai-sdk/react', () => ({
-  useChat: jest.fn(),
-}));
+type ChatInitRecord = {
+  id?: string;
+  transport?: unknown;
+  messages?: unknown[];
+  onFinish?: ChatOnFinishCallback<UIMessage>;
+};
+
+jest.mock('@ai-sdk/react', () => {
+  const useChat = jest.fn();
+  // The page now calls the Chat instance directly and only renders from what
+  // its subscribers report, so the instance has to be the same seam the tests
+  // already drive: it delegates to whatever useChat was told to return.
+  const helpers = () =>
+    (useChat.mock.results.at(-1)?.value ?? {}) as Record<string, never>;
+  return {
+    useChat,
+    Chat: class MockChat {
+      static inits: ChatInitRecord[] = [];
+      id: string;
+      constructor(init: ChatInitRecord) {
+        this.id = init?.id ?? 'chat-id';
+        MockChat.inits.push(init);
+      }
+      get messages() {
+        return (helpers() as { messages?: unknown[] }).messages ?? [];
+      }
+      set messages(next: unknown) {
+        (helpers() as { setMessages?: (value: unknown) => void }).setMessages?.(
+          next,
+        );
+      }
+      get sendMessage() {
+        return (helpers() as { sendMessage?: unknown }).sendMessage;
+      }
+      get stop() {
+        return (helpers() as { stop?: unknown }).stop;
+      }
+      get clearError() {
+        return (helpers() as { clearError?: unknown }).clearError;
+      }
+      resumeStream = (...args: unknown[]) =>
+        (
+          helpers() as { resumeStream?: (...a: unknown[]) => unknown }
+        ).resumeStream?.(...args);
+    },
+  };
+});
 
 const mockUsePermissionState =
   usePermissionsModule.usePermissionState as jest.MockedFunction<
@@ -75,14 +119,35 @@ const mockUseChat = useChat as jest.MockedFunction<typeof useChat>;
  * not a real `ReadableStream`, and what these tests are about is which requests
  * the transport makes, not the SDK's own parser.
  */
+/** The init of the last Chat the component constructed. */
+function chatInits(): ChatInitRecord[] {
+  return (Chat as unknown as { inits: ChatInitRecord[] }).inits;
+}
+
+function chatInit(): ChatInitRecord {
+  const init = chatInits().at(-1);
+  if (!init) throw new Error('no Chat was constructed');
+  return init;
+}
+
+/** The (chat id, resume) pair useChat saw on each render.
+ *
+ * The id lives on the instance the page constructed; resume stays a hook
+ * option, because the SDK's resume effect is the hook's, not the instance's.
+ */
+function subscriptionCalls(): { id?: string; resume?: boolean }[] {
+  // Two components subscribe now. Only the one carrying the resume flag is
+  // driving reattachment, so the transcript's calls are not answers here.
+  return mockUseChat.mock.calls
+    .map(([options]) => options as { chat?: { id?: string }; resume?: boolean })
+    .filter((options) => options?.resume !== undefined)
+    .map((options) => ({ id: options.chat?.id, resume: options.resume }));
+}
+
 function activeTransport(): SeizuChatTransport<UIMessage> {
-  // useChat's options are a union whose other arm takes a prebuilt Chat, so
-  // `transport` is not on the common type.
-  const options = mockUseChat.mock.calls.at(-1)?.[0] as
-    | { transport?: unknown }
-    | undefined;
-  if (!options?.transport) throw new Error('missing transport');
-  const transport = options.transport as SeizuChatTransport<UIMessage>;
+  const init = chatInit();
+  if (!init.transport) throw new Error('missing transport');
+  const transport = init.transport as SeizuChatTransport<UIMessage>;
   jest
     .spyOn(
       transport as unknown as {
@@ -206,6 +271,7 @@ function renderChat(options: ChatRenderOptions = {}) {
 describe('ChatInterface', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (Chat as unknown as { inits: unknown[] }).inits.length = 0;
     window.localStorage.clear();
     mockUseChatHistory.mockReturnValue(() => Promise.resolve([]));
     mockUseSelectableModelProfiles.mockReturnValue({
@@ -282,9 +348,11 @@ describe('ChatInterface', () => {
 
     await waitFor(() => {
       expect(mockUseChat).toHaveBeenCalledWith(
+        expect.objectContaining({ experimental_throttle: 50 }),
+      );
+      expect(chatInit()).toEqual(
         expect.objectContaining({
           id: threadId,
-          experimental_throttle: 50,
           transport: expect.any(Object),
         }),
       );
@@ -437,9 +505,7 @@ describe('ChatInterface', () => {
     renderChat({ initialPath: '/app/chat/thread-1' });
 
     await waitFor(() => {
-      expect(mockUseChat).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'thread-1' }),
-      );
+      expect(chatInit()).toEqual(expect.objectContaining({ id: 'thread-1' }));
     });
     expect(window.localStorage.getItem('seizu:chat:active-session')).toBe(
       'thread-1',
@@ -546,14 +612,10 @@ describe('ChatInterface', () => {
     renderChat({ initialPath: '/app/chat/thread-1' });
 
     await waitFor(() => {
-      expect(mockUseChat).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'thread-1' }),
-      );
+      expect(chatInit()).toEqual(expect.objectContaining({ id: 'thread-1' }));
     });
 
-    const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
-      | { onFinish?: ChatOnFinishCallback<UIMessage> }
-      | undefined;
+    const chatOptions = chatInit();
     chatOptions?.onFinish?.({
       message: {
         id: 'approval-message',
@@ -967,9 +1029,8 @@ describe('ChatInterface', () => {
     // The chat built for the new thread starts with the question in it, and is
     // told to reattach — the same route a reload takes to a running turn.
     await waitFor(() => {
-      const built = mockUseChat.mock.calls
-        .map(([options]) => options as { id?: string; messages?: unknown[] })
-        .filter((options) => options.id === 'thread-new')
+      const built = chatInits()
+        .filter((init) => init.id === 'thread-new')
         .at(-1);
       expect(built?.messages).toEqual([
         expect.objectContaining({
@@ -978,9 +1039,9 @@ describe('ChatInterface', () => {
         }),
       ]);
     });
-    const attaching = mockUseChat.mock.calls
-      .map(([options]) => options as { id?: string; resume?: boolean })
-      .find((options) => options.id === 'thread-new');
+    const attaching = subscriptionCalls().find(
+      (options) => options.id === 'thread-new',
+    );
     expect(attaching?.resume).toBe(true);
     // ...and nothing fetches history over the top of the stream.
     expect(fetchHistory).not.toHaveBeenCalledWith('thread-new');
@@ -2666,9 +2727,7 @@ describe('ChatInterface', () => {
     renderChat({ initialPath: '/app/chat/thread-1' });
     await act(async () => {});
 
-    const calls = mockUseChat.mock.calls.map(
-      ([options]) => options as { id?: string; resume?: boolean },
-    );
+    const calls = subscriptionCalls();
     const placeholderCalls = calls.filter((c) => c.id === '__pending__');
     const realCalls = calls.filter((c) => c.id === 'thread-1');
 
@@ -2696,9 +2755,9 @@ describe('ChatInterface', () => {
     renderChat({ initialPath: '/app/chat/thread-1' });
     await act(async () => {});
 
-    const resumeWhileLoading = mockUseChat.mock.calls
-      .map(([options]) => options as { id?: string; resume?: boolean })
-      .filter((c) => c.id === 'thread-1');
+    const resumeWhileLoading = subscriptionCalls().filter(
+      (c) => c.id === 'thread-1',
+    );
     expect(resumeWhileLoading.length).toBeGreaterThan(0);
     expect(resumeWhileLoading.every((c) => c.resume === false)).toBe(true);
 
@@ -2706,9 +2765,7 @@ describe('ChatInterface', () => {
       releaseHistory([]);
     });
 
-    const after = mockUseChat.mock.calls
-      .map(([options]) => options as { id?: string; resume?: boolean })
-      .filter((c) => c.id === 'thread-1');
+    const after = subscriptionCalls().filter((c) => c.id === 'thread-1');
     expect(after.at(-1)?.resume).toBe(true);
   });
 
@@ -3190,9 +3247,7 @@ describe('ChatInterface', () => {
       ]),
     );
 
-    const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
-      | { onFinish?: ChatOnFinishCallback<UIMessage> }
-      | undefined;
+    const chatOptions = chatInit();
     await act(async () => {
       chatOptions?.onFinish?.({
         message: {
@@ -3586,54 +3641,58 @@ describe('ChatInterface', () => {
   it('drops the partial reply before resuming after a dropped connection', async () => {
     // The replay starts at the turn's first frame and text-start pushes a fresh
     // part, so keeping the partial message would render the answer twice.
-    const setMessages = jest.fn();
-    const resumeStream = jest.fn().mockResolvedValue(undefined);
-    mockUseChat.mockReturnValue({
-      id: 'chat-id',
-      messages: [],
-      sendMessage: jest.fn(),
-      regenerate: jest.fn(),
-      stop: jest.fn(),
-      resumeStream,
-      addToolResult: jest.fn(),
-      addToolOutput: jest.fn(),
-      addToolApprovalResponse: jest.fn(),
-      status: 'ready',
-      error: undefined,
-      setMessages,
-      clearError: jest.fn(),
-    });
-
-    renderChat({ initialPath: '/app/chat/thread-1' });
-    await act(async () => {});
-
-    const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
-      | { onFinish?: ChatOnFinishCallback<UIMessage> }
-      | undefined;
-    await act(async () => {
-      chatOptions?.onFinish?.({
-        message: { id: 'partial', role: 'assistant', parts: [] },
-        messages: [],
-        isAbort: false,
-        isDisconnect: true,
-        isError: true,
-        finishReason: undefined,
+    //
+    // The page resolves the updater against the instance before assigning, so
+    // what the seam sees is the trimmed list rather than the function.
+    const trimmedFor = async (messages: UIMessage[]) => {
+      const setMessages = jest.fn();
+      const resumeStream = jest.fn().mockResolvedValue(undefined);
+      mockUseChat.mockReturnValue({
+        id: 'chat-id',
+        messages,
+        sendMessage: jest.fn(),
+        regenerate: jest.fn(),
+        stop: jest.fn(),
+        resumeStream,
+        addToolResult: jest.fn(),
+        addToolOutput: jest.fn(),
+        addToolApprovalResponse: jest.fn(),
+        status: 'ready',
+        error: undefined,
+        setMessages,
+        clearError: jest.fn(),
       });
-    });
 
-    expect(resumeStream).toHaveBeenCalled();
-    const trim = setMessages.mock.calls.at(-1)?.[0] as (
-      messages: UIMessage[],
-    ) => UIMessage[];
+      renderChat({ initialPath: '/app/chat/thread-1' });
+      await act(async () => {});
+
+      const chatOptions = chatInit();
+      await act(async () => {
+        chatOptions?.onFinish?.({
+          message: { id: 'partial', role: 'assistant', parts: [] },
+          messages: [],
+          isAbort: false,
+          isDisconnect: true,
+          isError: true,
+          finishReason: undefined,
+        });
+      });
+
+      expect(resumeStream).toHaveBeenCalled();
+      const trimmed = setMessages.mock.calls.at(-1)?.[0] as UIMessage[];
+      cleanup();
+      return trimmed;
+    };
+
     expect(
-      trim([
+      await trimmedFor([
         { id: 'user-1', role: 'user', parts: [] },
         { id: 'partial', role: 'assistant', parts: [] },
       ]),
     ).toEqual([{ id: 'user-1', role: 'user', parts: [] }]);
     // A turn that dropped before any assistant text arrived has nothing to trim.
-    expect(trim([{ id: 'user-1', role: 'user', parts: [] }])).toEqual([
-      { id: 'user-1', role: 'user', parts: [] },
-    ]);
+    expect(
+      await trimmedFor([{ id: 'user-1', role: 'user', parts: [] }]),
+    ).toEqual([{ id: 'user-1', role: 'user', parts: [] }]);
   });
 });
