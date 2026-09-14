@@ -452,9 +452,10 @@ gateway that explicitly supports service authentication plus target-user grant
 selection, as in the enterprise gateway example below. Changing an OAuth
 provider alone does not enable that contract.
 
-The make target enables local Authentik and persists
-`MCP_EXTERNAL_ENABLED=true` in `.env`; `make up` then selects both Compose
-profiles automatically. After the services are healthy,
+`make external_mcp_enable` persists `MCP_EXTERNAL_ENABLED=true` in `.env`;
+`make up` then selects the `external-mcp` Compose profile. Authentik is enabled
+independently, and the OAuth proxy requires the explicit profiles shown above.
+After the services are healthy,
 `make external_mcp_login` dynamically registers a public PKCE client with the
 local proxy, opens its Authentik authorization flow, writes the issued proxy
 bearer to `MCP_EXTERNAL_PROXY_TOKEN` without displaying it, and recreates Seizu
@@ -462,7 +463,8 @@ and its Temporal worker. The proxy container uses a supervised loopback
 forwarder so its Authentik discovery and token exchange retain the browser's
 `localhost:9000` issuer (AUTH-002). To turn off the agent capability and its
 local proxy services, run `make external_mcp_disable`, then restart the stack
-with `make down && make up`. This does not disable Authentik independently.
+with `make down && make up`. Proxy configuration and credentials are retained.
+This does not change the Authentik toggle.
 
 With `MCP_EXTERNAL_PROXY_TOKEN` empty, the catalog and chat exercise the
 401/RFC 9728 path and expose an `ext__github__seizu_authenticate` placeholder.

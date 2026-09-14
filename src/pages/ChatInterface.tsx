@@ -712,20 +712,19 @@ const ChatMessageDetails = memo(
     isStreaming?: boolean;
   }) {
     const scrollRef = useRef<HTMLDivElement | null>(null);
+    const followOutputRef = useRef(true);
     const tree = useMemo(() => buildDetailTree(details), [details]);
     // Open by default and moved by nothing but a click. Nothing reopens or
     // recloses it as the turn progresses: a block that moves on its own is what
     // made the sticky version unreadable.
     const [expanded, setExpanded] = useState(true);
 
-    // Follow the content while it streams, but only when the user is already near
-    // the bottom — never yank them away from something they scrolled up to read.
+    // Follow streamed content using the position recorded before it grows.
     useEffect(() => {
       const el = scrollRef.current;
-      if (!el || !isStreaming) return;
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-      if (nearBottom) el.scrollTop = el.scrollHeight;
-    }, [details, isStreaming]);
+      if (!el || !expanded || !isStreaming || !followOutputRef.current) return;
+      el.scrollTop = el.scrollHeight;
+    }, [details, expanded, isStreaming]);
 
     if (details.length === 0) return null;
     return (
@@ -781,6 +780,12 @@ const ChatMessageDetails = memo(
           <AccordionDetails sx={{ px: 0, py: 0 }}>
             <Box
               ref={scrollRef}
+              onScroll={(event) => {
+                const el = event.currentTarget;
+                if (el.clientHeight === 0) return;
+                followOutputRef.current =
+                  el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+              }}
               sx={{
                 // A bound, not a reservation: a two-entry trace takes two rows,
                 // and no turn's trace takes over the view it scrolls through.

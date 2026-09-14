@@ -1355,6 +1355,85 @@ describe('ChatInterface', () => {
     expect(screen.queryByText(/elicitation_ids/)).not.toBeInTheDocument();
   }, 15_000);
 
+  it('follows large detail updates until scrolled up, then resumes at the bottom', async () => {
+    const chatResult = (body: string) => ({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant' as const,
+          parts: [
+            {
+              type: 'data-seizu-detail' as const,
+              id: 'detail-1',
+              data: {
+                kind: 'thinking',
+                title: 'Model reasoning',
+                status: 'running',
+                body,
+              },
+            },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'streaming' as const,
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+    mockUseChat.mockReturnValue(chatResult('Starting'));
+    const { rerender } = renderChat();
+    await act(async () => {});
+
+    const region = screen
+      .getByRole('button', { name: 'Details 1' })
+      .closest('.MuiAccordion-root')!
+      .querySelector('.MuiAccordionDetails-root')!
+      .firstElementChild as HTMLElement;
+    let height = 300;
+    let top = 0;
+    Object.defineProperties(region, {
+      clientHeight: { configurable: true, get: () => 300 },
+      scrollHeight: { configurable: true, get: () => height },
+      scrollTop: {
+        configurable: true,
+        get: () => top,
+        set: (value: number) => {
+          top = Math.max(0, Math.min(value, height - 300));
+        },
+      },
+    });
+    fireEvent.scroll(region);
+
+    height = 900;
+    mockUseChat.mockReturnValue(chatResult('A large chunk of reasoning'));
+    rerender(chatTree());
+    expect(region.scrollTop).toBe(600);
+
+    region.scrollTop = 100;
+    fireEvent.scroll(region);
+    height = 1200;
+    mockUseChat.mockReturnValue(
+      chatResult('More reasoning while reading above'),
+    );
+    rerender(chatTree());
+    expect(region.scrollTop).toBe(100);
+
+    region.scrollTop = 900;
+    fireEvent.scroll(region);
+    height = 1800;
+    mockUseChat.mockReturnValue(chatResult('Following reasoning again'));
+    rerender(chatTree());
+    expect(region.scrollTop).toBe(1500);
+  });
+
   it("opens a turn's details by default and moves them only on a click", async () => {
     const messages = [
       {

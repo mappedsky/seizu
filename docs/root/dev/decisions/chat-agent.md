@@ -1177,6 +1177,15 @@ no-op context manager when tracing is off, and budget decisions read the ledger
 (`chat_budget`) rather than any of this. A run must spend the same whether or
 not the collector is reachable.
 
+**The local collector has its own Compose toggle.** `make otel_enable` selects
+the local endpoint and enables telemetry; `make otel_disable` clears that
+endpoint and deselects the collector. `OTEL_COLLECTOR_ENABLED` controls the
+`tracing` profile independently of `TELEMETRY_ENABLED`, because a remote OTLP
+endpoint does not need a local collector. Disable preserves remote endpoints,
+and `make down` includes all Compose profiles even when their toggles are
+already off; otherwise the documented disable-then-restart sequence leaves
+optional services running. This also covers external MCP and auth containers.
+
 **Not metrics.** Step ids are content-derived (`s2-cve-2026-44432-61daf8`), which
 is fine as a span attribute and unusable as a metric label; anything wanting
 aggregate counters should derive them in the backend.
@@ -2674,6 +2683,12 @@ re-expand itself from a measurement of when it had pinned — inferring the user
 intent from scroll position, and unpredictable to use. Nothing moves it now but a
 click, and its height is bounded (`min(300px, 40vh)`) rather than reserved, so a
 two-entry trace takes two rows.
+
+The pane follows streamed output while the reader is near the bottom, pauses
+when they scroll up, and resumes when they return to the bottom. That position
+is recorded on scroll, before the next content update: measuring it after an
+update mistakes a large chunk of new output for the reader having scrolled away
+and stops following. Reopening the pane also applies the recorded follow state.
 
 **What is *not* persisted:** a plan step's thinking is live-only. Worker
 `LLMTurnResult.details` are dropped, and `_orchestration_details` rebuilds a

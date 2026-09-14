@@ -53,6 +53,12 @@ export interface ListTableColumn<T> {
   cellSx?: SxProps<Theme>;
   headerSx?: SxProps<Theme>;
   hideBelow?: Exclude<Breakpoint, 'xs'>;
+  /**
+   * False for a column whose cells are controls rather than text (an overflow
+   * menu). Its content is left out of the row's search text and gets no
+   * truncation tooltip, which would otherwise repeat the control's own.
+   */
+  textual?: boolean;
   render: (row: T) => ReactNode;
 }
 
@@ -369,6 +375,7 @@ export default function ListTable<T>({
       const matchesSearch =
         !normalizedFilter ||
         columns
+          .filter((column) => column.textual !== false)
           .map((column) => getNodeTextContent(column.render(row)))
           .join(' ')
           .toLowerCase()
@@ -1060,7 +1067,9 @@ export default function ListTable<T>({
                         },
                       )}
                     >
-                      <TableCellHoverTooltip content={cellContent}>
+                      <TableCellHoverTooltip
+                        content={column.textual === false ? null : cellContent}
+                      >
                         <Box component="div" sx={listTableCellContentSx}>
                           {cellContent}
                         </Box>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
+import { resourceKey, useAsyncResource } from 'src/hooks/useAsyncResource';
 
 export type ReasoningEffort =
   | 'default'
@@ -162,6 +163,29 @@ export function useModelProfilesList(enabled = true) {
   }, [authHeaders, enabled]);
   useEffect(() => void refresh(), [refresh]);
   return { profiles, globalRunCostBudgetUsd, loading, error, refresh };
+}
+
+export function useModelProfileVersionsList(profileId: string | null) {
+  const { authReady, authHeaders } = useAuthHeaders();
+  const [revision, setRevision] = useState(0);
+  const refresh = useCallback(() => setRevision((value) => value + 1), []);
+  const { data, loading, error } = useAsyncResource<ModelProfileVersion[]>(
+    profileId ? resourceKey(profileId, authReady, revision) : null,
+    authReady && profileId
+      ? async () => {
+          const response = await fetch(
+            `/api/v1/model-profiles/${encodeURIComponent(profileId)}/versions`,
+            { headers: authHeaders() },
+          );
+          if (!response.ok) throw await responseError(response);
+          return (
+            (await response.json()) as { versions: ModelProfileVersion[] }
+          ).versions;
+        }
+      : null,
+    [],
+  );
+  return { versions: data, loading, error, refresh };
 }
 
 export function useModelProfileMutations() {

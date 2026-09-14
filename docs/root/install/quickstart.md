@@ -219,6 +219,10 @@ make external_mcp_enable
 make down && make up
 ```
 
+To disable the agent capability and its local services, run
+`make external_mcp_disable`, then `make down && make up`. Proxy URLs and
+credentials are retained in `.env`. Authentication is toggled independently.
+
 Discovered tools are namespaced `ext__<proxy>__<tool>` and appear on the
 **MCP Toolsets** page as read-only entries, so you can see what each proxy
 offers. They are available to the chat assistant; Seizu does not re-export them
@@ -227,6 +231,31 @@ from its own MCP endpoint.
 In this local setup every GitHub call uses the one development PAT, so treat it
 as a shared service account and scope it to what you need for testing. See
 [External MCP](external-mcp.html) for per-user identity and the OAuth path.
+
+## Local OpenTelemetry collector
+
+Enable the local trace collector with:
+
+```bash
+make otel_enable
+make down && make up
+```
+
+This sets `OTEL_COLLECTOR_ENABLED=true`, enables telemetry, and selects
+`http://otel-collector:4318/v1/traces` for the web service and workers.
+`make up` includes the `tracing` Compose profile while the toggle is enabled.
+Trace batches are written to `.compose/otel/spans.jsonl`.
+
+To disable the collector and local trace export:
+
+```bash
+make otel_disable
+make down && make up
+```
+
+Disabling clears the local endpoint; a configured remote endpoint is preserved.
+`make down` removes the collector even after the toggle is disabled. Existing
+trace files are retained.
 
 ## Testing authentication
 

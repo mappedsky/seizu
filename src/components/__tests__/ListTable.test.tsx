@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import ListTable, {
   ListTableColumn,
   ListTableFilterGroup,
@@ -270,5 +276,38 @@ describe('ListTable', () => {
     // The 50% column takes half of whatever the table becomes, so the 120px
     // flexible column and the 180px sized one have to fit in the other half.
     expect(screen.getByRole('table')).toHaveStyle({ minWidth: '600px' });
+  });
+
+  it('leaves a control column out of the hover tooltip and the search text', async () => {
+    const controlColumn: ListTableColumn<Row> = {
+      key: 'actions',
+      textual: false,
+      render: (row) => (
+        <button type="button" aria-label={`Actions for ${row.name}`} />
+      ),
+    };
+    render(
+      <ListTable
+        rows={rows.slice(0, 1)}
+        columns={[columns[0], controlColumn]}
+        getRowKey={(row) => row.id}
+        emptyMessage="No rows."
+      />,
+    );
+
+    // The control carries its own tooltip; the cell must not add a second one
+    // repeating its accessible name.
+    fireEvent.mouseOver(
+      screen.getByRole('button', { name: 'Actions for Row 1' }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('tooltip')).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByLabelText('Search'));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search rows' }), {
+      target: { value: 'Actions' },
+    });
+    expect(screen.queryByText('Row 1')).not.toBeInTheDocument();
   });
 });

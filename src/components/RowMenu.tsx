@@ -33,7 +33,10 @@ export interface RowMenuAction {
 
 interface RowMenuProps {
   actions: RowMenuAction[];
-  /** Trigger tooltip + aria-label. */
+  /**
+   * Trigger tooltip + aria-label. A per-row label inside a ListTable needs
+   * `textual: false` on that column, or the cell's own hover tooltip repeats it.
+   */
   label?: string;
   /** Minimum menu width in px (180 default; reports use 200 for longer labels). */
   menuMinWidth?: number;

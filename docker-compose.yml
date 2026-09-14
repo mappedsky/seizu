@@ -23,12 +23,8 @@ services:
       - METRICS_PREFIX=seizu
     networks:
       stats:
-  # ── OTLP trace sink (opt-in: `docker compose --profile tracing up -d`) ──
-  # A turn spans the web service and several worker activities, so its spans are
-  # only one tree if something collects them (AGT-026). This writes them to
-  # .compose/otel/spans.jsonl rather than to a UI, which is what makes a run's
-  # step and model-call spans aggregatable. Set
-  # TELEMETRY_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces to export here.
+  # Local OTLP trace sink: `make otel_enable` / `make otel_disable`, then
+  # `make down && make up` to apply. Writes .compose/otel/spans.jsonl (AGT-026).
   otel-collector:
     image: otel/opentelemetry-collector-contrib
     profiles:
@@ -249,16 +245,14 @@ services:
       start_period: 10s
     networks:
       database:
-  # Lightweight external MCP OAuth proxy plus the official GitHub MCP server
-  # for local integration testing. `make external_mcp_enable` also enables the
-  # local Authentik profile: proxy users authenticate through the same IDP and
-  # SSO session as Seizu.
+  # Optional external MCP OAuth proxy. Start with the auth, external-mcp and
+  # external-mcp-oauth profiles; proxy users share Seizu's local Authentik IDP.
   # Optional: exercises Seizu's OAuth-challenge handling (RFC 9728 discovery and
   # 401 recovery) against a proxy that really requires it. Not part of the
   # default profile — it authenticates the *caller to the proxy* and contributes
   # no GitHub authority, so requiring it for ordinary local use bought a
   # short-lived token that expires mid-run for no gain. Start it explicitly:
-  #   docker compose --profile external-mcp --profile external-mcp-oauth up
+  #   docker compose --profile auth --profile external-mcp --profile external-mcp-oauth up
   external-mcp-proxy:
     build:
       context: .
