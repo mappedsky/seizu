@@ -13,6 +13,7 @@ import { describeSchedule } from 'src/scheduleSpec';
 import ListTable, {
   ListTableColumn,
   listTableActionColumnSx,
+  listTablePrimaryCellSx,
   listTableSecondaryCellSx,
 } from 'src/components/ListTable';
 import ListViewState from 'src/components/ListViewState';
@@ -22,9 +23,14 @@ import { usePermissions } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
 
+// Sized in pixels, never percentages: the table's minimum width is solved
+// against the percentage share, so a percentage column divides every pixel
+// column by what it leaves over. The columns that should absorb the slack
+// carry no width at all.
 const savedColumnSx = { ...listTableSecondaryCellSx, width: 180 };
+const triggerColumnSx = { width: 160 };
 const authorColumnSx = { ...listTableSecondaryCellSx, width: 150 };
-const commentColumnSx = { ...listTableSecondaryCellSx, width: '28%' };
+const commentColumnSx = listTableSecondaryCellSx;
 
 function ScheduledChatHistory() {
   const { id } = useParams();
@@ -96,14 +102,14 @@ function ScheduledChatHistory() {
     {
       key: 'name',
       label: 'Name',
-      cellSx: { width: '20%' },
+      cellSx: listTablePrimaryCellSx,
       render: (version) => version.name,
     },
     {
       key: 'trigger',
       label: 'Trigger',
-      hideBelow: 'sm',
-      cellSx: { width: '18%' },
+      hideBelow: 'md',
+      cellSx: triggerColumnSx,
       render: (version) =>
         version.schedule
           ? describeSchedule(version.schedule)

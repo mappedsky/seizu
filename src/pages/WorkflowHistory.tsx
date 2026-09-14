@@ -1,122 +1,217 @@
-import { useContext, useEffect, useState } from 'react';
-import PageTitle from 'src/components/PageTitle';
-import { useNavigate, useParams } from 'react-router-dom';
-import { Alert, Box, Button, Paper, Typography } from '@mui/material';
+import { useState } from 'react';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Alert, Box, Button, Typography } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import HistoryIcon from '@mui/icons-material/History';
 import RestoreIcon from '@mui/icons-material/Restore';
-import { AuthContext } from 'src/auth.context';
+import ListTable, {
+  ListTableColumn,
+  listTableActionColumnSx,
+  listTablePrimaryCellSx,
+  listTableSecondaryCellSx,
+} from 'src/components/ListTable';
+import ListViewState from 'src/components/ListViewState';
+import PageTitle from 'src/components/PageTitle';
+import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import UserDisplay from 'src/components/UserDisplay';
 import { usePermissions } from 'src/hooks/usePermissions';
 import {
-  WorkflowRequest,
+  WorkflowVersion,
   useWorkflowMutations,
+  useWorkflowVersionsList,
 } from 'src/hooks/useWorkflowsApi';
+import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
+import {
+  workflowPipelineLabel,
+  workflowTriggerLabel,
+} from 'src/workflowTrigger';
 
-type Version = Omit<WorkflowRequest, 'comment'> & {
-  workflow_id: string;
-  version: number;
-  created_at: string;
-  created_by: string;
-  comment: string | null;
-};
+// Sized in pixels, never percentages: the table's minimum width is solved
+// against the percentage share, so a percentage column divides every pixel
+// column by what it leaves over. Name and Comment carry no width and take the
+// slack between them.
+const versionColumnSx = { width: 120 };
+const triggerColumnSx = { width: 150 };
+const pipelineColumnSx = { width: 170 };
+const savedColumnSx = { ...listTableSecondaryCellSx, width: 180 };
+const authorColumnSx = { ...listTableSecondaryCellSx, width: 150 };
+const commentColumnSx = listTableSecondaryCellSx;
 
-export default function WorkflowHistory() {
+function WorkflowHistory() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { accessToken } = useContext(AuthContext);
+  const location = useLocation();
   const hasPermission = usePermissions();
+  const { fromLabel } = (location.state ?? {}) as BackState;
+
+  const { versions, loading, error } = useWorkflowVersionsList(id ?? null);
   const { updateWorkflow } = useWorkflowMutations();
-  const [versions, setVersions] = useState<Version[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [restoring, setRestoring] = useState<number | null>(null);
-  useEffect(() => {
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const sorted = [...versions].sort((a, b) => b.version - a.version);
+  const latestVersion = sorted[0]?.version;
+  const workflowName = sorted[0]?.name;
+
+  const handleRestore = async (version: WorkflowVersion) => {
     if (!id) return;
-    fetch(`/api/v1/workflows/${encodeURIComponent(id)}/versions`, {
-      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error();
-        return response.json() as Promise<{ versions: Version[] }>;
-      })
-      .then((data) => setVersions(data.versions ?? []))
-      .catch(() => setError('Failed to load workflow versions.'));
-  }, [accessToken, id]);
-  const name = versions[0]?.name ?? 'Workflow';
-  const currentVersion = Math.max(
-    0,
-    ...versions.map((version) => version.version),
-  );
-  return (
-    <Box sx={pageContentSx}>
-      <PageTitle>History – {name} | Seizu</PageTitle>
-      <Button
-        startIcon={<ArrowBackIcon />}
-        onClick={() => navigate(`/app/workflows/${id}`)}
-      >
-        Back to workflow
-      </Button>
-      <Typography variant="h1" sx={{ my: 2 }}>
-        Version history – {name}
-      </Typography>
-      {error && <Alert severity="error">{error}</Alert>}
-      {versions.map((version) => (
-        <Paper key={version.version} variant="outlined" sx={{ p: 2, mb: 1 }}>
+    setFailure(null);
+    try {
+      await updateWorkflow(id, {
+        name: version.name,
+        stages: version.stages,
+        trigger_workflows: version.trigger_workflows,
+        schedule: version.schedule,
+        watch_scans: version.watch_scans,
+        enabled: version.enabled,
+        comment: `Restored from version ${version.version}`,
+      });
+      navigate(`/app/workflows/${id}`);
+    } catch (reason) {
+      setFailure(
+        reason instanceof Error
+          ? reason.message
+          : 'Failed to restore workflow version.',
+      );
+    }
+  };
+
+  const rowActions = (version: WorkflowVersion): RowMenuAction[] => {
+    const isCurrent = version.version === latestVersion;
+    const canWrite = hasPermission('workflows:write');
+    return [
+      {
+        key: 'restore',
+        label: 'Restore',
+        icon: <RestoreIcon fontSize="small" />,
+        onClick: () => void handleRestore(version),
+        disabled: isCurrent || !canWrite,
+        tooltip: isCurrent
+          ? 'This is already the current version'
+          : !canWrite
+            ? 'You do not have permission to restore workflow versions'
+            : undefined,
+      },
+    ];
+  };
+
+  const columns: ListTableColumn<WorkflowVersion>[] = [
+    {
+      key: 'version',
+      label: 'Version',
+      cellSx: versionColumnSx,
+      render: (version) => {
+        const isCurrent = version.version === latestVersion;
+        return (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="h6" sx={{ flex: 1 }}>
-              Version {version.version}
-              {version.version === currentVersion ? ' (current)' : ''}
+            <Typography sx={{ fontWeight: isCurrent ? 'bold' : 'medium' }}>
+              v{version.version}
             </Typography>
-            <Button
-              size="small"
-              startIcon={<RestoreIcon />}
-              disabled={
-                version.version === currentVersion ||
-                !hasPermission('workflows:write') ||
-                restoring !== null
-              }
-              onClick={async () => {
-                if (!id) return;
-                setRestoring(version.version);
-                setError(null);
-                try {
-                  await updateWorkflow(id, {
-                    name: version.name,
-                    stages: version.stages,
-                    trigger_workflows: version.trigger_workflows,
-                    schedule: version.schedule,
-                    watch_scans: version.watch_scans,
-                    enabled: version.enabled,
-                    comment: `Restored from version ${version.version}`,
-                  });
-                  navigate(`/app/workflows/${id}`);
-                } catch {
-                  setError('Failed to restore workflow version.');
-                } finally {
-                  setRestoring(null);
-                }
-              }}
-            >
-              {restoring === version.version ? 'Restoring…' : 'Restore'}
-            </Button>
+            {isCurrent && (
+              <Typography component="span" variant="caption" color="primary">
+                current
+              </Typography>
+            )}
           </Box>
-          <Typography variant="body2">
-            Saved {new Date(version.created_at).toLocaleString()} by{' '}
-            <UserDisplay userId={version.created_by} />
+        );
+      },
+    },
+    {
+      key: 'name',
+      label: 'Name',
+      cellSx: listTablePrimaryCellSx,
+      render: (version) => version.name,
+    },
+    {
+      key: 'trigger',
+      label: 'Trigger',
+      hideBelow: 'xl',
+      cellSx: triggerColumnSx,
+      render: (version) => workflowTriggerLabel(version),
+    },
+    {
+      key: 'pipeline',
+      label: 'Pipeline',
+      hideBelow: 'xl',
+      cellSx: pipelineColumnSx,
+      render: (version) => workflowPipelineLabel(version),
+    },
+    {
+      key: 'saved',
+      label: 'Saved',
+      hideBelow: 'sm',
+      cellSx: savedColumnSx,
+      render: (version) => new Date(version.created_at).toLocaleString(),
+    },
+    {
+      key: 'created_by',
+      label: 'Created By',
+      hideBelow: 'md',
+      cellSx: authorColumnSx,
+      render: (version) => <UserDisplay userId={version.created_by} />,
+    },
+    {
+      key: 'comment',
+      label: 'Comment',
+      hideBelow: 'lg',
+      cellSx: commentColumnSx,
+      render: (version) => version.comment || '—',
+    },
+    {
+      key: 'actions',
+      align: 'right',
+      cellSx: listTableActionColumnSx,
+      render: (version) => <RowMenu actions={rowActions(version)} />,
+    },
+  ];
+
+  return (
+    <>
+      <PageTitle>
+        {workflowName ? `History – ${workflowName} | Seizu` : 'History | Seizu'}
+      </PageTitle>
+      <Box sx={pageContentSx}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+          <Button
+            size="small"
+            startIcon={<ArrowBackIcon />}
+            onClick={() =>
+              fromLabel ? navigate(-1) : navigate(`/app/workflows/${id}`)
+            }
+          >
+            Back to {fromLabel ?? 'workflow'}
+          </Button>
+        </Box>
+
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 3 }}>
+          <HistoryIcon color="action" />
+          <Typography variant="h1">
+            Version history{workflowName ? ` – ${workflowName}` : ''}
           </Typography>
-          <Typography color="text.secondary">
-            {version.comment ?? 'No comment'}
-          </Typography>
-          <Typography variant="body2">
-            {version.stages.length} stage(s),{' '}
-            {version.stages.reduce(
-              (total, stage) => total + stage.activities.length,
-              0,
-            )}{' '}
-            activity(ies)
-          </Typography>
-        </Paper>
-      ))}
-    </Box>
+        </Box>
+
+        {failure && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {failure}
+          </Alert>
+        )}
+
+        <ListViewState
+          loading={loading}
+          error={error}
+          errorMessage="Failed to load version history"
+        >
+          <ListTable
+            rows={sorted}
+            columns={columns}
+            getRowKey={(version) => version.version}
+            emptyMessage="No versions found."
+            pagination={false}
+          />
+        </ListViewState>
+      </Box>
+    </>
   );
 }
+
+export default WorkflowHistory;

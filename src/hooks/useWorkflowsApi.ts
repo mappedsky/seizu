@@ -57,6 +57,20 @@ export interface WorkflowRequest {
   comment?: string | null;
 }
 
+export interface WorkflowVersion {
+  workflow_id: string;
+  name: string;
+  stages: WorkflowStage[];
+  trigger_workflows: string[];
+  schedule: ScheduleSpec | null;
+  watch_scans: WorkflowWatchScan[];
+  enabled: boolean;
+  version: number;
+  created_at: string;
+  created_by: string;
+  comment: string | null;
+}
+
 export interface WorkflowRunSummary {
   workflow_id: string;
   run_id: string;
@@ -99,6 +113,7 @@ function headers(token: string | null): Record<string, string> {
 }
 
 const NO_WORKFLOWS: WorkflowItem[] = [];
+const NO_VERSIONS: WorkflowVersion[] = [];
 
 async function apiError(response: Response, fallback: string): Promise<Error> {
   try {
@@ -213,6 +228,40 @@ export function useWorkflow(id: string | null): {
   );
 
   return { workflow, loading, error, refresh };
+}
+
+export function useWorkflowVersionsList(id: string | null): {
+  versions: WorkflowVersion[];
+  loading: boolean;
+  error: Error | null;
+} {
+  const { accessToken } = useContext(AuthContext);
+  const { auth_required } = useContext(AuthConfigContext);
+
+  const {
+    data: versions,
+    loading,
+    error,
+  } = useAsyncResource<WorkflowVersion[]>(
+    resourceKey('workflow-versions', id, auth_required, accessToken),
+    !id || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const response = await fetch(
+            `/api/v1/workflows/${encodeURIComponent(id)}/versions`,
+            { headers: headers(accessToken) },
+          );
+          if (!response.ok)
+            throw await apiError(response, 'Failed to load workflow versions.');
+          const data = (await response.json()) as {
+            versions: WorkflowVersion[];
+          };
+          return data.versions ?? [];
+        },
+    NO_VERSIONS,
+  );
+
+  return { versions, loading, error };
 }
 
 export function useWorkflowRuns(id: string | null): {

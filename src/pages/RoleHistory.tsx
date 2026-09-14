@@ -14,6 +14,7 @@ import {
 import ListTable, {
   ListTableColumn,
   listTableActionColumnSx,
+  listTablePrimaryCellSx,
   listTableSecondaryCellSx,
 } from 'src/components/ListTable';
 import ListViewState from 'src/components/ListViewState';
@@ -23,10 +24,13 @@ import { usePermissionState } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
 
+// Sized in pixels, never percentages: the table's minimum width is solved
+// against the percentage share, so a percentage column divides every pixel
+// column by what it leaves over. The columns that should absorb the slack
+// carry no width at all.
 const savedColumnSx = { ...listTableSecondaryCellSx, width: 180 };
 const authorColumnSx = { ...listTableSecondaryCellSx, width: 150 };
-const permissionsColumnSx = { width: '28%' };
-const commentColumnSx = { ...listTableSecondaryCellSx, width: '24%' };
+const commentColumnSx = listTableSecondaryCellSx;
 
 function permissionSummary(version: RoleVersion) {
   const visible = version.permissions.slice(0, 4);
@@ -133,7 +137,7 @@ function RoleHistory() {
     {
       key: 'name',
       label: 'Name',
-      cellSx: { width: '24%' },
+      cellSx: listTablePrimaryCellSx,
       render: (version) => version.name,
     },
     {
@@ -154,7 +158,6 @@ function RoleHistory() {
       key: 'permissions',
       label: 'Permissions',
       hideBelow: 'lg',
-      cellSx: permissionsColumnSx,
       render: (version) => permissionSummary(version),
     },
     {

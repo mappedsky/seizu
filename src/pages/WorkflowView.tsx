@@ -43,6 +43,7 @@ import {
   useWorkflowRuns,
   useWorkflowsList,
 } from 'src/hooks/useWorkflowsApi';
+import type { BackState } from 'src/navigation';
 import { describeSchedule } from 'src/scheduleSpec';
 import { temporalStatusColor, temporalStatusLabel } from 'src/temporalStatus';
 import { pageContentSx } from 'src/theme/layout';
@@ -309,7 +310,11 @@ export default function WorkflowView() {
             <Button
               startIcon={<HistoryIcon />}
               onClick={() =>
-                navigate(`/app/workflows/${workflow.workflow_id}/history`)
+                navigate(`/app/workflows/${workflow.workflow_id}/history`, {
+                  state: {
+                    fromLabel: workflow.name,
+                  } satisfies BackState,
+                })
               }
             >
               History
