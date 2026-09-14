@@ -3,10 +3,6 @@ import { MemoryRouter } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import NotFound from 'src/pages/NotFound';
 
-jest.mock('react-helmet', () => ({
-  Helmet: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
-
 const renderWithMode = (mode: 'light' | 'dark') =>
   render(
     <ThemeProvider theme={createTheme({ palette: { mode } })}>

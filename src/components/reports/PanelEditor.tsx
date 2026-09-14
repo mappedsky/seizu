@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   Box,
   Button,
@@ -157,6 +157,36 @@ function ColumnRow({
   );
 }
 
+/**
+ * The form's starting point, computed from the panel being edited.
+ *
+ * Legacy ``threshold`` is migrated into the ``thresholds`` list so the editor
+ * displays equivalent rows; the legacy field is dropped on save (see
+ * cleanPanel).
+ */
+function initialForm(panel: EditablePanel | null): Panel {
+  if (!panel) return emptyPanel('count');
+  const { _id: _ignored, ...rest } = panel;
+  const migrated: Panel = { ...rest };
+  if (
+    (migrated.thresholds === undefined || migrated.thresholds.length === 0) &&
+    migrated.threshold != null &&
+    (migrated.type === 'count' || migrated.type === 'progress')
+  ) {
+    const list = migrateLegacyThreshold(migrated);
+    if (list.length > 0) {
+      migrated.thresholds = list;
+    }
+  }
+  return migrated;
+}
+
+/**
+ * The dialog shell. The form is mounted per open and keyed on the panel, so
+ * its starting state is *computed* from that panel rather than copied into
+ * state by an effect that had to run after the first render had already shown
+ * the previous panel's values.
+ */
 function PanelEditor({
   open,
   panel,
@@ -164,34 +194,29 @@ function PanelEditor({
   onSave,
   availableVariables,
 }: PanelEditorProps) {
-  const [form, setForm] = useState<Panel>(emptyPanel('count'));
-  const [id, setId] = useState('');
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+      {open && (
+        <PanelEditorForm
+          key={panel?._id ?? '__new__'}
+          panel={panel}
+          onClose={onClose}
+          onSave={onSave}
+          availableVariables={availableVariables}
+        />
+      )}
+    </Dialog>
+  );
+}
 
-  useEffect(() => {
-    if (panel) {
-      const { _id, ...rest } = panel;
-      // Migrate legacy ``threshold`` into the ``thresholds`` list on first
-      // open so the new editor displays equivalent rows. The legacy field
-      // is dropped on save (see cleanPanel).
-      const migrated: Panel = { ...rest };
-      if (
-        (migrated.thresholds === undefined ||
-          migrated.thresholds.length === 0) &&
-        migrated.threshold != null &&
-        (migrated.type === 'count' || migrated.type === 'progress')
-      ) {
-        const list = migrateLegacyThreshold(migrated);
-        if (list.length > 0) {
-          migrated.thresholds = list;
-        }
-      }
-      setForm(migrated);
-      setId(_id);
-    } else {
-      setForm(emptyPanel('count'));
-      setId('');
-    }
-  }, [panel, open]);
+function PanelEditorForm({
+  panel,
+  onClose,
+  onSave,
+  availableVariables,
+}: Omit<PanelEditorProps, 'open'>) {
+  const [form, setForm] = useState<Panel>(() => initialForm(panel));
+  const id = panel?._id ?? '';
 
   function set<K extends keyof Panel>(key: K, value: Panel[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -257,7 +282,7 @@ function PanelEditor({
   }
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+    <>
       <DialogTitle>{panel ? 'Edit Panel' : 'Add Panel'}</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
@@ -584,7 +609,7 @@ function PanelEditor({
           Save Panel
         </Button>
       </DialogActions>
-    </Dialog>
+    </>
   );
 }
 

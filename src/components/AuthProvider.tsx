@@ -60,28 +60,21 @@ interface AuthProviderProps {
 
 function AuthProvider({ children }: AuthProviderProps) {
   const { auth_required, loaded } = useContext(AuthConfigContext);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(auth_required);
+  const [session, setSession] = useState<{ accessToken: string } | null>(null);
+
+  // The logged-out page is a terminal state, not a session to bootstrap.
+  const loggedOut = window.location.pathname === LOGGED_OUT_PATH;
+  // Hold until the real config arrives. The auth_required:true default is
+  // optimistic; bootstrapping a login flow against it would fire
+  // /auth/refresh (401) and /auth/login (503) on a server with auth
+  // disabled, before GET /api/v1/config reports auth_required:false.
+  const needsSession = auth_required && loaded && !loggedOut;
+  // Derived rather than a flag three branches of the effect have to lower:
+  // "auth is required and we do not yet have the session it needs".
+  const isLoading = auth_required && (!loaded || (needsSession && !session));
 
   useEffect(() => {
-    // Hold until the real config arrives. The auth_required:true default is
-    // optimistic; bootstrapping a login flow against it would fire
-    // /auth/refresh (401) and /auth/login (503) on a server with auth
-    // disabled, before GET /api/v1/config reports auth_required:false.
-    if (!loaded) {
-      return;
-    }
-
-    if (!auth_required) {
-      setIsLoading(false);
-      return;
-    }
-
-    if (window.location.pathname === LOGGED_OUT_PATH) {
-      setAccessToken(null);
-      setIsLoading(false);
-      return;
-    }
+    if (!needsSession) return undefined;
 
     let cancelled = false;
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -90,8 +83,7 @@ function AuthProvider({ children }: AuthProviderProps) {
       try {
         const { access_token, expires_in } = await refreshOnce();
         if (cancelled) return;
-        setAccessToken(access_token);
-        setIsLoading(false);
+        setSession({ accessToken: access_token });
         const ttl = expires_in ?? DEFAULT_ACCESS_TOKEN_TTL_SECONDS;
         const delay = Math.max(
           REFRESH_LEAD_TIME_FLOOR_MS,
@@ -123,7 +115,9 @@ function AuthProvider({ children }: AuthProviderProps) {
       cancelled = true;
       if (refreshTimer !== null) clearTimeout(refreshTimer);
     };
-  }, [auth_required, loaded]);
+  }, [needsSession]);
+
+  const accessToken = loggedOut ? null : (session?.accessToken ?? null);
 
   return (
     <AuthContext.Provider value={{ accessToken, isLoading }}>

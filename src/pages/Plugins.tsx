@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import {
   Alert,
   Box,
@@ -447,9 +447,7 @@ export default function Plugins() {
 
   return (
     <>
-      <Helmet>
-        <title>Agent Plugins | Seizu</title>
-      </Helmet>
+      <PageTitle>Agent Plugins | Seizu</PageTitle>
       <Box sx={pageContentSx}>
         <ListPageHeader
           title="Agent Plugins"

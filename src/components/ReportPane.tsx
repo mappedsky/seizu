@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import {
   Box,
@@ -36,6 +36,7 @@ import {
   useReport,
   useReportsMutations,
   updateCachedReportCapabilities,
+  type ReportVersion,
 } from 'src/hooks/useReportsApi';
 import { Report } from 'src/config.context';
 import { usePermissionState } from 'src/hooks/usePermissions';
@@ -82,25 +83,21 @@ function ReportPane({
   } = usePermissionState();
 
   const [editMode, setEditMode] = useState(searchParams.get('edit') === 'true');
-  const [displayedReport, setDisplayedReport] = useState<Report | undefined>(
-    undefined,
-  );
-  const [displayedName, setDisplayedName] = useState<string | undefined>(
-    undefined,
-  );
-  const [displayedAccessScope, setDisplayedAccessScope] = useState<
-    'private' | 'public' | undefined
-  >(undefined);
-  const [displayedOwnerId, setDisplayedOwnerId] = useState<string | undefined>(
-    undefined,
-  );
-  const [displayedQueryCapabilities, setDisplayedQueryCapabilities] = useState<
-    Record<string, string> | undefined
-  >(undefined);
-  const [displayedSpace, setDisplayedSpace] = useState<{
+  // Visibility and space membership are changed here without producing a new
+  // report version, so the loaded version cannot show them until it is fetched
+  // again. Each local change carries the version it was applied to, so a
+  // genuinely newer load supersedes it rather than being masked by it — which
+  // is what copying every field into mirror state through an effect used to do
+  // for all six of them.
+  const [localAccessScope, setLocalAccessScope] = useState<{
+    base: ReportVersion;
+    scope: 'private' | 'public';
+  } | null>(null);
+  const [localSpace, setLocalSpace] = useState<{
+    base: ReportVersion;
     spaceId: string | null;
     subspaceId: string | null;
-  }>({ spaceId: null, subspaceId: null });
+  } | null>(null);
 
   const {
     report,
@@ -117,6 +114,28 @@ function ReportPane({
     updateReportVisibility,
     setReportSpace,
   } = useReportsMutations();
+
+  // Memoised so the report handed to the view keeps its identity between
+  // loads: the panels below key effects on it.
+  const displayedReport = useMemo(() => {
+    if (!report) return undefined;
+    const reportName = name?.trim() || report.name;
+    return reportName ? { ...report, name: reportName } : report;
+  }, [report, name]);
+  const displayedName = name;
+  const displayedQueryCapabilities = queryCapabilities;
+  const displayedOwnerId = reportVersion?.report_created_by;
+  const displayedAccessScope =
+    localAccessScope && localAccessScope.base === reportVersion
+      ? localAccessScope.scope
+      : reportVersion?.access.scope;
+  const displayedSpace =
+    localSpace && localSpace.base === reportVersion
+      ? { spaceId: localSpace.spaceId, subspaceId: localSpace.subspaceId }
+      : {
+          spaceId: reportVersion?.space_id ?? null,
+          subspaceId: reportVersion?.subspace_id ?? null,
+        };
 
   const [moveOpen, setMoveOpen] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
@@ -148,23 +167,6 @@ function ReportPane({
     }
   };
 
-  useEffect(() => {
-    if (report) {
-      const reportName = name?.trim() || report.name;
-      setDisplayedReport(reportName ? { ...report, name: reportName } : report);
-    }
-    if (name) setDisplayedName(name);
-    if (reportVersion) {
-      setDisplayedAccessScope(reportVersion.access.scope);
-      setDisplayedOwnerId(reportVersion.report_created_by);
-      setDisplayedSpace({
-        spaceId: reportVersion.space_id ?? null,
-        subspaceId: reportVersion.subspace_id ?? null,
-      });
-    }
-    setDisplayedQueryCapabilities(queryCapabilities ?? undefined);
-  }, [report, name, reportVersion, queryCapabilities]);
-
   // Sync edit param in URL
   useEffect(() => {
     if (editMode) {
@@ -195,15 +197,10 @@ function ReportPane({
     // returns the new version's tokens rather than the pre-save ones.
     updateCachedReportCapabilities(id, {
       report: version.config,
-      name: version.name,
+      name: savedName || version.name,
       reportVersion: version,
       queryCapabilities: version.query_capabilities ?? undefined,
     });
-    setDisplayedReport(
-      savedName ? { ...version.config, name: savedName } : version.config,
-    );
-    setDisplayedName(savedName);
-    setDisplayedQueryCapabilities(version.query_capabilities ?? undefined);
     window.dispatchEvent(new Event('seizu:reports-updated'));
     setEditMode(false);
     // Navigate back to view mode (clears ?edit param)
@@ -218,7 +215,11 @@ function ReportPane({
         id,
         displayedAccessScope === 'public' ? 'private' : 'public',
       );
-      setDisplayedAccessScope(updated.access.scope);
+      if (reportVersion)
+        setLocalAccessScope({
+          base: reportVersion,
+          scope: updated.access.scope,
+        });
     } finally {
       setUpdatingAccess(false);
     }
@@ -458,10 +459,12 @@ function ReportPane({
           onClose={() => setMoveOpen(false)}
           onConfirm={async (spaceId, subspaceId) => {
             const updated = await setReportSpace(id, spaceId, subspaceId);
-            setDisplayedSpace({
-              spaceId: updated.space_id ?? null,
-              subspaceId: updated.subspace_id ?? null,
-            });
+            if (reportVersion)
+              setLocalSpace({
+                base: reportVersion,
+                spaceId: updated.space_id ?? null,
+                subspaceId: updated.subspace_id ?? null,
+              });
           }}
         />
       )}

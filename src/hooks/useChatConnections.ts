@@ -1,6 +1,7 @@
 import { useContext, useEffect, useRef, useState } from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
+import { resourceKey } from 'src/hooks/useAsyncResource';
 
 export type ConnectionStatus =
   | 'unknown'
@@ -24,22 +25,33 @@ export interface ChatConnection {
   }[];
 }
 
+const NO_CONNECTIONS: ChatConnection[] = [];
+
+interface ConnectionsState {
+  key: string;
+  connections: ChatConnection[];
+  error: string | null;
+  checking: string | null;
+}
+
 export function useChatConnections(enabled: boolean) {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [connections, setConnections] = useState<ChatConnection[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [checking, setChecking] = useState<string | null>(null);
+  // The list, the banner and which proxy is being re-checked all belong to one
+  // request. Keying them together is what drops a previous identity's answers
+  // when the token changes, without an effect clearing four states on entry.
+  const [state, setState] = useState<ConnectionsState | null>(null);
   const active = useRef<AbortController | null>(null);
+  const requestKey = resourceKey(
+    'chat-connections',
+    enabled,
+    auth_required,
+    accessToken,
+  );
 
   useEffect(() => {
     const controller = new AbortController();
     active.current = controller;
-    setConnections([]);
-    setChecking(null);
-    setError(null);
-    setLoading(true);
     if (enabled && (!auth_required || accessToken)) {
       const headers: Record<string, string> = {};
       if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
@@ -47,18 +59,37 @@ export function useChatConnections(enabled: boolean) {
         .then(async (response) => {
           if (!response.ok) throw new Error('Could not load connections.');
           const data = await response.json();
-          if (!controller.signal.aborted) setConnections(data.connections);
+          if (!controller.signal.aborted)
+            setState({
+              key: requestKey,
+              connections: data.connections,
+              error: null,
+              checking: null,
+            });
         })
         .catch(() => {
           if (!controller.signal.aborted)
-            setError('Could not load connections.');
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setLoading(false);
+            setState({
+              key: requestKey,
+              connections: NO_CONNECTIONS,
+              error: 'Could not load connections.',
+              checking: null,
+            });
         });
     }
     return () => controller.abort();
-  }, [enabled, auth_required, accessToken]);
+  }, [requestKey, enabled, auth_required, accessToken]);
+
+  const current = state !== null && state.key === requestKey ? state : null;
+
+  // Only a settled request can be amended, so a stale response can never
+  // reappear as this request's answer.
+  const amend = (update: (previous: ConnectionsState) => ConnectionsState) =>
+    setState((previous) =>
+      previous !== null && previous.key === requestKey
+        ? update(previous)
+        : previous,
+    );
 
   const check = async (name: string) => {
     const controller = active.current;
@@ -69,8 +100,7 @@ export function useChatConnections(enabled: boolean) {
       (auth_required && !accessToken)
     )
       return;
-    setChecking(name);
-    setError(null);
+    amend((previous) => ({ ...previous, checking: name, error: null }));
     const headers: Record<string, string> = { 'X-Seizu-Csrf': '1' };
     if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
     try {
@@ -85,17 +115,29 @@ export function useChatConnections(enabled: boolean) {
       if (!response.ok) throw new Error('Could not check the connection.');
       const updated: ChatConnection = await response.json();
       if (!controller.signal.aborted) {
-        setConnections((items) =>
-          items.map((item) => (item.proxy_name === name ? updated : item)),
-        );
+        amend((previous) => ({
+          ...previous,
+          connections: previous.connections.map((item) =>
+            item.proxy_name === name ? updated : item,
+          ),
+          checking: null,
+        }));
       }
     } catch {
       if (!controller.signal.aborted)
-        setError('Could not check the connection.');
-    } finally {
-      if (!controller.signal.aborted) setChecking(null);
+        amend((previous) => ({
+          ...previous,
+          error: 'Could not check the connection.',
+          checking: null,
+        }));
     }
   };
 
-  return { connections, loading, error, checking, check };
+  return {
+    connections: current ? current.connections : NO_CONNECTIONS,
+    loading: current === null,
+    error: current ? current.error : null,
+    checking: current ? current.checking : null,
+    check,
+  };
 }

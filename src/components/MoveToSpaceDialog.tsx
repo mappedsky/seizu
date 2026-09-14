@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Alert,
   Button,
@@ -38,6 +38,10 @@ interface MoveToSpaceDialogProps {
  * The sub-space select is disabled until a space is chosen and resets whenever
  * the space changes, mirroring the API rules so a user cannot construct a
  * request the backend will reject.
+ *
+ * Callers mount this per open, so the selection starts from the report's
+ * current placement by initialisation rather than by an effect copying the
+ * props into state after the first render has already shown the last one.
  */
 function MoveToSpaceDialog({
   open,
@@ -56,14 +60,6 @@ function MoveToSpaceDialog({
   const [error, setError] = useState<string | null>(null);
 
   const { subspaces, loading: subspacesLoading } = useSubspacesList(spaceId);
-
-  useEffect(() => {
-    if (open) {
-      setSpaceId(currentSpaceId);
-      setSubspaceId(currentSubspaceId);
-      setError(null);
-    }
-  }, [open, currentSpaceId, currentSubspaceId]);
 
   const handleSpaceChange = (value: string) => {
     const next = value === NONE ? null : value;

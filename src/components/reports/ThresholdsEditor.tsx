@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Box,
   Button,
@@ -142,25 +142,24 @@ interface ThresholdRowProps {
  * non-finite values stay in local state and are filtered out at save time.
  */
 function ThresholdRow({ threshold, onChange, onDelete }: ThresholdRowProps) {
-  const [valueText, setValueText] = useState<string>(
-    Number.isFinite(threshold.value) ? String(threshold.value) : '',
-  );
+  // The draft the user has typed, if it is still what the parent holds. A
+  // parent that sets a different value (legacy-threshold migration on first
+  // open) supersedes the draft by being read past, rather than by an effect
+  // overwriting the buffer a render later.
+  const [draft, setDraft] = useState<string | null>(null);
 
-  // If the parent sets a different finite value (e.g. via legacy-threshold
-  // migration on first open), reflect that in the local buffer. Don't
-  // overwrite a draft string that would parse to the same number.
-  useEffect(() => {
-    if (Number.isFinite(threshold.value)) {
-      const parsed = valueText.trim() === '' ? NaN : Number(valueText);
-      if (!Number.isFinite(parsed) || parsed !== threshold.value) {
-        setValueText(String(threshold.value));
-      }
-    } else if (valueText.trim() !== '' && Number.isFinite(Number(valueText))) {
-      setValueText('');
-    }
-    // We intentionally only want this to fire when the *external* value
-    // changes; ``valueText`` shouldn't trigger a re-sync.
-  }, [threshold.value]);
+  const draftValue =
+    draft === null || draft.trim() === '' ? NaN : Number(draft);
+  const draftIsCurrent =
+    draft !== null &&
+    (Number.isFinite(threshold.value)
+      ? draftValue === threshold.value
+      : !Number.isFinite(draftValue));
+  const valueText = draftIsCurrent
+    ? draft
+    : Number.isFinite(threshold.value)
+      ? String(threshold.value)
+      : '';
 
   return (
     <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
@@ -172,7 +171,7 @@ function ThresholdRow({ threshold, onChange, onDelete }: ThresholdRowProps) {
         value={valueText}
         onChange={(e) => {
           const raw = e.target.value;
-          setValueText(raw);
+          setDraft(raw);
           const parsed = raw.trim() === '' ? NaN : Number(raw);
           // Propagate the parsed number (or NaN) so the resolver sees the
           // latest committed value. NaN-valued thresholds are skipped by the

@@ -26,10 +26,6 @@ const mockUsePermissions =
     typeof usePermissionsModule.usePermissions
   >;
 
-jest.mock('react-helmet', () => ({
-  Helmet: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
-
 const theme = createTheme();
 
 // Tracks the current location so tests can observe navigate() calls.

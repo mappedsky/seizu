@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { useNavigate } from 'react-router-dom';
 import { Alert, Box, Button, Chip, Tooltip, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
@@ -262,9 +262,7 @@ export default function Workflows() {
 
   return (
     <Box sx={pageContentSx}>
-      <Helmet>
-        <title>Workflows | Seizu</title>
-      </Helmet>
+      <PageTitle>Workflows | Seizu</PageTitle>
       <ListPageHeader
         title="Workflows"
         action={

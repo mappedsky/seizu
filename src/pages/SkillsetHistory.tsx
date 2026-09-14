@@ -14,7 +14,7 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import HistoryIcon from '@mui/icons-material/History';
 import RestoreIcon from '@mui/icons-material/Restore';
 import { useNavigate, useLocation, useParams } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import {
   SkillsetVersion,
   useSkillsetMutations,
@@ -212,9 +212,9 @@ function SkillsetHistory() {
 
   return (
     <Box sx={pageContentSx}>
-      <Helmet>
-        <title>{name ? `History - ${name} | Seizu` : 'History | Seizu'}</title>
-      </Helmet>
+      <PageTitle>
+        {name ? `History - ${name} | Seizu` : 'History | Seizu'}
+      </PageTitle>
       {fromLabel && (
         <Button
           startIcon={<ArrowBackIcon />}

@@ -26,10 +26,6 @@ jest.mock('src/components/UserDisplay', () => ({
   __esModule: true,
   default: ({ userId }: { userId: string }) => <>{userId}</>,
 }));
-jest.mock('react-helmet', () => ({
-  Helmet: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
-
 const usePermissions = permissionsModule.usePermissions as jest.Mock;
 const usePluginVersionsList = pluginsApi.usePluginVersionsList as jest.Mock;
 const usePluginContents = pluginsApi.usePluginContents as jest.Mock;

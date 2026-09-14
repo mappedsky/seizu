@@ -1,5 +1,6 @@
 import createCache from '@emotion/cache';
 import { CacheProvider } from '@emotion/react';
+import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
@@ -15,10 +16,14 @@ const emotionCache = createCache({
   nonce: cspNonce,
 });
 
+// StrictMode double-invokes renders and effects in development so impure
+// renders and missing cleanup fail here rather than in production (UI-001).
 root.render(
-  <CacheProvider value={emotionCache}>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
-  </CacheProvider>,
+  <StrictMode>
+    <CacheProvider value={emotionCache}>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </CacheProvider>
+  </StrictMode>,
 );

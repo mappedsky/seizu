@@ -1,13 +1,11 @@
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { Link as RouterLink } from 'react-router-dom';
 import { Box, Button, Container, Typography } from '@mui/material';
 
 function NotFound() {
   return (
     <>
-      <Helmet>
-        <title>404 | Seizu</title>
-      </Helmet>
+      <PageTitle>404 | Seizu</PageTitle>
       <Box
         sx={{
           alignItems: 'center',

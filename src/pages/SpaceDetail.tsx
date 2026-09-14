@@ -1,5 +1,5 @@
 import { useCallback, useState, type ComponentType } from 'react';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -185,9 +185,9 @@ function SpaceDetail({ ReportPaneComponent = ReportPane }: SpaceDetailProps) {
 
   return (
     <>
-      <Helmet>
-        <title>{tree.space.name} | Seizu</title>
-      </Helmet>
+      {/* The report pane names the tab when a report is open, and only one
+          PageTitle may be mounted at a time. */}
+      {!inSpace && <PageTitle>{tree.space.name} | Seizu</PageTitle>}
       {/* Bounded height, matching ChatInterface: without it the panel grows with
           its content and scrolls with the page, sliding its header up under the
           fixed navbar. */}

@@ -26,6 +26,7 @@ rather than restating the reasoning.
 | [`workflows.md`](docs/root/dev/decisions/workflows.md) (`WF`) | Temporal pipelines, cartography sync, remediation isolation |
 | [`query-validation.md`](docs/root/dev/decisions/query-validation.md) (`QV`) | The Cypher validator and its fuzzing corpus |
 | [`authentication.md`](docs/root/dev/decisions/authentication.md) (`AUTH`) | Identity resolution, issuer handling, OIDC configuration guards |
+| [`frontend-state.md`](docs/root/dev/decisions/frontend-state.md) (`UI`) | React state shape, StrictMode, effects and the `set-state-in-effect` rule |
 
 When you make a decision worth keeping, add an entry there rather than growing
 this file or a docstring — see the log index for the format.
@@ -152,6 +153,13 @@ Config for adjacent dev services lives in `.config/`; reference that path in `do
 ### Frontend (`src/`)
 
 React 19 + TypeScript + Bun + Material-UI + MUI X Charts + `@xyflow/react`.
+
+The app renders under `<StrictMode>`, and `@eslint-react/set-state-in-effect`
+is an **error**: a value that follows a prop, a route parameter or a fetched
+result is computed during render, not written into state by an effect watching
+it. `src/hooks/useAsyncResource.ts` packages the common shape — `loading` is
+"the settled result is not an answer to the request this render is asking for".
+**Decisions: [`UI`](docs/root/dev/decisions/frontend-state.md).**
 
 - `src/config.context.ts` — `ConfigContext` from `GET /api/v1/config` (OIDC + stats config); Cypher resolution is per-report via `Report.queries`.
 - `src/authConfig.context.ts` — `AuthConfigContext`; `auth_required` + informational OIDC config; gates API calls until a token exists.
@@ -533,12 +541,13 @@ List-view conventions live in shared components — compose these rather than re
 - **`src/components/ListViewState.tsx`** — loading/error gate (centered spinner / error-icon row) wrapping the table.
 - **`src/components/RowMenu.tsx`** — per-row three-dot overflow menu. Pass a declarative `RowMenuAction[]` (`label`, `icon`, `onClick`, `disabled`, `tooltip`, `destructive`, `dividerBefore`); it owns the trigger/anchor/min-width, the divider-fenced destructive action in error color, and disabled-item tooltips.
 - **`src/components/ConfirmDeleteDialog.tsx`** — `maxWidth="xs"` delete confirmation (body as children with the `<strong>` name; `deleting` spinner; `error` alert).
+- **`src/components/PageTitle.tsx`** — names the browser tab (`<PageTitle>Spaces | Seizu</PageTitle>`), and hands it back on unmount so a page that sets none does not inherit the last one's. **Exactly one may be mounted at a time**; a page embedding `ReportView` passes `documentTitle` rather than rendering a second.
 - **`src/components/DetailDialog.tsx`** — read-only detail dialog (title + optional `secondary` version label + close button), with exported `DetailSection` (labeled block) and `DetailCodeBlock` (monospace `action.hover` pre).
 
 **Conventions not yet componentized:**
 - **Clickable names:** `sx={{ cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}` on `<Typography>` (not `<Link>`) when click opens a dialog.
 - **Create dialogs:** `maxWidth="sm" fullWidth`; `<CircularProgress size={20} />` in the submit button while in-flight; errors in `<Alert severity="error">` atop `<DialogContent>`.
-- **Version-history pages:** route `<entity>/:id/history`; back `<Button startIcon={<ArrowBackIcon />}>`; title `<HistoryIcon color="action" />` + `<Typography variant="h1">Version history – {name}</Typography>`; columns Version/Saved/Created By/Comment/actions; current version bold + `"current"` in `color="primary"`; a single `RowMenu` Restore action, disabled on current, `comment: \`Restored from version ${version}\``; Helmet `History – {name} | Seizu`.
+- **Version-history pages:** route `<entity>/:id/history`; back `<Button startIcon={<ArrowBackIcon />}>`; title `<HistoryIcon color="action" />` + `<Typography variant="h1">Version history – {name}</Typography>`; columns Version/Saved/Created By/Comment/actions; current version bold + `"current"` in `color="primary"`; a single `RowMenu` Restore action, disabled on current, `comment: \`Restored from version ${version}\``; `<PageTitle>History – {name} | Seizu</PageTitle>`.
 - **Column names + cells:** Latest Update / Updated By / Created By / Version / Status; dates `new Date(v).toLocaleString()`; users `<UserDisplay userId={...} />`.
 
 ## Keeping Supporting Files Up to Date

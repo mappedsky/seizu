@@ -12,6 +12,7 @@ import {
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import CheckCircle from '@mui/icons-material/CheckCircle';
 import Block from '@mui/icons-material/Block';
+import { resourceKey } from 'src/hooks/useAsyncResource';
 import { AuthConfigContext } from 'src/authConfig.context';
 import { AuthContext } from 'src/auth.context';
 import {
@@ -142,29 +143,29 @@ export default function BatchConfirmationPage() {
   const { getConfirmationsByBatchId, decideConfirmation } =
     useConfirmationsApi(null);
   const [confirmations, setConfirmations] = useState<ActionConfirmation[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deciding, setDeciding] = useState<string | null>(null);
+  // Which batch has been answered for, rather than a flag the effect raises on
+  // the way in.
+  const requestKey = resourceKey('batch', batchId, waitingForToken);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const loading = loadedKey !== requestKey;
 
-  const reload = useCallback(() => {
+  const reload = useCallback(async () => {
     if (!batchId || waitingForToken) return;
-    void getConfirmationsByBatchId(batchId)
-      .then((items) => {
-        setConfirmations(items);
-        setError(null);
-      })
-      .catch(() => {
-        setError('Failed to load confirmations.');
-      })
-      .finally(() => {
-        setLoading(false);
-      });
-  }, [batchId, getConfirmationsByBatchId, waitingForToken]);
+    try {
+      const items = await getConfirmationsByBatchId(batchId);
+      setConfirmations(items);
+      setError(null);
+    } catch {
+      setError('Failed to load confirmations.');
+    }
+    setLoadedKey(requestKey);
+  }, [batchId, getConfirmationsByBatchId, waitingForToken, requestKey]);
 
   useEffect(() => {
     if (waitingForToken) return;
-    setLoading(true);
-    reload();
+    void reload();
   }, [reload, waitingForToken]);
 
   const handleDecide = useCallback(

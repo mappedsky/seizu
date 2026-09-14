@@ -1182,28 +1182,23 @@ const ChatTranscript = memo(function ChatTranscript({
   // A message the server has persisted but not timed is a turn from before
   // timestamps were recorded: it gets no time at all rather than today's date,
   // which is what stamping every untimed message did to every old conversation.
-  const [liveTimestamps, setLiveTimestamps] = useState<Record<string, string>>(
-    {},
-  );
-  useEffect(() => {
+  // Rebuilt from the current conversation whenever it changes, so switching
+  // threads or hydrating history also drops the stamps those messages no
+  // longer need. A memo rather than state written from an effect: the map is
+  // a function of the message list, and the only thing carried across is the
+  // time each id was first seen.
+  const seenTimestampsRef = useRef<Record<string, string>>({});
+  const liveTimestamps = useMemo(() => {
     const now = new Date().toISOString();
-    setLiveTimestamps((current) => {
-      let added = false;
-      const next: Record<string, string> = {};
-      for (const message of messages) {
-        if (message.metadata?.created_at || message.metadata?.seizu_persisted)
-          continue;
-        const stamp = current[message.id];
-        next[message.id] = stamp ?? now;
-        added ||= stamp === undefined;
-      }
-      // Rebuilt from the current conversation, so switching threads or
-      // hydrating history also drops the stamps those messages no longer need.
-      // Identity is preserved when nothing moved, or this would re-run forever.
-      const unchanged =
-        !added && Object.keys(next).length === Object.keys(current).length;
-      return unchanged ? current : next;
-    });
+    const previous = seenTimestampsRef.current;
+    const next: Record<string, string> = {};
+    for (const message of messages) {
+      if (message.metadata?.created_at || message.metadata?.seizu_persisted)
+        continue;
+      next[message.id] = previous[message.id] ?? now;
+    }
+    seenTimestampsRef.current = next;
+    return next;
   }, [messages]);
   const messageTime = useCallback(
     (message: SeizuChatMessage): string =>
@@ -1410,33 +1405,43 @@ export default function ChatInterface() {
     loading: modelProfilesLoading,
     error: modelProfilesError,
   } = useSelectableModelProfiles(sessionsFeedEnabled);
-  const [landingProfileId, setLandingProfileId] = useState('');
-  const [landingReasoningEffort, setLandingReasoningEffort] = useState<
-    ReasoningEffort | ''
-  >('');
+  // What the landing will ask with. Until the user picks, this is the account
+  // default — which arrives with the profile list, after the landing has
+  // rendered. Falling back to it here rather than writing it into state from
+  // an effect keeps one source of truth for what is selected.
+  const [landingPick, setLandingPick] = useState<{
+    profileId: string;
+    reasoningEffort: ReasoningEffort;
+  } | null>(null);
+  const landingProfileId = landingPick
+    ? landingPick.profileId
+    : (defaultProfileId ?? '');
+  const landingReasoningEffort: ReasoningEffort | '' = landingPick
+    ? landingPick.reasoningEffort
+    : defaultProfileId
+      ? (modelProfiles.find((item) => item.profile_id === defaultProfileId)
+          ?.default_reasoning_effort ?? 'medium')
+      : '';
   const [profileUpdateError, setProfileUpdateError] = useState<string | null>(
     null,
   );
 
-  useEffect(() => {
-    if (!landingProfileId && defaultProfileId) {
-      const profile = modelProfiles.find(
-        (item) => item.profile_id === defaultProfileId,
-      );
-      setLandingProfileId(defaultProfileId);
-      setLandingReasoningEffort(profile?.default_reasoning_effort ?? 'medium');
-    }
-  }, [defaultProfileId, landingProfileId, modelProfiles]);
-
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [historyLoading, setHistoryLoading] = useState(true);
-  const [historyPolling, setHistoryPolling] = useState(false);
+  // A route thread id a probe has established does not exist, or is not this
+  // user's. Written only from that probe's result.
+  const [missingThreadId, setMissingThreadId] = useState<string | null>(null);
+  // Where the history load for a thread got to. Absent, or for another thread,
+  // means it is still loading — so nothing has to raise a flag on the way into
+  // the effect, and switching conversations cannot leave one raised for a
+  // conversation nobody is looking at.
+  const [historyState, setHistoryState] = useState<{
+    threadId: string;
+    polling: boolean;
+  } | null>(null);
   // The stored id is written, not read: a visit to /app/chat is the landing, not
   // a resumed conversation.
   const { panelOpen, setPanelOpen, setStoredActiveSessionId } =
     useChatLocalStorage();
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const [sessionNotFound, setSessionNotFound] = useState(false);
   const [autoTitleError, setAutoTitleError] = useState<string | null>(null);
   // A Stop the server never confirmed. Worth saying out loud: the reader stops
   // either way, so the UI would otherwise look exactly as if it had worked
@@ -1478,13 +1483,30 @@ export default function ChatInterface() {
     threadId: string;
     text: string;
   } | null>(null);
+
+  // The conversation on screen is the one in the URL. Every switch navigates,
+  // so the URL is the one source of truth for which conversation this is —
+  // rather than a second copy in state that an effect had to keep in step,
+  // which is what made back/forward and a freshly admitted turn fight over it.
+  //
+  // The exception is the window between admitting the landing's first turn and
+  // the route committing: `pendingAttach` already marks exactly that window,
+  // and clearing the thread inside it unkeys the chat about to read the turn.
+  const sessionNotFound =
+    routeThreadId !== undefined && missingThreadId === routeThreadId;
+  const activeThreadId = sessionNotFound
+    ? null
+    : (routeThreadId ??
+      (pendingAttach !== null ? pendingAttach.threadId : null));
+
   const [creatingSession, setCreatingSession] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
   // A session created in this tab. It cannot have a turn that predates this
   // page view, so it is the one thread the reattach probe must never run
-  // against — see the `resume` flag below.
-  const createdHereRef = useRef<string | null>(null);
+  // against — see the `resume` flag below. State rather than a ref because
+  // `historyLoading` is derived from it during render.
+  const [createdHere, setCreatedHere] = useState<string | null>(null);
   const autoTitleAttemptRef = useRef<string | null>(null);
   const messagesRef = useRef<SeizuChatMessage[]>([]);
   const setMessagesRef = useRef<
@@ -1501,87 +1523,50 @@ export default function ChatInterface() {
   // resumeStream comes back from useChat, which is declared after the onFinish
   // callback that needs it.
   const resumeStreamRef = useRef<() => Promise<void>>(() => Promise.resolve());
-  const [
-    pendingContinuationTargetMessageId,
-    setPendingContinuationTargetMessageId,
-  ] = useState<string | null>(null);
+  // The "continue this answer" request in flight, and the thread it belongs
+  // to: switching threads drops it by being read past rather than through an
+  // effect that clears it a render after the new thread is on screen.
+  const [pendingContinuation, setPendingContinuation] = useState<{
+    threadId: string | null;
+    messageId: string;
+  } | null>(null);
+  const pendingContinuationTargetMessageId =
+    pendingContinuation !== null &&
+    pendingContinuation.threadId === activeThreadId
+      ? pendingContinuation.messageId
+      : null;
+  const clearPendingContinuation = (messageId: string) =>
+    setPendingContinuation((current) =>
+      current !== null && current.messageId === messageId ? null : current,
+    );
 
+  // Confirm a route thread the sessions list does not carry. `getSession`
+  // upserts what it finds, so a success needs no state of its own; only a
+  // conversation that turns out not to exist does.
   useEffect(() => {
-    setPendingContinuationTargetMessageId(null);
-  }, [activeThreadId]);
+    if (sessionsLoading || !sessionsFeedEnabled || sessionsError)
+      return undefined;
+    if (!routeThreadId) return undefined;
+    if (sessions.some((session) => session.thread_id === routeThreadId)) {
+      setStoredActiveSessionId(routeThreadId);
+      return undefined;
+    }
 
-  // Keep the selected session in sync with the URL.
-  useEffect(() => {
-    if (sessionsLoading || !sessionsFeedEnabled) return;
-    if (sessionsError) return;
     let cancelled = false;
-    setSessionNotFound((current) => (current ? false : current));
-
-    if (routeThreadId) {
-      const knownSession = sessions.find((s) => s.thread_id === routeThreadId);
-      if (knownSession) {
-        if (activeThreadId !== knownSession.thread_id) {
-          setMessagesRef.current([]);
-          setHistoryLoading(true);
-          setActiveThreadId(knownSession.thread_id);
-          setStoredActiveSessionId(knownSession.thread_id);
-        }
-      } else {
-        void getSession(routeThreadId)
-          .then((session) => {
-            if (cancelled) return;
-            if (session) {
-              if (activeThreadId !== session.thread_id) {
-                setMessagesRef.current([]);
-                setHistoryLoading(true);
-                setActiveThreadId(session.thread_id);
-                setStoredActiveSessionId(session.thread_id);
-              }
-            } else {
-              if (activeThreadId !== null) {
-                setActiveThreadId(null);
-                setMessagesRef.current([]);
-              }
-              setHistoryLoading((current) => (current ? false : current));
-              setSessionNotFound(true);
-            }
-          })
-          .catch(() => {
-            if (cancelled) return;
-            if (activeThreadId !== null) {
-              setActiveThreadId(null);
-              setMessagesRef.current([]);
-            }
-            setHistoryLoading((current) => (current ? false : current));
-            setSessionNotFound(true);
-          });
-      }
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    // No thread in the URL: this is the landing, and it stays that way. Neither
-    // restoring the last conversation nor minting an empty one — a session is
-    // created by asking a question, so the sessions list is a list of questions
-    // that were actually asked.
-    //
-    // Except while an admitted turn is waiting to be attached to.
-    // `handleStartSession` sets the thread and navigates together, and the route
-    // can land a commit later; clearing the thread in that window unkeys the
-    // chat that is about to read the turn.
-    if (pendingAttach === null && activeThreadId !== null) {
-      setActiveThreadId(null);
-      setMessagesRef.current([]);
-    }
-    setHistoryLoading((current) => (current ? false : current));
+    void getSession(routeThreadId)
+      .then((session) => {
+        if (cancelled) return;
+        if (session) setStoredActiveSessionId(session.thread_id);
+        else setMissingThreadId(routeThreadId);
+      })
+      .catch(() => {
+        if (!cancelled) setMissingThreadId(routeThreadId);
+      });
     return () => {
       cancelled = true;
     };
   }, [
     routeThreadId,
-    activeThreadId,
-    pendingAttach,
     sessionsLoading,
     sessionsFeedEnabled,
     sessionsError,
@@ -1590,10 +1575,22 @@ export default function ChatInterface() {
     setStoredActiveSessionId,
   ]);
 
+  // Derived from where the load for *this* thread got to, so switching
+  // conversations is loading again by definition.
+  const historySettled =
+    historyState !== null && historyState.threadId === activeThreadId;
+  const historyLoading =
+    activeThreadId !== null &&
+    sessionsFeedEnabled &&
+    !historySettled &&
+    // A session created here has nothing on the server this page is missing.
+    createdHere !== activeThreadId;
+  const historyPolling = historySettled ? historyState.polling : false;
+
   // Load history whenever the active session changes.
   useEffect(() => {
     if (!activeThreadId || !sessionsFeedEnabled) return;
-    if (createdHereRef.current === activeThreadId) {
+    if (createdHere === activeThreadId) {
       // A session created in this tab, whose first turn this page is about to
       // read from the stream. There is nothing on the server it does not
       // already have, and fetching anyway is what took the answer away:
@@ -1601,13 +1598,14 @@ export default function ChatInterface() {
       // arrived between the request and its answer was overwritten -- and
       // gating the attach on the fetch instead made the attach wait on a
       // request with no error path at all.
-      setHistoryLoading(false);
+      //
+      // `handleStartSession` already recorded the load as settled for this
+      // thread, so there is nothing to lower here either.
       return;
     }
     let cancelled = false;
     let pollTimer: number | undefined;
     let pollAttempts = 0;
-    setHistoryPolling(false);
 
     const applyHistory = (history: SeizuChatMessage[]) => {
       const currentMessages = messagesRef.current;
@@ -1632,24 +1630,20 @@ export default function ChatInterface() {
         .then((history) => {
           if (cancelled) return;
           applyHistory(history);
-          setHistoryLoading(false);
-          if (
+          const polling =
             shouldPollChatHistory(history) &&
-            pollAttempts < CHAT_HISTORY_POLL_MAX_ATTEMPTS
-          ) {
+            pollAttempts < CHAT_HISTORY_POLL_MAX_ATTEMPTS;
+          setHistoryState({ threadId: activeThreadId, polling });
+          if (polling) {
             pollAttempts += 1;
-            setHistoryPolling(true);
             pollTimer = window.setTimeout(
               loadHistory,
               CHAT_HISTORY_POLL_INTERVAL_MS,
             );
-          } else {
-            setHistoryPolling(false);
           }
         });
     };
 
-    setHistoryLoading(true);
     loadHistory();
     return () => {
       cancelled = true;
@@ -1737,11 +1731,9 @@ export default function ChatInterface() {
       // The session is no longer newborn: it has a finished turn, so returning
       // to it later has something to reattach to and the probe is welcome again.
       // Held only for the first turn, which is the one it would have raced.
-      createdHereRef.current = null;
+      setCreatedHere(null);
       if (message.role === 'assistant') {
-        setPendingContinuationTargetMessageId((current) =>
-          current === message.id ? null : current,
-        );
+        clearPendingContinuation(message.id);
       }
       if (isDisconnect) {
         // The turn is still running on the server; only our connection to it
@@ -1904,20 +1896,20 @@ export default function ChatInterface() {
         ? `${chatSummary.firstUserText.slice(0, MAX_SESSION_TITLE_LENGTH - 1).trimEnd()}…`
         : chatSummary.firstUserText;
     autoTitleAttemptRef.current = activeThreadId;
-    setAutoTitleError(null);
-    void updateSession(activeThreadId, title).catch(() => {
-      autoTitleAttemptRef.current = null;
-      setAutoTitleError('Failed to name this session automatically.');
-    });
+    void updateSession(activeThreadId, title)
+      // Cleared on success rather than on the way in: the banner is about the
+      // last attempt, and there is nothing to report until one has finished.
+      .then(() => setAutoTitleError(null))
+      .catch(() => {
+        autoTitleAttemptRef.current = null;
+        setAutoTitleError('Failed to name this session automatically.');
+      });
   }, [chatSummary.firstUserText, activeSession, activeThreadId, updateSession]);
 
   const handleSelectSession = useCallback(
     (threadId: string) => {
       if (threadId === activeThreadId) return;
-      setActiveThreadId(threadId);
       setMessages([]);
-      setHistoryLoading(true);
-      setSessionNotFound(false);
       setAutoTitleError(null);
       setStoredActiveSessionId(threadId);
       navigate(chatSessionPath(threadId));
@@ -1925,14 +1917,11 @@ export default function ChatInterface() {
     [activeThreadId, navigate, setMessages, setStoredActiveSessionId],
   );
 
-  // No API call: "new session" is the landing, and the session is created by the
-  // question. It does not clear `activeThreadId` either — the URL-sync effect
-  // owns that, and a thread cleared here while the route still named it made
-  // that effect re-adopt the session, refetch its history and show it again on
-  // the way out (spinner, old conversation, then the landing).
+  // No API call: "new session" is the landing, and the session is created by
+  // the question. Which conversation is on screen follows the route, so
+  // navigating is the whole of it.
   const handleNewSession = useCallback(() => {
     setMessages([]);
-    setSessionNotFound(false);
     setAutoTitleError(null);
     setPendingAttach(null);
     navigate(CHAT_LANDING_PATH);
@@ -1962,11 +1951,11 @@ export default function ChatInterface() {
         // throws, the turn does not exist and the user still has their text.
         await transport.startTurn(session.thread_id, text);
         setMessages([]);
-        setHistoryLoading(false);
-        setSessionNotFound(false);
         setAutoTitleError(null);
-        createdHereRef.current = session.thread_id;
-        setActiveThreadId(session.thread_id);
+        setCreatedHere(session.thread_id);
+        // Nothing on the server this page does not already have, so its
+        // history is settled the moment the session exists.
+        setHistoryState({ threadId: session.thread_id, polling: false });
         setStoredActiveSessionId(session.thread_id);
         setPendingAttach({ threadId: session.thread_id, text });
         navigate(chatSessionPath(session.thread_id));
@@ -2007,8 +1996,7 @@ export default function ChatInterface() {
 
   const handleLandingProfileChange = useCallback(
     (profileId: string, reasoningEffort: ReasoningEffort) => {
-      setLandingProfileId(profileId);
-      setLandingReasoningEffort(reasoningEffort);
+      setLandingPick({ profileId, reasoningEffort });
     },
     [],
   );
@@ -2021,16 +2009,12 @@ export default function ChatInterface() {
       const remaining = sessions.filter((s) => s.thread_id !== threadId);
       if (remaining.length > 0) {
         const next = remaining[0];
-        setActiveThreadId(next.thread_id);
         setMessages([]);
-        setHistoryLoading(true);
         setAutoTitleError(null);
         setStoredActiveSessionId(next.thread_id);
         navigate(chatSessionPath(next.thread_id), { replace: true });
       } else {
-        setActiveThreadId(null);
         setMessages([]);
-        setHistoryLoading(false);
         setAutoTitleError(null);
         navigate(CHAT_LANDING_PATH, { replace: true });
       }
@@ -2067,9 +2051,15 @@ export default function ChatInterface() {
     useFeature('chat_elicitation') ? activeThreadId : null,
     busy,
   );
+  // Read off the instance at call time rather than handed the value this
+  // render destructured: the URL-linked resume below fires from an effect on
+  // the first commit for a linked thread, before anything has re-rendered.
+  const sendResumeMessage = useCallback<
+    Parameters<typeof useChatHumanInputResume>[1]
+  >((message, options) => chat.sendMessage(message, options), [chat]);
   const resumeHumanInput = useChatHumanInputResume(
     activeThreadId,
-    sendMessage,
+    sendResumeMessage,
     touchSession,
   );
 
@@ -2205,7 +2195,10 @@ export default function ChatInterface() {
   const handleLoadMore = useCallback(
     (message: SeizuChatMessage) => {
       if (!activeThreadId || busy) return;
-      setPendingContinuationTargetMessageId(message.id);
+      setPendingContinuation({
+        threadId: activeThreadId,
+        messageId: message.id,
+      });
       touchSession(activeThreadId);
       void Promise.resolve(
         sendMessage(undefined, {
@@ -2215,9 +2208,7 @@ export default function ChatInterface() {
           },
         }),
       ).catch(() => {
-        setPendingContinuationTargetMessageId((current) =>
-          current === message.id ? null : current,
-        );
+        clearPendingContinuation(message.id);
       });
     },
     [activeThreadId, busy, sendMessage, touchSession],

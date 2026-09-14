@@ -1,12 +1,5 @@
-import {
-  useState,
-  useEffect,
-  useLayoutEffect,
-  useCallback,
-  useMemo,
-  useRef,
-} from 'react';
-import { Helmet } from 'react-helmet';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import PageTitle from 'src/components/PageTitle';
 import {
   Box,
   Collapse,
@@ -42,6 +35,13 @@ interface ReportViewProps {
   report: Report;
   title?: string;
   showTitle?: boolean;
+  /**
+   * What the browser tab shows, without the " | Seizu" suffix. Defaults to the
+   * report's own title; a caller that frames the report differently (one
+   * specific version) says so here rather than mounting a second PageTitle, of
+   * which only one may exist.
+   */
+  documentTitle?: string;
   boxSx?: object;
   queryCapabilities?: Record<string, string>;
   toolbarActions?: (controls: RefreshControls) => React.ReactNode;
@@ -64,10 +64,36 @@ function inputWidth(size?: number) {
  */
 const STICKY_TOOLBAR_CONTENT_GAP = 16;
 
+/** The values a report's inputs start at: the query string, else the declared default. */
+function buildInitialVarData(
+  report: Report,
+): Record<string, InputValue | undefined> {
+  const values: Record<string, InputValue | undefined> = {};
+  report.inputs?.forEach((input) => {
+    const inputValue = getQueryStringValue(input.input_id);
+    const scalarInputValue = Array.isArray(inputValue)
+      ? inputValue.find((value): value is string => value !== null)
+      : inputValue;
+    if (typeof scalarInputValue === 'string') {
+      // TODO(ryan-lane): Figure out a way to pass the label along with the value in the param
+      values[input.input_id] = {
+        label: scalarInputValue,
+        value: scalarInputValue,
+      };
+    } else if (input.default !== undefined) {
+      values[input.input_id] = input.default;
+    } else {
+      values[input.input_id] = undefined;
+    }
+  });
+  return values;
+}
+
 function ReportView({
   report,
   title,
   showTitle = false,
+  documentTitle,
   boxSx = { minHeight: '100%', pb: 3 },
   queryCapabilities,
   toolbarActions,
@@ -75,6 +101,7 @@ function ReportView({
   onRefreshCapabilities,
 }: ReportViewProps) {
   const displayTitle = title ?? report.name;
+  const tabTitle = documentTitle ?? displayTitle;
   const reportQueries = useMemo(() => report.queries ?? {}, [report]);
   const reportRows = Array.isArray(report.rows) ? report.rows : [];
   const hasInvalidRows = !Array.isArray(report.rows);
@@ -90,80 +117,83 @@ function ReportView({
     (path: string): string | undefined => capabilities[path],
     [capabilities],
   );
-  const [varData, setVarData] = useState<
-    Record<string, InputValue | undefined>
-  >({});
-  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  // The inputs a report starts with are computed from the report and the
+  // query string, not copied into state by an effect: a report that changes
+  // takes its own defaults by being read past, rather than rendering the
+  // previous report's values for a frame first.
+  const initialVarData = useMemo(() => buildInitialVarData(report), [report]);
+  const [editedVarData, setEditedVarData] = useState<{
+    report: Report;
+    values: Record<string, InputValue | undefined>;
+  } | null>(null);
+  const varData =
+    editedVarData !== null && editedVarData.report === report
+      ? editedVarData.values
+      : initialVarData;
+  const setVarData = useCallback(
+    (values: Record<string, InputValue | undefined>) =>
+      setEditedVarData({ report, values }),
+    [report],
+  );
   const [toolbarHeight, setToolbarHeight] = useState(64);
   const [collapsedRows, setCollapsedRows] = useState<Record<number, boolean>>(
     {},
   );
 
-  // Track refresh state for decoupled data fetching
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [refreshedAt, setRefreshedAt] = useState<Date | undefined>(undefined);
-  // True while waiting for onRefreshCapabilities to deliver new queryCapabilities
-  const pendingTokenRefreshRef = useRef(false);
-  // Tracks whether queryCapabilities has been seen for the first time on this mount
-  const initializedRef = useRef(false);
+  // What the last seen capability set was, when it arrived, and how many
+  // forced re-runs have been issued — one value, because the three only ever
+  // change together.
+  const [refreshState, setRefreshState] = useState<{
+    seen: Record<string, string> | undefined;
+    at: Date | undefined;
+    key: number;
+    awaitingTokens: boolean;
+  }>({ seen: undefined, at: undefined, key: 0, awaitingTokens: false });
 
-  // Watch for queryCapabilities arriving or changing.
-  // On initial arrival: record the load time.
-  // On subsequent changes (token expiry recovery): increment refreshKey so panels
-  // re-render with the new tokens and re-run their queries.
-  useEffect(() => {
-    if (queryCapabilities === undefined) return;
+  // Adjusted during render rather than from an effect: this is state derived
+  // from an input that changed, and React re-runs the component with the new
+  // state before committing, so it costs no extra paint. The updater is pure,
+  // so a second invocation (StrictMode, a replayed render) is a no-op rather
+  // than a second forced re-run.
+  if (
+    queryCapabilities !== undefined &&
+    queryCapabilities !== refreshState.seen
+  ) {
+    setRefreshState((previous) => ({
+      seen: queryCapabilities,
+      at: new Date(),
+      // Not the first arrival, and a panel asked for new tokens: bump the key
+      // so every panel re-runs its query against them.
+      key:
+        previous.at !== undefined && previous.awaitingTokens
+          ? previous.key + 1
+          : previous.key,
+      awaitingTokens: false,
+    }));
+  }
 
-    if (!initializedRef.current) {
-      initializedRef.current = true;
-      setRefreshedAt(new Date());
-      return;
-    }
-
-    if (pendingTokenRefreshRef.current) {
-      pendingTokenRefreshRef.current = false;
-      setRefreshKey((k) => k + 1);
-    }
-    setRefreshedAt(new Date());
-  }, [queryCapabilities]);
+  const refreshKey = refreshState.key;
+  const refreshedAt = refreshState.at;
 
   const handleRefresh = useCallback(() => {
-    setRefreshKey((k) => k + 1);
-    setRefreshedAt(new Date());
+    setRefreshState((previous) => ({
+      ...previous,
+      at: new Date(),
+      key: previous.key + 1,
+    }));
   }, []);
 
   // Called by any panel that receives a token_expired response.
-  // Triggers a capabilities re-fetch; when the new capabilities arrive the
-  // useEffect above will increment refreshKey so all panels retry.
+  // Triggers a capabilities re-fetch; when the new capabilities arrive, the
+  // watch above bumps refreshKey so all panels retry.
   const onTokenExpired = useCallback(() => {
-    if (pendingTokenRefreshRef.current) return;
-    pendingTokenRefreshRef.current = true;
+    setRefreshState((previous) =>
+      previous.awaitingTokens
+        ? previous
+        : { ...previous, awaitingTokens: true },
+    );
     onRefreshCapabilities?.();
   }, [onRefreshCapabilities]);
-
-  useEffect(() => {
-    const initialVarState: Record<string, InputValue | undefined> = {};
-    if (report.inputs) {
-      report.inputs.forEach((input) => {
-        const inputValue = getQueryStringValue(input.input_id);
-        const scalarInputValue = Array.isArray(inputValue)
-          ? inputValue.find((value): value is string => value !== null)
-          : inputValue;
-        if (typeof scalarInputValue === 'string') {
-          // TODO(ryan-lane): Figure out a way to pass the label along with the value in the param
-          initialVarState[input.input_id] = {
-            label: scalarInputValue,
-            value: scalarInputValue,
-          };
-        } else if (input.default !== undefined) {
-          initialVarState[input.input_id] = input.default;
-        } else {
-          initialVarState[input.input_id] = undefined;
-        }
-      });
-    }
-    setVarData(initialVarState);
-  }, [report]);
 
   const inputControls: React.ReactNode[] = [];
   if (report.inputs) {
@@ -240,23 +270,19 @@ function ReportView({
   const hasToolbarContent = hasHeaderRow || hasInputsRow;
   const isSticky = stickyToolbar && hasToolbarContent;
 
-  // Layout effect, not a plain effect: the spacer that reserves room for the
-  // fixed toolbar must be the right height on the first paint, or the first row
-  // of content renders clipped for a frame.
-  useLayoutEffect(() => {
-    if (!isSticky || toolbarRef.current === null) return undefined;
-
-    const updateToolbarHeight = () => {
-      setToolbarHeight(toolbarRef.current?.offsetHeight ?? 64);
-    };
-
-    updateToolbarHeight();
+  // A callback ref rather than a layout effect: the spacer that reserves room
+  // for the fixed toolbar must be the right height on the first paint, and a
+  // ref callback runs at the same point in the commit without measuring from
+  // inside an effect. React 19 calls the returned cleanup when the node goes.
+  const toolbarRef = useCallback((node: HTMLDivElement | null) => {
+    if (node === null) return undefined;
+    const measure = () => setToolbarHeight(node.offsetHeight);
+    measure();
     if (typeof ResizeObserver === 'undefined') return undefined;
-
-    const observer = new ResizeObserver(updateToolbarHeight);
-    observer.observe(toolbarRef.current);
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
     return () => observer.disconnect();
-  }, [isSticky, inputControls.length, toolbarActions]);
+  }, []);
 
   // Tick every 30 s so the relative "Updated X mins ago" label stays accurate.
   const [now, setNow] = useState(() => Date.now());
@@ -485,11 +511,7 @@ function ReportView({
 
   return (
     <>
-      {displayTitle && (
-        <Helmet>
-          <title>{displayTitle} | Seizu</title>
-        </Helmet>
-      )}
+      {tabTitle && <PageTitle>{tabTitle} | Seizu</PageTitle>}
       <Box sx={boxSx}>
         {hasToolbarContent && toolbar}
         {isSticky && (

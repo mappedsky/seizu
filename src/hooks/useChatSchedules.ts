@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { resourceKey, useAsyncResource } from 'src/hooks/useAsyncResource';
 import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
 import { ScheduleSpec } from 'src/scheduleSpec';
 
@@ -82,13 +83,18 @@ export function useChatSchedules(
 } {
   const { checkAuthReady, authHeaders } = useAuthHeaders();
   const [schedules, setSchedules] = useState<ScheduledChat[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const all = options?.all === true;
+  // Which question has been answered, rather than a flag raised on the way
+  // into the effect: asking a different one (the all-users toggle) is loading
+  // again because the key moved, not because something set it.
+  const requestKey = resourceKey('chat-schedules', all);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const loading = enabled && loadedKey !== requestKey;
 
   const refresh = useCallback(async () => {
     if (!checkAuthReady()) {
-      setLoading(false);
+      setLoadedKey(requestKey);
       return;
     }
     try {
@@ -103,17 +109,13 @@ export function useChatSchedules(
     } catch {
       setError('Failed to load scheduled chats.');
     } finally {
-      setLoading(false);
+      setLoadedKey(requestKey);
     }
-  }, [authHeaders, checkAuthReady, all]);
+  }, [authHeaders, checkAuthReady, all, requestKey]);
 
   useEffect(() => {
-    if (enabled) {
-      setLoading(true);
-      void refresh();
-    } else {
-      setLoading(false);
-    }
+    if (!enabled) return;
+    void refresh();
   }, [enabled, refresh]);
 
   const createSchedule = useCallback(
@@ -199,40 +201,33 @@ export function useChatScheduleVersions(scheduleId: string | null): {
   loading: boolean;
   error: string | null;
 } {
-  const { checkAuthReady, authHeaders } = useAuthHeaders();
-  const [versions, setVersions] = useState<ScheduledChatVersion[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { authReady, authHeaders } = useAuthHeaders();
 
-  useEffect(() => {
-    let cancelled = false;
-    if (!scheduleId || !checkAuthReady()) {
-      setLoading(false);
-      return undefined;
-    }
-    setLoading(true);
-    fetch(`/api/v1/chat/schedules/${encodeURIComponent(scheduleId)}/versions`, {
-      headers: authHeaders(),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error('Failed to fetch versions');
-        return res.json() as Promise<{ versions: ScheduledChatVersion[] }>;
-      })
-      .then((data) => {
-        if (!cancelled) setVersions(data.versions);
-      })
-      .catch(() => {
-        if (!cancelled) setError('Failed to load version history.');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [scheduleId, authHeaders, checkAuthReady]);
+  const {
+    data: versions,
+    loading,
+    error,
+  } = useAsyncResource<ScheduledChatVersion[]>(
+    scheduleId && authReady
+      ? resourceKey('chat-schedule-versions', scheduleId)
+      : null,
+    async () => {
+      const res = await fetch(
+        `/api/v1/chat/schedules/${encodeURIComponent(scheduleId as string)}/versions`,
+        { headers: authHeaders() },
+      );
+      if (!res.ok) throw new Error('Failed to fetch versions');
+      const data = (await res.json()) as { versions: ScheduledChatVersion[] };
+      return data.versions;
+    },
+    [],
+  );
 
-  return { versions, loading, error };
+  return {
+    versions,
+    loading,
+    error: error ? 'Failed to load version history.' : null,
+  };
 }
 
 export function useScheduledChatSessions(): (
@@ -305,12 +300,14 @@ export function useChatSchedule(scheduleId: string | null): {
 } {
   const { checkAuthReady, authHeaders } = useAuthHeaders();
   const [schedule, setSchedule] = useState<ScheduledChat | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestKey = resourceKey('chat-schedule', scheduleId);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const loading = loadedKey !== requestKey;
 
   const refresh = useCallback(async () => {
     if (!scheduleId || !checkAuthReady()) {
-      setLoading(false);
+      setLoadedKey(requestKey);
       return;
     }
     try {
@@ -325,12 +322,11 @@ export function useChatSchedule(scheduleId: string | null): {
     } catch {
       setError('Failed to load scheduled chat.');
     } finally {
-      setLoading(false);
+      setLoadedKey(requestKey);
     }
-  }, [scheduleId, authHeaders, checkAuthReady]);
+  }, [scheduleId, authHeaders, checkAuthReady, requestKey]);
 
   useEffect(() => {
-    setLoading(true);
     void refresh();
   }, [refresh]);
 

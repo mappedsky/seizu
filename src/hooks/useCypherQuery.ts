@@ -1,4 +1,11 @@
-import { useState, useCallback, useContext, useEffect, useRef } from 'react';
+import {
+  useState,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+} from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
 import { usePermissionState } from 'src/hooks/usePermissions';
@@ -59,9 +66,65 @@ export interface RunOptions {
   force?: boolean;
 }
 
-interface PendingRun {
+const IDLE_STATE: QueryState = {
+  loading: false,
+  error: null,
+  records: undefined,
+  first: undefined,
+  warnings: [],
+  queryErrors: [],
+  tokenExpired: false,
+  historyId: null,
+};
+
+const DENIED_STATE: QueryState = {
+  ...IDLE_STATE,
+  error: new Error('You do not have permission to run this query.'),
+};
+
+/**
+ * One `run()`. The sequence number is what makes a repeat of the same query a
+ * new request, and what tells an arriving result whether it is still the
+ * answer to the question being asked.
+ *
+ * The query and the token are captured here rather than read from the render
+ * that happens to dispatch it. A request is for the cypher it was made
+ * against: a panel whose `cypher` prop changes without running again has not
+ * asked a new question, and the query console sets `cypher` to undefined when
+ * it switches to a history query, which resent the last request with no
+ * `query` field at all (a 422).
+ */
+interface QueryRequest {
+  seq: number;
+  cypher?: string;
+  reportToken?: string;
   params?: Record<string, unknown>;
   options?: RunOptions;
+}
+
+interface QueryResponsePayload {
+  error?: string;
+  code?: string;
+  errors?: string[];
+  warnings?: string[];
+  results?: QueryRecord[];
+  history_id?: string;
+}
+
+/**
+ * The state a request is in while it has no answer yet. Whatever the last
+ * answer held stays visible, so a refresh or a token retry does not flash the
+ * panel back to its skeleton.
+ */
+function pendingState(previous: QueryState | undefined): QueryState {
+  return {
+    ...(previous ?? IDLE_STATE),
+    loading: true,
+    error: null,
+    warnings: [],
+    queryErrors: [],
+    tokenExpired: false,
+  };
 }
 
 export function useLazyCypherQuery(
@@ -74,192 +137,150 @@ export function useLazyCypherQuery(
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
   const { hasPermission, loading: permissionsLoading } = usePermissionState();
-  const pendingRunRef = useRef<PendingRun | null>(null);
-  const [state, setState] = useState<QueryState>({
-    loading: false,
-    error: null,
-    records: undefined,
-    first: undefined,
-    warnings: [],
-    queryErrors: [],
-    tokenExpired: false,
-    historyId: null,
-  });
+  // `run` records the request; the effect below is the only thing that starts
+  // a query. A run that arrives before the token or the permission set did
+  // used to be stashed in a ref and replayed by an effect calling `run` again,
+  // which meant the effect wrote query state on the way in.
+  const seqRef = useRef(0);
+  const [request, setRequest] = useState<QueryRequest | null>(null);
+  const [outcome, setOutcome] = useState<{
+    seq: number;
+    state: QueryState;
+  } | null>(null);
 
   const run = useCallback(
     (params?: Record<string, unknown>, options?: RunOptions) => {
       if (!cypher) return;
-      // When auth is required, wait until we have a token before querying.
-      if (auth_required && !accessToken) {
-        pendingRunRef.current = { params, options };
-        return;
-      }
-      if (permissionsLoading) {
-        pendingRunRef.current = { params, options };
-        return;
-      }
+      seqRef.current += 1;
+      setRequest({ seq: seqRef.current, cypher, reportToken, params, options });
+    },
+    [cypher, reportToken],
+  );
 
-      const requiredPermission = reportToken ? 'reports:read' : 'query:execute';
-      if (!hasPermission(requiredPermission)) {
-        setState({
-          loading: false,
-          error: new Error('You do not have permission to run this query.'),
-          records: undefined,
-          first: undefined,
-          warnings: [],
-          queryErrors: [],
-          tokenExpired: false,
-          historyId: null,
-        });
-        return;
-      }
+  // Read at dispatch rather than depended on: a token rotation must not resend
+  // every panel's query behind its back. What makes a waiting request runnable
+  // is `ready` below, which moves when the token first arrives.
+  const accessTokenRef = useRef(accessToken);
+  useEffect(() => {
+    accessTokenRef.current = accessToken;
+  });
 
-      // Serve from cache for report queries when not force-bypassed.
-      if (reportToken && !options?.force) {
-        const cached = readQueryCache(reportToken, params);
-        if (cached !== undefined) {
-          setState({
-            loading: false,
-            error: null,
-            records: cached,
-            first: cached[0],
-            warnings: [],
-            queryErrors: [],
-            tokenExpired: false,
-            historyId: null,
+  const ready = !(auth_required && !accessToken) && !permissionsLoading;
+  const permitted = hasPermission(
+    reportToken ? 'reports:read' : 'query:execute',
+  );
+  // A cache hit is an answer, not a fetch. Reading it here rather than in the
+  // effect is what keeps a revisited panel from rendering a skeleton first.
+  const cached =
+    request !== null &&
+    ready &&
+    permitted &&
+    request.reportToken &&
+    !request.options?.force
+      ? readQueryCache(request.reportToken, request.params)
+      : undefined;
+
+  useEffect(() => {
+    if (request === null || !ready || !permitted) return undefined;
+    if (cached !== undefined) return undefined;
+
+    const {
+      seq,
+      params,
+      cypher: requestCypher,
+      reportToken: requestToken,
+    } = request;
+    if (!requestCypher && !requestToken) return undefined;
+    let cancelled = false;
+    const settle = (state: QueryState) => {
+      if (!cancelled) setOutcome({ seq, state });
+    };
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (accessTokenRef.current) {
+      headers['Authorization'] = `Bearer ${accessTokenRef.current}`;
+    }
+
+    const endpoint = requestToken
+      ? '/api/v1/query/report'
+      : '/api/v1/query/adhoc';
+    const body = requestToken
+      ? { token: requestToken, params }
+      : { query: requestCypher, params };
+
+    fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    })
+      .then((res) => res.json())
+      .then((data: QueryResponsePayload) => {
+        const validationErrors = data.errors ?? [];
+        const validationWarnings = data.warnings ?? [];
+
+        if (data.error) {
+          if (data.code === 'token_expired') {
+            // Keep records/first from the previous answer so panels continue
+            // showing stale data while the token refresh and retry run.
+            if (cancelled) return;
+            setOutcome((previous) => ({
+              seq,
+              state: {
+                ...(previous?.state ?? IDLE_STATE),
+                loading: false,
+                error: null,
+                tokenExpired: true,
+              },
+            }));
+            return;
+          }
+          // Server or request-level error (HTTP 500, malformed request, etc.)
+          settle({ ...IDLE_STATE, error: new Error(data.error) });
+          return;
+        }
+
+        if (validationErrors.length > 0) {
+          // Query validation errors — the query was not executed.
+          settle({
+            ...IDLE_STATE,
+            warnings: validationWarnings,
+            queryErrors: validationErrors,
           });
           return;
         }
-      }
 
-      // Keep existing records visible while fetching so panels don't flash to skeleton
-      // while a token refresh / force-retry is in flight.
-      setState((prev) => ({
-        ...prev,
-        loading: true,
-        error: null,
-        warnings: [],
-        queryErrors: [],
-        tokenExpired: false,
-      }));
-
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
-      if (accessToken) {
-        headers['Authorization'] = `Bearer ${accessToken}`;
-      }
-
-      const endpoint = reportToken
-        ? '/api/v1/query/report'
-        : '/api/v1/query/adhoc';
-      const body = reportToken
-        ? { token: reportToken, params }
-        : { query: cypher, params };
-
-      fetch(endpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-      })
-        .then((res) => res.json())
-        .then(
-          (data: {
-            error?: string;
-            code?: string;
-            errors?: string[];
-            warnings?: string[];
-            results?: QueryRecord[];
-            history_id?: string;
-          }) => {
-            const validationErrors = data.errors ?? [];
-            const validationWarnings = data.warnings ?? [];
-
-            if (data.error) {
-              if (data.code === 'token_expired') {
-                // Keep records/first from previous state so panels continue showing stale data
-                // while the token refresh and retry are in flight.
-                setState((prev) => ({
-                  ...prev,
-                  loading: false,
-                  error: null,
-                  tokenExpired: true,
-                }));
-              } else {
-                // Server or request-level error (HTTP 500, malformed request, etc.)
-                setState({
-                  loading: false,
-                  error: new Error(data.error),
-                  records: undefined,
-                  first: undefined,
-                  warnings: [],
-                  queryErrors: [],
-                  tokenExpired: false,
-                  historyId: null,
-                });
-              }
-            } else if (validationErrors.length > 0) {
-              // Query validation errors — query was not executed
-              setState({
-                loading: false,
-                error: null,
-                records: undefined,
-                first: undefined,
-                warnings: validationWarnings,
-                queryErrors: validationErrors,
-                tokenExpired: false,
-                historyId: null,
-              });
-            } else {
-              const results = data.results ?? [];
-              if (reportToken) {
-                writeQueryCache(reportToken, params, results);
-              }
-              setState({
-                loading: false,
-                error: null,
-                records: results,
-                first: results[0],
-                warnings: validationWarnings,
-                queryErrors: [],
-                tokenExpired: false,
-                historyId: data.history_id ?? null,
-              });
-            }
-          },
-        )
-        .catch((err: Error) => {
-          setState({
-            loading: false,
-            error: err,
-            records: undefined,
-            first: undefined,
-            warnings: [],
-            queryErrors: [],
-            tokenExpired: false,
-            historyId: null,
-          });
+        const results = data.results ?? [];
+        if (requestToken) {
+          writeQueryCache(requestToken, params, results);
+        }
+        settle({
+          ...IDLE_STATE,
+          records: results,
+          first: results[0],
+          warnings: validationWarnings,
+          historyId: data.history_id ?? null,
         });
-    },
-    [
-      cypher,
-      reportToken,
-      accessToken,
-      auth_required,
-      permissionsLoading,
-      hasPermission,
-    ],
-  );
+      })
+      .catch((err: Error) => {
+        settle({ ...IDLE_STATE, error: err });
+      });
 
-  useEffect(() => {
-    const pendingRun = pendingRunRef.current;
-    if (!pendingRun) return;
-    if (auth_required && !accessToken) return;
-    if (permissionsLoading) return;
+    return () => {
+      cancelled = true;
+    };
+  }, [request, ready, permitted, cached]);
 
-    pendingRunRef.current = null;
-    run(pendingRun.params, pendingRun.options);
-  }, [accessToken, auth_required, permissionsLoading, run]);
+  const state = useMemo<QueryState>(() => {
+    if (request === null) return IDLE_STATE;
+    if (outcome !== null && outcome.seq === request.seq) return outcome.state;
+    if (ready && !permitted) return DENIED_STATE;
+    if (cached !== undefined) {
+      return { ...IDLE_STATE, records: cached, first: cached[0] };
+    }
+    return pendingState(outcome?.state);
+  }, [request, outcome, ready, permitted, cached]);
 
   return [run, state];
 }
@@ -271,140 +292,93 @@ export function useLazyHistoryQuery(): [
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
   const { hasPermission, loading: permissionsLoading } = usePermissionState();
-  const pendingHistoryIdRef = useRef<string | null>(null);
-  const [state, setState] = useState<QueryState>({
-    loading: false,
-    error: null,
-    records: undefined,
-    first: undefined,
-    warnings: [],
-    queryErrors: [],
-    tokenExpired: false,
-    historyId: null,
+  const seqRef = useRef(0);
+  const [request, setRequest] = useState<{
+    seq: number;
+    historyId: string;
+  } | null>(null);
+  const [outcome, setOutcome] = useState<{
+    seq: number;
+    state: QueryState;
+  } | null>(null);
+
+  const run = useCallback((historyId: string) => {
+    if (!historyId) return;
+    seqRef.current += 1;
+    setRequest({ seq: seqRef.current, historyId });
+  }, []);
+
+  // As above: read at dispatch, not depended on, so a token rotation does not
+  // resend the request.
+  const accessTokenRef = useRef(accessToken);
+  useEffect(() => {
+    accessTokenRef.current = accessToken;
   });
 
-  const run = useCallback(
-    (historyId: string) => {
-      if (!historyId) return;
-      if (auth_required && !accessToken) {
-        pendingHistoryIdRef.current = historyId;
-        return;
-      }
-      if (permissionsLoading) {
-        pendingHistoryIdRef.current = historyId;
-        return;
-      }
-
-      if (!hasPermission('query:execute')) {
-        setState({
-          loading: false,
-          error: new Error('You do not have permission to run this query.'),
-          records: undefined,
-          first: undefined,
-          warnings: [],
-          queryErrors: [],
-          tokenExpired: false,
-          historyId: null,
-        });
-        return;
-      }
-
-      setState((prev) => ({
-        ...prev,
-        loading: true,
-        error: null,
-        warnings: [],
-        queryErrors: [],
-        tokenExpired: false,
-      }));
-
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
-      if (accessToken) {
-        headers['Authorization'] = `Bearer ${accessToken}`;
-      }
-
-      fetch('/api/v1/query/history', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ history_id: historyId }),
-      })
-        .then((res) => res.json())
-        .then(
-          (data: {
-            error?: string;
-            code?: string;
-            errors?: string[];
-            warnings?: string[];
-            results?: QueryRecord[];
-            history_id?: string;
-          }) => {
-            const validationErrors = data.errors ?? [];
-            const validationWarnings = data.warnings ?? [];
-
-            if (data.error) {
-              setState({
-                loading: false,
-                error: new Error(data.error),
-                records: undefined,
-                first: undefined,
-                warnings: [],
-                queryErrors: [],
-                tokenExpired: false,
-                historyId: null,
-              });
-            } else if (validationErrors.length > 0) {
-              setState({
-                loading: false,
-                error: null,
-                records: undefined,
-                first: undefined,
-                warnings: validationWarnings,
-                queryErrors: validationErrors,
-                tokenExpired: false,
-                historyId: null,
-              });
-            } else {
-              const results = data.results ?? [];
-              setState({
-                loading: false,
-                error: null,
-                records: results,
-                first: results[0],
-                warnings: validationWarnings,
-                queryErrors: [],
-                tokenExpired: false,
-                historyId: null,
-              });
-            }
-          },
-        )
-        .catch((err: Error) => {
-          setState({
-            loading: false,
-            error: err,
-            records: undefined,
-            first: undefined,
-            warnings: [],
-            queryErrors: [],
-            tokenExpired: false,
-            historyId: null,
-          });
-        });
-    },
-    [accessToken, auth_required, permissionsLoading, hasPermission],
-  );
+  const ready = !(auth_required && !accessToken) && !permissionsLoading;
+  const permitted = hasPermission('query:execute');
 
   useEffect(() => {
-    const pendingHistoryId = pendingHistoryIdRef.current;
-    if (!pendingHistoryId) return;
-    if (auth_required && !accessToken) return;
-    if (permissionsLoading) return;
+    if (request === null || !ready || !permitted) return undefined;
 
-    pendingHistoryIdRef.current = null;
-    run(pendingHistoryId);
-  }, [accessToken, auth_required, permissionsLoading, run]);
+    const { seq, historyId } = request;
+    let cancelled = false;
+    const settle = (state: QueryState) => {
+      if (!cancelled) setOutcome({ seq, state });
+    };
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (accessTokenRef.current) {
+      headers['Authorization'] = `Bearer ${accessTokenRef.current}`;
+    }
+
+    fetch('/api/v1/query/history', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ history_id: historyId }),
+    })
+      .then((res) => res.json())
+      .then((data: QueryResponsePayload) => {
+        const validationErrors = data.errors ?? [];
+        const validationWarnings = data.warnings ?? [];
+
+        if (data.error) {
+          settle({ ...IDLE_STATE, error: new Error(data.error) });
+          return;
+        }
+        if (validationErrors.length > 0) {
+          settle({
+            ...IDLE_STATE,
+            warnings: validationWarnings,
+            queryErrors: validationErrors,
+          });
+          return;
+        }
+        const results = data.results ?? [];
+        settle({
+          ...IDLE_STATE,
+          records: results,
+          first: results[0],
+          warnings: validationWarnings,
+        });
+      })
+      .catch((err: Error) => {
+        settle({ ...IDLE_STATE, error: err });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [request, ready, permitted]);
+
+  const state = useMemo<QueryState>(() => {
+    if (request === null) return IDLE_STATE;
+    if (outcome !== null && outcome.seq === request.seq) return outcome.state;
+    if (ready && !permitted) return DENIED_STATE;
+    return pendingState(outcome?.state);
+  }, [request, outcome, ready, permitted]);
 
   return [run, state];
 }

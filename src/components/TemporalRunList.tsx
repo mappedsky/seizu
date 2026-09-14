@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Accordion,
   AccordionDetails,
@@ -216,11 +216,14 @@ function RunAccordion({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [canceling, setCanceling] = useState(false);
-  const [displayStatus, setDisplayStatus] = useState(run.status);
-
-  useEffect(() => {
-    setDisplayStatus(run.status);
-  }, [run.status]);
+  // Optimistic status after a cancel request, held only until the polled run
+  // reports something new. Carrying the status it was requested against is
+  // what retires it, rather than an effect overwriting it a render later.
+  const [cancelRequestedFor, setCancelRequestedFor] = useState<string | null>(
+    null,
+  );
+  const displayStatus =
+    cancelRequestedFor === run.status ? 'cancel_requested' : run.status;
 
   const handleExpand = (_event: unknown, expanded: boolean) => {
     if (!expanded || detail !== null || loading) return;
@@ -278,7 +281,7 @@ function RunAccordion({
               setCanceling(true);
               setError(null);
               cancelRun(run)
-                .then(() => setDisplayStatus('cancel_requested'))
+                .then(() => setCancelRequestedFor(run.status))
                 .catch(() => setError('Failed to cancel this waiting run.'))
                 .finally(() => setCanceling(false));
             }}

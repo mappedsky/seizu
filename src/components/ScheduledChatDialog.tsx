@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   Alert,
   Box,
@@ -53,7 +53,7 @@ function ScheduledChatDialog({
     defaultProfileId,
     loading: profilesLoading,
   } = useSelectableModelProfiles(open);
-  const [modelProfileId, setModelProfileId] = useState(
+  const [pickedProfileId, setPickedProfileId] = useState(
     initial?.model_profile_id ?? '',
   );
   const [triggerType, setTriggerType] = useState<'schedule' | 'watch_scans'>(
@@ -70,10 +70,10 @@ function ScheduledChatDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const syncValues = useSyncMetadataValues(open);
-  useEffect(() => {
-    if (!modelProfileId && defaultProfileId)
-      setModelProfileId(defaultProfileId);
-  }, [defaultProfileId, modelProfileId]);
+  // The account default arrives with the profile list, after this dialog has
+  // rendered. Falling back to it here rather than writing it into state from
+  // an effect keeps one source of truth for what is selected.
+  const modelProfileId = pickedProfileId || defaultProfileId || '';
 
   const updateWatchScan = (
     index: number,
@@ -166,7 +166,7 @@ function ScheduledChatDialog({
                     ? modelProfileId
                     : ''
                 }
-                onChange={(event) => setModelProfileId(event.target.value)}
+                onChange={(event) => setPickedProfileId(event.target.value)}
               >
                 {profiles.map((profile) => (
                   <MenuItem key={profile.profile_id} value={profile.profile_id}>

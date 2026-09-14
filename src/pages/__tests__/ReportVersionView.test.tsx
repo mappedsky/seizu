@@ -32,10 +32,6 @@ jest.mock('src/components/UserDisplay', () => ({
   default: ({ userId }: { userId: string }) => <>{userId}</>,
 }));
 
-jest.mock('react-helmet', () => ({
-  Helmet: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
-
 // Prevent ReportView's panel sub-components from making real HTTP calls.
 // Do NOT mock src/components/ReportView itself — that leaks into ReportView.test.tsx
 // which tests ReportView directly (Bun shares the module registry across files).

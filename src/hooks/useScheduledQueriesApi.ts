@@ -1,6 +1,7 @@
-import { useState, useEffect, useContext, useCallback } from 'react';
+import { useState, useContext, useCallback } from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
+import { resourceKey, useAsyncResource } from 'src/hooks/useAsyncResource';
 import { ScheduleSpec } from 'src/scheduleSpec';
 
 export interface ScheduledQueryParam {
@@ -127,34 +128,30 @@ export function useScheduledQueriesList(): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [scheduledQueries, setScheduledQueries] = useState<
-    ScheduledQueryItem[]
-  >([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    fetch('/api/v1/scheduled-queries', { headers: getApiHeaders(accessToken) })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load scheduled queries: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { scheduled_queries: ScheduledQueryItem[] }) => {
-        setScheduledQueries(data.scheduled_queries ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [accessToken, auth_required, tick]);
+  const {
+    data: scheduledQueries,
+    loading,
+    error,
+  } = useAsyncResource<ScheduledQueryItem[]>(
+    resourceKey('scheduled-queries', auth_required, accessToken, tick),
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const res = await fetch('/api/v1/scheduled-queries', {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load scheduled queries: ${res.status}`);
+          const data: { scheduled_queries: ScheduledQueryItem[] } =
+            await res.json();
+          return data.scheduled_queries ?? [];
+        },
+    [],
+  );
 
   return { scheduledQueries, loading, error, refresh };
 }
@@ -167,35 +164,28 @@ export function useScheduledQuery(id: string | null): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [query, setQuery] = useState<ScheduledQueryItem | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (!id) return;
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    fetch(`/api/v1/scheduled-queries/${id}`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load scheduled query: ${res.status}`);
-        return res.json();
-      })
-      .then((data: ScheduledQueryItem) => {
-        setQuery(data);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [id, accessToken, auth_required, tick]);
+  const {
+    data: query,
+    loading,
+    error,
+  } = useAsyncResource<ScheduledQueryItem | null>(
+    resourceKey('scheduled-query', id, auth_required, accessToken, tick),
+    !id || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(`/api/v1/scheduled-queries/${id}`, {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load scheduled query: ${res.status}`);
+          return (await res.json()) as ScheduledQueryItem;
+        },
+    null,
+  );
 
   return { query, loading, error, refresh };
 }
@@ -207,34 +197,31 @@ export function useScheduledQueryVersionsList(sqId: string | null): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [versions, setVersions] = useState<ScheduledQueryVersion[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    if (!sqId) return;
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    fetch(`/api/v1/scheduled-queries/${sqId}/versions`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(
-            `Failed to load scheduled query versions: ${res.status}`,
+  const {
+    data: versions,
+    loading,
+    error,
+  } = useAsyncResource<ScheduledQueryVersion[]>(
+    resourceKey('scheduled-query-versions', sqId, auth_required, accessToken),
+    !sqId || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(
+            `/api/v1/scheduled-queries/${sqId}/versions`,
+            {
+              headers: getApiHeaders(accessToken),
+            },
           );
-        return res.json();
-      })
-      .then((data: { versions: ScheduledQueryVersion[] }) => {
-        setVersions(data.versions ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [sqId, accessToken, auth_required]);
+          if (!res.ok)
+            throw new Error(
+              `Failed to load scheduled query versions: ${res.status}`,
+            );
+          const data: { versions: ScheduledQueryVersion[] } = await res.json();
+          return data.versions ?? [];
+        },
+    [],
+  );
 
   return { versions, loading, error };
 }
@@ -248,38 +235,31 @@ export function useScheduledQueryWorkflowRuns(
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [runs, setRuns] = useState<WorkflowRunSummary[] | null>(null);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    // Reset so a remount onto a different query doesn't show the previous
-    // query's runs while the new fetch is in flight.
-    setRuns(null);
-    setError(null);
-    if (!id || !enabled) return undefined;
-    if (auth_required && !accessToken) return undefined;
+  const active = Boolean(id) && enabled;
+  const { data, loading, error } = useAsyncResource<WorkflowRunSummary[]>(
+    active
+      ? resourceKey('workflow-runs', id, auth_required, accessToken)
+      : null,
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const res = await fetch(
+            `/api/v1/scheduled-queries/${encodeURIComponent(id as string)}/workflow-runs`,
+            { headers: getApiHeaders(accessToken) },
+          );
+          if (!res.ok)
+            throw new Error(`Failed to load workflow runs: ${res.status}`);
+          const body: { runs: WorkflowRunSummary[] } = await res.json();
+          return body.runs ?? [];
+        },
+    [],
+  );
 
-    let cancelled = false;
-    fetch(`/api/v1/scheduled-queries/${encodeURIComponent(id)}/workflow-runs`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load workflow runs: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { runs: WorkflowRunSummary[] }) => {
-        if (!cancelled) setRuns(data.runs ?? []);
-      })
-      .catch((err: Error) => {
-        if (!cancelled) setError(err);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [id, enabled, accessToken, auth_required]);
-
-  return { runs, error };
+  // `null` is this hook's "no answer yet", and it must not survive into the
+  // next question: remounting onto a different query showed the previous
+  // query's runs while the new fetch was in flight.
+  return { runs: active && !loading ? data : null, error };
 }
 
 export function useWorkflowRunDetail(): (

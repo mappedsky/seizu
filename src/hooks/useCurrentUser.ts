@@ -1,13 +1,7 @@
-import {
-  createContext,
-  createElement,
-  useState,
-  useEffect,
-  useContext,
-  ReactNode,
-} from 'react';
+import { createContext, createElement, useContext, ReactNode } from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
+import { resourceKey, useAsyncResource } from 'src/hooks/useAsyncResource';
 
 export interface CurrentUser {
   user_id: string;
@@ -48,53 +42,30 @@ function getApiHeaders(accessToken: string | null): Record<string, string> {
 function useLoadCurrentUserState(enabled: boolean = true): CurrentUserState {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
+  const waitingForToken = auth_required && !accessToken;
+  const { data, loading, error } = useAsyncResource<CurrentUser | null>(
+    resourceKey('me', enabled, auth_required, accessToken),
+    !enabled || waitingForToken
+      ? null
+      : async () => {
+          const res = await fetch('/api/v1/me', {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load current user: ${res.status}`);
+          const body: MeApiResponse = await res.json();
+          return { ...body.user, permissions: body.permissions };
+        },
+    null,
+  );
 
-    if (!enabled) {
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    if (auth_required && !accessToken) {
-      setCurrentUser(null);
-      setLoading(true);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setLoading(true);
-
-    fetch('/api/v1/me', { headers: getApiHeaders(accessToken) })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load current user: ${res.status}`);
-        return res.json();
-      })
-      .then((data: MeApiResponse) => {
-        if (!cancelled) {
-          setCurrentUser({ ...data.user, permissions: data.permissions });
-          setLoading(false);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCurrentUser(null);
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, accessToken, auth_required]);
-
-  return { currentUser, loading };
+  // A user the server would no longer confirm is not shown: losing the token,
+  // or failing to resolve it, means nobody rather than whoever was here last.
+  return {
+    currentUser: waitingForToken || error !== null ? null : data,
+    loading,
+  };
 }
 
 export function CurrentUserStateProvider({

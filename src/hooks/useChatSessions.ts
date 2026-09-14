@@ -53,12 +53,14 @@ export function useChatSessions(enabled: boolean): {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-  const [loading, setLoading] = useState(true);
+  // "A settled answer has arrived", not "a request is in flight": the only
+  // thing the old flag added was a write on the way into the effect.
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchSessions = useCallback(async () => {
     if (!checkAuthReady()) {
-      setLoading(false);
+      setLoaded(true);
       return;
     }
     try {
@@ -74,24 +76,21 @@ export function useChatSessions(enabled: boolean): {
     } catch {
       setError('Failed to load chat sessions.');
     } finally {
-      setLoading(false);
+      setLoaded(true);
     }
   }, [authHeaders, checkAuthReady]);
 
   useEffect(() => {
-    if (enabled) {
-      setLoading(true);
+    if (!enabled) return undefined;
+    void fetchSessions();
+    const handleFocus = () => {
       void fetchSessions();
-      const handleFocus = () => {
-        void fetchSessions();
-      };
-      window.addEventListener('focus', handleFocus);
-      return () => window.removeEventListener('focus', handleFocus);
-    } else {
-      setLoading(false);
-    }
-    return undefined;
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
   }, [enabled, fetchSessions]);
+
+  const loading = enabled && !loaded;
 
   const createSession = useCallback(
     async (

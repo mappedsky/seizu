@@ -1,12 +1,4 @@
-import {
-  useState,
-  useRef,
-  useEffect,
-  useMemo,
-  memo,
-  useCallback,
-  type Ref,
-} from 'react';
+import { useState, useRef, useMemo, memo, useCallback, type Ref } from 'react';
 import {
   Accordion,
   AccordionDetails,
@@ -465,17 +457,39 @@ interface InputEditorDialogProps {
   onSave: (input: ReportInput) => void;
 }
 
+/**
+ * The dialog shell. The form is mounted per open and keyed on the input, so
+ * its starting state is computed from that input rather than copied into state
+ * by an effect that runs after the first render has shown the previous one.
+ */
 function InputEditorDialog({
   open,
   input,
   onClose,
   onSave,
 }: InputEditorDialogProps) {
-  const [form, setForm] = useState<ReportInput>(emptyInput());
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      {open && (
+        <InputEditorForm
+          key={input?.input_id ?? '__new__'}
+          input={input}
+          onClose={onClose}
+          onSave={onSave}
+        />
+      )}
+    </Dialog>
+  );
+}
 
-  useEffect(() => {
-    setForm(input ? { ...input } : emptyInput());
-  }, [input, open]);
+function InputEditorForm({
+  input,
+  onClose,
+  onSave,
+}: Omit<InputEditorDialogProps, 'open'>) {
+  const [form, setForm] = useState<ReportInput>(() =>
+    input ? { ...input } : emptyInput(),
+  );
 
   function set<K extends keyof ReportInput>(key: K, value: ReportInput[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -496,7 +510,7 @@ function InputEditorDialog({
   const canSave = form.input_id.trim() !== '' && form.label.trim() !== '';
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+    <>
       <DialogTitle>{input ? 'Edit Input' : 'Add Input'}</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 1 }}>
@@ -603,7 +617,7 @@ function InputEditorDialog({
           Save Input
         </Button>
       </DialogActions>
-    </Dialog>
+    </>
   );
 }
 
@@ -730,12 +744,20 @@ const EditToolbar = memo(function EditToolbar({
   onCancel,
   onSave,
 }: EditToolbarProps) {
-  const [reportName, setReportName] = useState(initialReportName);
+  // The name as typed, held only while it is a draft of the name the report
+  // currently has. A save that renames the report supersedes the draft by
+  // being read past, rather than through an effect overwriting the field.
+  const [draftName, setDraftName] = useState<{
+    base: string;
+    value: string;
+  } | null>(null);
+  const reportName =
+    draftName !== null && draftName.base === initialReportName
+      ? draftName.value
+      : initialReportName;
+  const setReportName = (value: string) =>
+    setDraftName({ base: initialReportName, value });
   const [saveComment, setSaveComment] = useState('');
-
-  useEffect(() => {
-    setReportName(initialReportName);
-  }, [initialReportName]);
 
   return (
     <Box
@@ -842,18 +864,28 @@ const EditableRowCard = memo(function EditableRowCard({
   resolveQuery,
   allInputs,
 }: EditableRowCardProps) {
-  const [rowName, setRowName] = useState(row.name);
-
-  useEffect(() => {
-    setRowName(row.name);
-  }, [row._id, row.name]);
+  // As with the report name above: the draft is what is shown only while it
+  // is a draft of this row's current name.
+  const [draftName, setDraftName] = useState<{
+    rowId: string;
+    base: string;
+    value: string;
+  } | null>(null);
+  const rowName =
+    draftName !== null &&
+    draftName.rowId === row._id &&
+    draftName.base === row.name
+      ? draftName.value
+      : row.name;
+  const setRowName = (value: string) =>
+    setDraftName({ rowId: row._id, base: row.name, value });
 
   const commitRowName = () => {
     const trimmed = rowName.trim();
     if (trimmed && trimmed !== row.name) {
       onRename(row._id, trimmed);
     } else if (!trimmed) {
-      setRowName(row.name);
+      setDraftName(null);
     }
   };
 
@@ -1099,8 +1131,20 @@ function EditableReportView({
   );
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const toolbarRef = useRef<HTMLDivElement | null>(null);
   const [toolbarHeight, setToolbarHeight] = useState(72);
+  // A callback ref rather than an effect: the spacer that reserves room for
+  // the fixed toolbar must be the right height on the first paint, and a ref
+  // callback runs at the same point in the commit without measuring from
+  // inside an effect. React 19 calls the returned cleanup when the node goes.
+  const toolbarRef = useCallback((node: HTMLDivElement | null) => {
+    if (node === null) return undefined;
+    const measure = () => setToolbarHeight(node.offsetHeight);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
 
   // Panel editor dialog state
   const [editorOpen, setEditorOpen] = useState(false);
@@ -1118,21 +1162,6 @@ function EditableReportView({
   function updateNamedQueryDraft(key: string, value: string) {
     namedQueriesRef.current = { ...namedQueriesRef.current, [key]: value };
   }
-
-  useEffect(() => {
-    if (toolbarRef.current === null) return undefined;
-
-    const updateToolbarHeight = () => {
-      setToolbarHeight(toolbarRef.current?.offsetHeight ?? 72);
-    };
-
-    updateToolbarHeight();
-    if (typeof ResizeObserver === 'undefined') return undefined;
-
-    const observer = new ResizeObserver(updateToolbarHeight);
-    observer.observe(toolbarRef.current);
-    return () => observer.disconnect();
-  }, []);
 
   // ---------------------------------------------------------------------------
   // Row operations

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import {
   Accordion,
   AccordionDetails,
@@ -569,11 +569,9 @@ function ScheduledChatView() {
 
   return (
     <>
-      <Helmet>
-        <title>
-          {schedule ? `${schedule.name} | Seizu` : 'Scheduled Chat | Seizu'}
-        </title>
-      </Helmet>
+      <PageTitle>
+        {schedule ? `${schedule.name} | Seizu` : 'Scheduled Chat | Seizu'}
+      </PageTitle>
       <Box sx={pageContentSx}>
         {fromLabel && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
