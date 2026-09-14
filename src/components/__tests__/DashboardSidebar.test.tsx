@@ -133,20 +133,15 @@ describe('DashboardSidebar', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('hides Chat Connections when no external gateway is configured', () => {
-    renderSidebar(['chat:use']);
-
-    expect(
-      screen.queryByRole('link', { name: 'Chat Connections' }),
-    ).not.toBeInTheDocument();
-  });
-
-  it('shows Chat Connections when a user-authorized gateway is configured', () => {
+  // Connections belong to chat, not to the product's top-level navigation:
+  // the entry is in the chat sessions panel, beside the conversations it
+  // configures. See ChatSessionsPanel.test.tsx.
+  it('leaves chat connections to the chat panel, gateway or not', () => {
     renderSidebar(['chat:use'], true, true);
 
     expect(
-      screen.getByRole('link', { name: 'Chat Connections' }),
-    ).toHaveAttribute('href', '/app/chat/connections');
+      screen.queryByRole('link', { name: /connections/i }),
+    ).not.toBeInTheDocument();
   });
 
   it('renders the full logo in the expanded sidebar', () => {

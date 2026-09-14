@@ -265,10 +265,10 @@ contract, separate from MCP's service authentication.
 | `403`, including OAuth `insufficient_scope` | Access denied | Check service scopes, upstream permissions, and gateway policy. |
 | Network/protocol failure | Unavailable | Check gateway availability and retry. |
 
-Open **Chat Connections** in the navigation to see the latest observation and
-last-check time for each per-user gateway. The entry appears only when at least
-one enabled proxy sets `user_authorization`; a deployment with no such gateway
-has no per-user status to show, so the page stays hidden. URL elicitation is
+Open **Connections**, at the foot of the chat sessions panel, to see the latest
+observation and last-check time for each per-user gateway. The entry appears
+only when at least one enabled proxy sets `user_authorization`; a deployment
+with no such gateway has no per-user status to show, so the page stays hidden. URL elicitation is
 advertised only for opted-in proxies, and form elicitation is not supported. Detached runs cancel
 legacy elicitation requests without accepting them; newer input-required results
 are recorded without continuing the operation. The custom `X-Seizu-Auth-Error`

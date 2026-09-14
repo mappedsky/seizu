@@ -1,4 +1,5 @@
 import { memo, useState } from 'react';
+import { Link as RouterLink } from 'react-router-dom';
 import {
   Alert,
   Box,
@@ -11,6 +12,7 @@ import {
   List,
   ListItem,
   ListItemButton,
+  ListItemIcon,
   TextField,
   Tooltip,
   Typography,
@@ -21,11 +23,16 @@ import ChevronLeft from '@mui/icons-material/ChevronLeft';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import Forum from '@mui/icons-material/Forum';
+import Hub from '@mui/icons-material/Hub';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
+import { useFeature } from 'src/features.context';
 import type { ChatSession } from 'src/hooks/useChatSessions';
 
 const PANEL_WIDTH = 260;
+// Tightened from the MUI default so the footer sits at the same rhythm as the
+// session rows above it, as the space panel's footer does.
+const footerActionIconSx = { minWidth: 32 } as const;
 
 interface ChatSessionsPanelProps {
   open: boolean;
@@ -59,6 +66,9 @@ function ChatSessionsPanel({
   const [deleteThreadId, setDeleteThreadId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Only when a gateway actually delegates per user: with none configured there
+  // is no per-user status to show.
+  const connectionsEnabled = useFeature('chat_connections');
 
   const sessionToDelete = sessions.find((s) => s.thread_id === deleteThreadId);
 
@@ -254,6 +264,50 @@ function ChatSessionsPanel({
                   </ListItem>
                 ))}
               </List>
+            )}
+          </Box>
+        )}
+
+        {/* Settings that belong to chat itself rather than to the conversation
+            on screen, kept at the foot of the panel the way a space keeps its
+            own. The confirmations pane is the other half of that split: it is
+            about one turn, so it stays beside the transcript. */}
+        {connectionsEnabled && (
+          <Box
+            sx={{
+              borderTop: 1,
+              borderColor: 'divider',
+              flexShrink: 0,
+              mt: 'auto',
+            }}
+          >
+            {open ? (
+              <List dense disablePadding>
+                <ListItem disablePadding>
+                  <ListItemButton
+                    component={RouterLink}
+                    to="/app/chat/connections"
+                  >
+                    <ListItemIcon sx={footerActionIconSx}>
+                      <Hub fontSize="small" />
+                    </ListItemIcon>
+                    <Typography variant="body2">Connections</Typography>
+                  </ListItemButton>
+                </ListItem>
+              </List>
+            ) : (
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 0.5 }}>
+                <Tooltip title="Connections" placement="right">
+                  <IconButton
+                    component={RouterLink}
+                    to="/app/chat/connections"
+                    size="small"
+                    aria-label="Connections"
+                  >
+                    <Hub fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Box>
             )}
           </Box>
         )}
