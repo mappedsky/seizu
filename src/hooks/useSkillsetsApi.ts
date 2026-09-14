@@ -1,6 +1,7 @@
-import { useState, useEffect, useContext, useCallback } from 'react';
+import { useState, useContext, useCallback } from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
+import { resourceKey, useAsyncResource } from 'src/hooks/useAsyncResource';
 import { ToolParamDef } from 'src/hooks/useToolsetsApi';
 
 export interface SkillsetListItem {
@@ -131,29 +132,28 @@ export function useSkillsetsList(): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [skillsets, setSkillsets] = useState<SkillsetListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (auth_required && !accessToken) return;
-    setLoading(true);
-    fetch('/api/v1/skillsets', { headers: getApiHeaders(accessToken) })
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load skillsets: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { skillsets: SkillsetListItem[] }) => {
-        setSkillsets(data.skillsets ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [accessToken, auth_required, tick]);
+  const {
+    data: skillsets,
+    loading,
+    error,
+  } = useAsyncResource<SkillsetListItem[]>(
+    resourceKey('skillsets', auth_required, accessToken, tick),
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const res = await fetch('/api/v1/skillsets', {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load skillsets: ${res.status}`);
+          const data: { skillsets: SkillsetListItem[] } = await res.json();
+          return data.skillsets ?? [];
+        },
+    [],
+  );
 
   return { skillsets, loading, error, refresh };
 }
@@ -165,31 +165,26 @@ export function useSkillsetVersionsList(skillsetId: string | null): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [versions, setVersions] = useState<SkillsetVersion[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    if (!skillsetId) return;
-    if (auth_required && !accessToken) return;
-    setLoading(true);
-    fetch(`/api/v1/skillsets/${skillsetId}/versions`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load skillset versions: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { versions: SkillsetVersion[] }) => {
-        setVersions(data.versions ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [skillsetId, accessToken, auth_required]);
+  const {
+    data: versions,
+    loading,
+    error,
+  } = useAsyncResource<SkillsetVersion[]>(
+    resourceKey('skillset-versions', skillsetId, auth_required, accessToken),
+    !skillsetId || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(`/api/v1/skillsets/${skillsetId}/versions`, {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load skillset versions: ${res.status}`);
+          const data: { versions: SkillsetVersion[] } = await res.json();
+          return data.versions ?? [];
+        },
+    [],
+  );
 
   return { versions, loading, error };
 }
@@ -263,32 +258,27 @@ export function useSkillsList(skillsetId: string | null): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [skills, setSkills] = useState<SkillItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (!skillsetId) return;
-    if (auth_required && !accessToken) return;
-    setLoading(true);
-    fetch(`/api/v1/skillsets/${skillsetId}/skills`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load skills: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { skills: SkillItem[] }) => {
-        setSkills(data.skills ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [skillsetId, accessToken, auth_required, tick]);
+  const {
+    data: skills,
+    loading,
+    error,
+  } = useAsyncResource<SkillItem[]>(
+    resourceKey('skills', skillsetId, auth_required, accessToken, tick),
+    !skillsetId || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(`/api/v1/skillsets/${skillsetId}/skills`, {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok) throw new Error(`Failed to load skills: ${res.status}`);
+          const data: { skills: SkillItem[] } = await res.json();
+          return data.skills ?? [];
+        },
+    [],
+  );
 
   return { skills, loading, error, refresh };
 }
@@ -303,31 +293,33 @@ export function useSkillVersionsList(
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [versions, setVersions] = useState<SkillVersion[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    if (!skillsetId || !skillId) return;
-    if (auth_required && !accessToken) return;
-    setLoading(true);
-    fetch(`/api/v1/skillsets/${skillsetId}/skills/${skillId}/versions`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load skill versions: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { versions: SkillVersion[] }) => {
-        setVersions(data.versions ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [skillsetId, skillId, accessToken, auth_required]);
+  const {
+    data: versions,
+    loading,
+    error,
+  } = useAsyncResource<SkillVersion[]>(
+    resourceKey(
+      'skill-versions',
+      skillsetId,
+      skillId,
+      auth_required,
+      accessToken,
+    ),
+    !skillsetId || !skillId || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(
+            `/api/v1/skillsets/${skillsetId}/skills/${skillId}/versions`,
+            { headers: getApiHeaders(accessToken) },
+          );
+          if (!res.ok)
+            throw new Error(`Failed to load skill versions: ${res.status}`);
+          const data: { versions: SkillVersion[] } = await res.json();
+          return data.versions ?? [];
+        },
+    [],
+  );
 
   return { versions, loading, error };
 }

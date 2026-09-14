@@ -21,6 +21,7 @@ works that way*.
 | `WF` | [Workflows](workflows.md) | Temporal pipelines, cartography sync, remediation isolation |
 | `QV` | [Query validation](query-validation.md) | The three validator layers and the fuzzing corpus |
 | `AUTH` | [Authentication](authentication.md) | Identity resolution and the OIDC configuration guards |
+| `UI` | [Frontend state](frontend-state.md) | StrictMode, derived state, the effect lint rule |
 
 ## Referring to a decision
 
@@ -79,4 +80,5 @@ report-store
 workflows
 query-validation
 authentication
+frontend-state
 ```

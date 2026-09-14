@@ -4,6 +4,7 @@ import { Alert, Box, Button, Paper, Typography } from '@mui/material';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import CheckCircle from '@mui/icons-material/CheckCircle';
 import Block from '@mui/icons-material/Block';
+import { resourceKey } from 'src/hooks/useAsyncResource';
 import { AuthConfigContext } from 'src/authConfig.context';
 import { AuthContext } from 'src/auth.context';
 import {
@@ -24,31 +25,37 @@ export default function ConfirmationPage() {
   const [confirmation, setConfirmation] = useState<ActionConfirmation | null>(
     null,
   );
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deciding, setDeciding] = useState<'approved' | 'denied' | null>(null);
+  // Which confirmation has been answered for, rather than a flag the effect
+  // raises on the way in.
+  const requestKey = resourceKey(
+    'confirmation',
+    confirmationId,
+    waitingForToken,
+  );
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const loading = loadedKey !== requestKey;
 
   useEffect(() => {
-    if (!confirmationId || waitingForToken) return;
+    if (!confirmationId || waitingForToken) return undefined;
     let cancelled = false;
-    setLoading(true);
-    void getConfirmation(confirmationId)
-      .then((item) => {
-        if (!cancelled) {
-          setConfirmation(item);
-          setError(null);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setError('Confirmation not found.');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    void (async () => {
+      try {
+        const item = await getConfirmation(confirmationId);
+        if (cancelled) return;
+        setConfirmation(item);
+        setError(null);
+      } catch {
+        if (cancelled) return;
+        setError('Confirmation not found.');
+      }
+      if (!cancelled) setLoadedKey(requestKey);
+    })();
     return () => {
       cancelled = true;
     };
-  }, [confirmationId, getConfirmation, waitingForToken]);
+  }, [confirmationId, getConfirmation, waitingForToken, requestKey]);
 
   const decide = useCallback(
     async (decision: 'approved' | 'denied') => {

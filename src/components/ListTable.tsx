@@ -2,6 +2,7 @@ import {
   isValidElement,
   type MouseEvent as ReactMouseEvent,
   ReactNode,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -291,7 +292,13 @@ export default function ListTable<T>({
   onSelectionChange,
   bulkActions,
 }: ListTableProps<T>) {
-  const [page, setPage] = useState(0);
+  // The page the user asked for, remembered with the filter it was asked
+  // under. What is rendered is clamped below, once the filtered rows are
+  // known — a page a filter has emptied is not a page.
+  const [requestedPage, setRequestedPage] = useState<{
+    signature: string;
+    page: number;
+  }>({ signature: '', page: 0 });
   const rowsPerPageStorageKey = useMemo(getRowsPerPageStorageKey, []);
   const [rowsPerPage, setRowsPerPage] = useState(() => {
     if (typeof window === 'undefined') return initialRowsPerPage;
@@ -324,17 +331,6 @@ export default function ListTable<T>({
     handleMouseMove: (event: MouseEvent) => void;
     handleMouseUp: () => void;
   } | null>(null);
-
-  useEffect(() => {
-    const maxPage = Math.max(Math.ceil(rows.length / rowsPerPage) - 1, 0);
-    if (page > maxPage) {
-      setPage(maxPage);
-    }
-  }, [page, rows.length, rowsPerPage]);
-
-  useEffect(() => {
-    setPage(0);
-  }, [filterText, selectedFilterKeys]);
 
   useEffect(() => {
     if (searchOpen) {
@@ -392,6 +388,24 @@ export default function ListTable<T>({
       });
     });
   }, [columns, filterGroups, filterText, rows, selectedFilterKeys]);
+
+  // Changing a filter answers a different question, so it starts at page one;
+  // both that and the clamp are read off the filter and the row count rather
+  // than written back by effects that each cost an extra render.
+  const filterSignature = useMemo(
+    () => JSON.stringify([filterText, selectedFilterKeys]),
+    [filterText, selectedFilterKeys],
+  );
+  const maxPage = Math.max(Math.ceil(filteredRows.length / rowsPerPage) - 1, 0);
+  const page = Math.min(
+    requestedPage.signature === filterSignature ? requestedPage.page : 0,
+    maxPage,
+  );
+  const setPage = useCallback(
+    (next: number) =>
+      setRequestedPage({ signature: filterSignature, page: next }),
+    [filterSignature],
+  );
 
   const visibleRows = useMemo(() => {
     if (!pagination) return filteredRows;

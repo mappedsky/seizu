@@ -1,6 +1,7 @@
-import { useState, useEffect, useContext, useCallback } from 'react';
+import { useState, useContext, useCallback } from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
+import { resourceKey, useAsyncResource } from 'src/hooks/useAsyncResource';
 
 export interface ToolParamDef {
   name: string;
@@ -143,31 +144,29 @@ export function useToolsetsList(): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [toolsets, setToolsets] = useState<ToolsetListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    fetch('/api/v1/toolsets', { headers: getApiHeaders(accessToken) })
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load toolsets: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { toolsets: ToolsetListItem[] }) => {
-        setToolsets(data.toolsets ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [accessToken, auth_required, tick]);
+  const {
+    data: toolsets,
+    loading,
+    error,
+  } = useAsyncResource<ToolsetListItem[]>(
+    resourceKey('toolsets', auth_required, accessToken, tick),
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const res = await fetch('/api/v1/toolsets', {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load toolsets: ${res.status}`);
+          const data: { toolsets: ToolsetListItem[] } = await res.json();
+          return data.toolsets ?? [];
+        },
+    [],
+  );
 
   return { toolsets, loading, error, refresh };
 }
@@ -179,32 +178,26 @@ export function useToolsetVersionsList(toolsetId: string | null): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [versions, setVersions] = useState<ToolsetVersion[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    if (!toolsetId) return;
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    fetch(`/api/v1/toolsets/${toolsetId}/versions`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load toolset versions: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { versions: ToolsetVersion[] }) => {
-        setVersions(data.versions ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [toolsetId, accessToken, auth_required]);
+  const {
+    data: versions,
+    loading,
+    error,
+  } = useAsyncResource<ToolsetVersion[]>(
+    resourceKey('toolset-versions', toolsetId, auth_required, accessToken),
+    !toolsetId || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(`/api/v1/toolsets/${toolsetId}/versions`, {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load toolset versions: ${res.status}`);
+          const data: { versions: ToolsetVersion[] } = await res.json();
+          return data.versions ?? [];
+        },
+    [],
+  );
 
   return { versions, loading, error };
 }
@@ -277,34 +270,28 @@ export function useToolsList(toolsetId: string | null): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [tools, setTools] = useState<ToolItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (!toolsetId) return;
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    fetch(`/api/v1/toolsets/${toolsetId}/tools`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load tools: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { tools: ToolItem[] }) => {
-        setTools(data.tools ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [toolsetId, accessToken, auth_required, tick]);
+  const {
+    data: tools,
+    loading,
+    error,
+  } = useAsyncResource<ToolItem[]>(
+    resourceKey('tools', toolsetId, auth_required, accessToken, tick),
+    !toolsetId || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(`/api/v1/toolsets/${toolsetId}/tools`, {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok) throw new Error(`Failed to load tools: ${res.status}`);
+          const data: { tools: ToolItem[] } = await res.json();
+          return data.tools ?? [];
+        },
+    [],
+  );
 
   return { tools, loading, error, refresh };
 }
@@ -316,67 +303,54 @@ export function useToolCatalog(): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [tools, setTools] = useState<ToolCatalogItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    if (auth_required && !accessToken) return;
-    let cancelled = false;
-
-    async function load(): Promise<void> {
-      setLoading(true);
-      setError(null);
-      try {
-        const toolsetRes = await fetch('/api/v1/toolsets', {
-          headers: getApiHeaders(accessToken),
-        });
-        if (!toolsetRes.ok)
-          throw new Error(`Failed to load toolsets: ${toolsetRes.status}`);
-        const toolsetData = (await toolsetRes.json()) as {
-          toolsets: ToolsetListItem[];
-        };
-        const toolsets = toolsetData.toolsets ?? [];
-        const nested = await Promise.all(
-          toolsets.map(async (toolset) => {
-            const toolsRes = await fetch(
-              `/api/v1/toolsets/${toolset.toolset_id}/tools`,
-              {
-                headers: getApiHeaders(accessToken),
-              },
-            );
-            if (!toolsRes.ok)
-              throw new Error(`Failed to load tools: ${toolsRes.status}`);
-            const toolsData = (await toolsRes.json()) as { tools: ToolItem[] };
-            return (toolsData.tools ?? []).map((tool) => ({
-              mcp_name: mcpNameForTool(tool),
-              toolset_id: tool.toolset_id,
-              tool_id: tool.tool_id,
-              toolset_name: toolset.name,
-              name: tool.name,
-              enabled: tool.effective_enabled ?? tool.enabled,
-            }));
-          }),
-        );
-        if (!cancelled) {
-          setTools(
-            nested.flat().sort((a, b) => a.mcp_name.localeCompare(b.mcp_name)),
+  const {
+    data: tools,
+    loading,
+    error,
+  } = useAsyncResource<ToolCatalogItem[]>(
+    resourceKey('tool-catalog', auth_required, accessToken),
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const toolsetRes = await fetch('/api/v1/toolsets', {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!toolsetRes.ok)
+            throw new Error(`Failed to load toolsets: ${toolsetRes.status}`);
+          const toolsetData = (await toolsetRes.json()) as {
+            toolsets: ToolsetListItem[];
+          };
+          const toolsets = toolsetData.toolsets ?? [];
+          const nested = await Promise.all(
+            toolsets.map(async (toolset) => {
+              const toolsRes = await fetch(
+                `/api/v1/toolsets/${toolset.toolset_id}/tools`,
+                {
+                  headers: getApiHeaders(accessToken),
+                },
+              );
+              if (!toolsRes.ok)
+                throw new Error(`Failed to load tools: ${toolsRes.status}`);
+              const toolsData = (await toolsRes.json()) as {
+                tools: ToolItem[];
+              };
+              return (toolsData.tools ?? []).map((tool) => ({
+                mcp_name: mcpNameForTool(tool),
+                toolset_id: tool.toolset_id,
+                tool_id: tool.tool_id,
+                toolset_name: toolset.name,
+                name: tool.name,
+                enabled: tool.effective_enabled ?? tool.enabled,
+              }));
+            }),
           );
-          setLoading(false);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err as Error);
-          setLoading(false);
-        }
-      }
-    }
-
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken, auth_required]);
+          return nested
+            .flat()
+            .sort((a, b) => a.mcp_name.localeCompare(b.mcp_name));
+        },
+    [],
+  );
 
   return { tools, loading, error };
 }
@@ -391,32 +365,27 @@ export function useToolVersionsList(
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [versions, setVersions] = useState<ToolVersion[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    if (!toolsetId || !toolId) return;
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    fetch(`/api/v1/toolsets/${toolsetId}/tools/${toolId}/versions`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load tool versions: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { versions: ToolVersion[] }) => {
-        setVersions(data.versions ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [toolsetId, toolId, accessToken, auth_required]);
+  const {
+    data: versions,
+    loading,
+    error,
+  } = useAsyncResource<ToolVersion[]>(
+    resourceKey('tool-versions', toolsetId, toolId, auth_required, accessToken),
+    !toolsetId || !toolId || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(
+            `/api/v1/toolsets/${toolsetId}/tools/${toolId}/versions`,
+            { headers: getApiHeaders(accessToken) },
+          );
+          if (!res.ok)
+            throw new Error(`Failed to load tool versions: ${res.status}`);
+          const data: { versions: ToolVersion[] } = await res.json();
+          return data.versions ?? [];
+        },
+    [],
+  );
 
   return { versions, loading, error };
 }

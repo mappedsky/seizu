@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -739,37 +739,57 @@ function buildRenderArguments(
   return { arguments: args, error: null };
 }
 
-function SkillRenderDialog({
-  skill,
-  onClose,
-  onRender,
-}: {
+interface SkillRenderDialogProps {
   skill: SkillItem | null;
   onClose: () => void;
   onRender: (
     skillId: string,
     args: Record<string, unknown>,
   ) => Promise<{ text: string }>;
-}) {
-  const [values, setValues] = useState<Record<string, string>>({});
+}
+
+/**
+ * The dialog shell. The form is mounted per skill, so its arguments, output
+ * and error start empty by construction rather than being cleared by an effect
+ * that runs after the previous skill's render has already been shown.
+ */
+function SkillRenderDialog({
+  skill,
+  onClose,
+  onRender,
+}: SkillRenderDialogProps) {
+  return (
+    <Dialog open={!!skill} onClose={onClose} maxWidth="md" fullWidth>
+      {skill && (
+        <SkillRenderForm
+          key={skill.skill_id}
+          skill={skill}
+          onClose={onClose}
+          onRender={onRender}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+function SkillRenderForm({
+  skill,
+  onClose,
+  onRender,
+}: SkillRenderDialogProps & { skill: SkillItem }) {
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    initialRenderValues(skill),
+  );
   const [renderText, setRenderText] = useState('');
   const [renderError, setRenderError] = useState<string | null>(null);
   const [rendering, setRendering] = useState(false);
-  const parameters = skill?.parameters ?? [];
-
-  useEffect(() => {
-    setValues(initialRenderValues(skill));
-    setRenderText('');
-    setRenderError(null);
-    setRendering(false);
-  }, [skill]);
+  const parameters = skill.parameters ?? [];
 
   const updateValue = (name: string, value: string) => {
     setValues((current) => ({ ...current, [name]: value }));
   };
 
   const runRender = async () => {
-    if (!skill) return;
     setRenderError(null);
     const built = buildRenderArguments(parameters, values);
     if (built.error) {
@@ -789,7 +809,7 @@ function SkillRenderDialog({
   };
 
   return (
-    <Dialog open={!!skill} onClose={onClose} maxWidth="md" fullWidth>
+    <>
       <DialogTitle>Render skill</DialogTitle>
       <DialogContent dividers>
         {renderError && (
@@ -908,7 +928,7 @@ function SkillRenderDialog({
           {rendering ? <ConstellationSpinner size={20} /> : 'Render'}
         </Button>
       </DialogActions>
-    </Dialog>
+    </>
   );
 }
 

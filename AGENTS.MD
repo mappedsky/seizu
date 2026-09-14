@@ -26,6 +26,7 @@ rather than restating the reasoning.
 | [`workflows.md`](docs/root/dev/decisions/workflows.md) (`WF`) | Temporal pipelines, cartography sync, remediation isolation |
 | [`query-validation.md`](docs/root/dev/decisions/query-validation.md) (`QV`) | The Cypher validator and its fuzzing corpus |
 | [`authentication.md`](docs/root/dev/decisions/authentication.md) (`AUTH`) | Identity resolution, issuer handling, OIDC configuration guards |
+| [`frontend-state.md`](docs/root/dev/decisions/frontend-state.md) (`UI`) | React state shape, StrictMode, effects and the `set-state-in-effect` rule |
 
 When you make a decision worth keeping, add an entry there rather than growing
 this file or a docstring — see the log index for the format.
@@ -152,6 +153,13 @@ Config for adjacent dev services lives in `.config/`; reference that path in `do
 ### Frontend (`src/`)
 
 React 19 + TypeScript + Bun + Material-UI + MUI X Charts + `@xyflow/react`.
+
+The app renders under `<StrictMode>`, and `@eslint-react/set-state-in-effect`
+is an **error**: a value that follows a prop, a route parameter or a fetched
+result is computed during render, not written into state by an effect watching
+it. `src/hooks/useAsyncResource.ts` packages the common shape — `loading` is
+"the settled result is not an answer to the request this render is asking for".
+**Decisions: [`UI`](docs/root/dev/decisions/frontend-state.md).**
 
 - `src/config.context.ts` — `ConfigContext` from `GET /api/v1/config` (OIDC + stats config); Cypher resolution is per-report via `Report.queries`.
 - `src/authConfig.context.ts` — `AuthConfigContext`; `auth_required` + informational OIDC config; gates API calls until a token exists.

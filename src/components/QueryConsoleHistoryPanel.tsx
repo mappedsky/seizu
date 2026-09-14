@@ -23,22 +23,17 @@ export default function QueryConsoleHistoryPanel({
   refreshTrigger,
 }: QueryConsoleHistoryPanelProps) {
   const { loading, error, data, authReady, fetchHistory } = useQueryHistory();
-  const [page, setPage] = useState(1);
+  // The page the user picked, remembered with the refresh it was picked
+  // under: a completed query is a new history, so it starts at page one by
+  // being read past rather than by a second effect resetting the first's.
+  const [picked, setPicked] = useState({ trigger: refreshTrigger, page: 1 });
+  const page = picked.trigger === refreshTrigger ? picked.page : 1;
+  const setPage = (next: number) =>
+    setPicked({ trigger: refreshTrigger, page: next });
 
   useEffect(() => {
     if (!authReady) return;
     fetchHistory(page, PER_PAGE);
-  }, [authReady, fetchHistory, page]);
-
-  // Re-fetch from page 1 whenever a new query completes.
-  useEffect(() => {
-    if (!refreshTrigger) return;
-    if (!authReady) return;
-    if (page === 1) {
-      fetchHistory(1, PER_PAGE);
-    } else {
-      setPage(1);
-    }
   }, [authReady, fetchHistory, page, refreshTrigger]);
 
   const totalPages = data ? Math.ceil(data.total / PER_PAGE) : 0;

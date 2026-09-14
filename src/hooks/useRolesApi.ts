@@ -1,6 +1,7 @@
-import { useState, useEffect, useContext, useCallback } from 'react';
+import { useState, useContext, useCallback } from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
+import { resourceKey, useAsyncResource } from 'src/hooks/useAsyncResource';
 
 export interface RoleItem {
   role_id: string;
@@ -59,37 +60,31 @@ export function useBuiltinRolesList(enabled = true): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [roles, setRoles] = useState<RoleItem[]>([]);
-  const [loading, setLoading] = useState(enabled);
-  const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (!enabled) {
-      setLoading(false);
-      return;
-    }
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    setError(null);
-    fetch('/api/v1/roles/builtin', { headers: getApiHeaders(accessToken) })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load built-in roles: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { roles: RoleItem[] }) => {
-        setRoles(data.roles ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [accessToken, auth_required, enabled, tick]);
+  const {
+    data: roles,
+    loading,
+    error,
+  } = useAsyncResource<RoleItem[]>(
+    enabled
+      ? resourceKey('roles/builtin', auth_required, accessToken, tick)
+      : null,
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const res = await fetch('/api/v1/roles/builtin', {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load built-in roles: ${res.status}`);
+          const data: { roles: RoleItem[] } = await res.json();
+          return data.roles ?? [];
+        },
+    [],
+  );
 
   return { roles, loading, error, refresh };
 }
@@ -102,36 +97,28 @@ export function useRolesList(enabled = true): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [roles, setRoles] = useState<RoleItem[]>([]);
-  const [loading, setLoading] = useState(enabled);
-  const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (!enabled) {
-      setLoading(false);
-      return;
-    }
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    setError(null);
-    fetch('/api/v1/roles', { headers: getApiHeaders(accessToken) })
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load roles: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { roles: RoleItem[] }) => {
-        setRoles(data.roles ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [accessToken, auth_required, enabled, tick]);
+  const {
+    data: roles,
+    loading,
+    error,
+  } = useAsyncResource<RoleItem[]>(
+    enabled ? resourceKey('roles', auth_required, accessToken, tick) : null,
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const res = await fetch('/api/v1/roles', {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok) throw new Error(`Failed to load roles: ${res.status}`);
+          const data: { roles: RoleItem[] } = await res.json();
+          return data.roles ?? [];
+        },
+    [],
+  );
 
   return { roles, loading, error, refresh };
 }
@@ -146,36 +133,28 @@ export function useRoleVersionsList(
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [versions, setVersions] = useState<RoleVersion[]>([]);
-  const [loading, setLoading] = useState(enabled && !!roleId);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    if (!enabled || !roleId) {
-      setLoading(false);
-      return;
-    }
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    setError(null);
-    fetch(`/api/v1/roles/${roleId}/versions`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load role versions: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { versions: RoleVersion[] }) => {
-        setVersions(data.versions ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [roleId, accessToken, auth_required, enabled]);
+  const {
+    data: versions,
+    loading,
+    error,
+  } = useAsyncResource<RoleVersion[]>(
+    enabled && roleId
+      ? resourceKey('role-versions', roleId, auth_required, accessToken)
+      : null,
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const res = await fetch(`/api/v1/roles/${roleId}/versions`, {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load role versions: ${res.status}`);
+          const data: { versions: RoleVersion[] } = await res.json();
+          return data.versions ?? [];
+        },
+    [],
+  );
 
   return { versions, loading, error };
 }

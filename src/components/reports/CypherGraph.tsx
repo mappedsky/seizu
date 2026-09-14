@@ -938,10 +938,13 @@ export function applyFocusOpacity(
 }
 
 // ─── Auto-fit helper ─────────────────────────────────────────────────────────
-// Rendered inside <ReactFlow> so useReactFlow() is in context. Calls fitView
-// with a smooth transition whenever `trigger` increments (skipping initial mount).
+// Rendered inside <ReactFlow> so useReactFlow() is in context.
 
-function AutoFitEffect({ trigger }: { trigger: number }) {
+/**
+ * Fits the view with a smooth transition whenever `trigger` changes identity —
+ * every layout rebuild — skipping the initial mount.
+ */
+function AutoFitEffect({ trigger }: { trigger: unknown }) {
   const { fitView } = useReactFlow();
   const isFirstRun = useRef(true);
   useEffect(() => {
@@ -1109,17 +1112,42 @@ function CypherGraph({
     prevLoadingRef.current = loading;
   }, [loading, records, onQueryComplete, completedHistoryId]);
 
-  const [selectedItem, setSelectedItem] = useState<
-    { type: 'node'; data: GraphNode } | { type: 'link'; data: GraphLink } | null
-  >(null);
+  // Selection and tab preference belong to the query they were made against:
+  // a new query drops them by being read past, rather than through an effect
+  // that clears three states one render after the new results are on screen.
+  const querySignature = `${cypher ?? ''}\u0000${queryHistoryId ?? ''}`;
+  const [selection, setSelection] = useState<{
+    query: string;
+    item:
+      | { type: 'node'; data: GraphNode }
+      | { type: 'link'; data: GraphLink }
+      | null;
+    tab: 'graph' | 'table' | 'raw' | null;
+  }>({ query: querySignature, item: null, tab: null });
+  const currentSelection =
+    selection.query === querySignature ? selection : null;
+  const selectedItem = currentSelection ? currentSelection.item : null;
+  const preferredTab = currentSelection ? currentSelection.tab : null;
+  const setSelectedItem = (
+    item:
+      | { type: 'node'; data: GraphNode }
+      | { type: 'link'; data: GraphLink }
+      | null,
+  ) =>
+    setSelection((previous) => ({
+      query: querySignature,
+      item,
+      tab: previous.query === querySignature ? previous.tab : null,
+    }));
+  const setPreferredTab = (tab: 'graph' | 'table' | 'raw') =>
+    setSelection((previous) => ({
+      query: querySignature,
+      item: previous.query === querySignature ? previous.item : null,
+      tab,
+    }));
 
   const [detailOpen, setDetailOpen] = useState(defaultDetailOpen);
-  const [preferredTab, setPreferredTab] = useState<
-    'graph' | 'table' | 'raw' | null
-  >(null);
   const [repulsion, setRepulsion] = useState(1);
-  const [_focusedId, setFocusedId] = useState<string | null>(null);
-  const [fitViewTrigger, setFitViewTrigger] = useState(0);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -1174,22 +1202,22 @@ function CypherGraph({
     }
   }, [tokenExpired, onTokenExpired]);
 
-  // Clear selection and tab preference when the query changes.
-  useEffect(() => {
-    setSelectedItem(null);
-    setFocusedId(null);
-    setPreferredTab(null);
-  }, [cypher, queryHistoryId]);
+  // A fresh identity for every layout rebuild, which is what AutoFitEffect
+  // watches. Derived from the same inputs as the rebuild below, so the fit and
+  // the rebuild cannot drift apart, and no counter has to be bumped from
+  // inside the effect.
+  const layoutEpoch = useMemo(
+    () => ({}),
+    [graphData, nodeLabelKey, nodeColorByKey, edgeColor, repulsion],
+  );
 
   // Rebuild XyFlow graph whenever extracted graph data or spread changes.
   useEffect(() => {
     if (!graphData || graphData.nodes.length === 0) {
       setNodes([]);
       setEdges([]);
-      setFocusedId(null);
       return;
     }
-    setFocusedId(null);
     const positions = computeLayout(
       graphData.nodes,
       graphData.links,
@@ -1201,7 +1229,6 @@ function CypherGraph({
       buildXyNodes(graphData.nodes, positions, nodeLabelKey, nodeColorByKey),
     );
     setEdges(buildXyEdges(graphData.links, edgeColor, positions));
-    setFitViewTrigger((n) => n + 1);
   }, [
     graphData,
     nodeLabelKey,
@@ -1218,7 +1245,6 @@ function CypherGraph({
       (node.data as unknown as GraphNode);
     setSelectedItem({ type: 'node', data: original });
     setDetailOpen(true);
-    setFocusedId(node.id);
     const updated = applyFocusOpacity(nodes, edges, node.id, edgeColor);
     setNodes(updated.nodes);
     setEdges(updated.edges);
@@ -1231,7 +1257,6 @@ function CypherGraph({
     };
     setSelectedItem({ type: 'link', data: original as GraphLink });
     setDetailOpen(true);
-    setFocusedId(edge.id);
     const updated = applyFocusOpacity(nodes, edges, edge.id, edgeColor);
     setNodes(updated.nodes);
     setEdges(updated.edges);
@@ -1239,7 +1264,6 @@ function CypherGraph({
 
   const handlePaneClick = () => {
     setSelectedItem(null);
-    setFocusedId(null);
     const updated = applyFocusOpacity(nodes, edges, null, edgeColor);
     setNodes(updated.nodes);
     setEdges(updated.edges);
@@ -1522,7 +1546,7 @@ function CypherGraph({
                 maxZoom={4}
                 style={{ background: theme.palette.background.paper }}
               >
-                <AutoFitEffect trigger={fitViewTrigger} />
+                <AutoFitEffect trigger={layoutEpoch} />
                 <GraphControls
                   repulsion={repulsion}
                   onRepulsionChange={setRepulsion}

@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Alert,
@@ -91,67 +91,86 @@ interface PermissionChipsSummaryProps {
   permissions: string[];
 }
 
+/**
+ * How many chips fit on one line, from the widths the browser has just laid
+ * out. Called from the container's ref callback and its resize observer, so
+ * the measurement never has to be written into state from an effect.
+ */
+function fittingChipCount(
+  available: number,
+  permissions: string[],
+  permissionWidths: Record<string, HTMLDivElement | null>,
+  overflowWidths: Record<number, HTMLDivElement | null>,
+  gapPx: number,
+): number {
+  const widths = permissions.map(
+    (permission) =>
+      permissionWidths[permission]?.getBoundingClientRect().width ?? 0,
+  );
+  const overflow = Array.from(
+    { length: permissions.length + 1 },
+    (_, index) => overflowWidths[index]?.getBoundingClientRect().width ?? 0,
+  );
+
+  for (let count = permissions.length; count >= 0; count -= 1) {
+    const remaining = permissions.length - count;
+    const chipCount = count + (remaining > 0 ? 1 : 0);
+    const totalWidth =
+      widths.slice(0, count).reduce((sum, width) => sum + width, 0) +
+      (chipCount > 0 ? gapPx * (chipCount - 1) : 0) +
+      (remaining > 0 ? (overflow[remaining] ?? 0) : 0);
+    if (totalWidth <= available) return count;
+  }
+  return 0;
+}
+
 function PermissionChipsSummary({ permissions }: PermissionChipsSummaryProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
   const permissionRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const overflowRefs = useRef<Record<number, HTMLDivElement | null>>({});
-  const [availableWidth, setAvailableWidth] = useState(0);
-  const [visibleCount, setVisibleCount] = useState(permissions.length);
+  // The fit, and the permission list it was measured for. A different list
+  // shows every chip until it has been measured, rather than carrying the
+  // previous list's count until an effect resets it.
+  const [measured, setMeasured] = useState<{
+    permissions: string[];
+    count: number;
+  } | null>(null);
+  const visibleCount =
+    measured !== null && measured.permissions === permissions
+      ? measured.count
+      : permissions.length;
   const gapPx = 4;
 
-  useLayoutEffect(() => {
-    setVisibleCount(permissions.length);
-  }, [permissions]);
-
-  useLayoutEffect(() => {
-    const updateWidth = () => {
-      const width = containerRef.current?.getBoundingClientRect().width ?? 0;
-      setAvailableWidth(width);
-    };
-
-    updateWidth();
-
-    if (!containerRef.current || typeof ResizeObserver === 'undefined')
-      return undefined;
-
-    const observer = new ResizeObserver(updateWidth);
-    observer.observe(containerRef.current);
-    return () => observer.disconnect();
-  }, []);
-
-  useLayoutEffect(() => {
-    if (availableWidth <= 0) return;
-
-    const permissionWidths = permissions.map(
-      (permission) =>
-        permissionRefs.current[permission]?.getBoundingClientRect().width ?? 0,
-    );
-    const overflowWidths = Array.from(
-      { length: permissions.length + 1 },
-      (_, index) =>
-        overflowRefs.current[index]?.getBoundingClientRect().width ?? 0,
-    );
-
-    let nextVisibleCount = 0;
-    for (let count = permissions.length; count >= 0; count -= 1) {
-      const remaining = permissions.length - count;
-      const chipCount = count + (remaining > 0 ? 1 : 0);
-      const totalWidth =
-        permissionWidths
-          .slice(0, count)
-          .reduce((sum, width) => sum + width, 0) +
-        (chipCount > 0 ? gapPx * (chipCount - 1) : 0) +
-        (remaining > 0 ? (overflowWidths[remaining] ?? 0) : 0);
-      if (totalWidth <= availableWidth) {
-        nextVisibleCount = count;
-        break;
-      }
-    }
-
-    if (nextVisibleCount !== visibleCount) {
-      setVisibleCount(nextVisibleCount);
-    }
-  }, [availableWidth, permissions, visibleCount]);
+  // A callback ref, not a layout effect: refs are attached child-first, so the
+  // hidden measurement chips are already laid out when this runs, and it runs
+  // at the same point in the commit. Its identity depends on `permissions`, so
+  // a new list re-attaches it and re-measures.
+  const containerRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (node === null) return undefined;
+      const measure = () => {
+        const available = node.getBoundingClientRect().width;
+        // Nothing useful to measure against yet (a collapsed container, or a
+        // test DOM with no layout): leave every chip showing.
+        if (available <= 0) return;
+        setMeasured({
+          permissions,
+          count: fittingChipCount(
+            available,
+            permissions,
+            permissionRefs.current,
+            overflowRefs.current,
+            gapPx,
+          ),
+        });
+      };
+      measure();
+      if (typeof ResizeObserver === 'undefined') return undefined;
+      const observer = new ResizeObserver(measure);
+      observer.observe(node);
+      return () => observer.disconnect();
+    },
+    [permissions],
+  );
 
   const visiblePermissions = permissions.slice(0, visibleCount);
   const remaining = permissions.length - visibleCount;

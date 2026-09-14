@@ -53,6 +53,8 @@ interface ConfirmationListResponse {
   confirmations: ActionConfirmation[];
 }
 
+const NO_CONFIRMATIONS: ActionConfirmation[] = [];
+
 function sameConfirmations(
   current: ActionConfirmation[],
   next: ActionConfirmation[],
@@ -82,18 +84,31 @@ export function useConfirmationsApi(threadId?: string | null): {
   ) => Promise<ActionConfirmation>;
 } {
   const { checkAuthReady, authHeaders } = useAuthHeaders();
-  const [confirmations, setConfirmations] = useState<ActionConfirmation[]>([]);
-  const [loading, setLoading] = useState(Boolean(threadId));
-  const [error, setError] = useState<string | null>(null);
+  // The list, its error and which thread they answer for are one value. A
+  // thread with no settled answer is loading, so nothing has to raise the flag
+  // on the way into the effect or lower it for a thread that was never asked
+  // about.
+  const [result, setResult] = useState<{
+    threadId: string;
+    confirmations: ActionConfirmation[];
+    error: string | null;
+  } | null>(null);
+
+  const settled =
+    result !== null && result.threadId === threadId ? result : null;
+  const confirmations = settled ? settled.confirmations : NO_CONFIRMATIONS;
+  const loading = Boolean(threadId) && settled === null;
+  const error = settled ? settled.error : null;
 
   const fetchConfirmations = useCallback(async () => {
-    if (!threadId || !checkAuthReady()) {
-      setConfirmations((prev) => (prev.length === 0 ? prev : []));
-      setLoading(false);
+    if (!threadId) return;
+    if (!checkAuthReady()) {
+      // Not an error and not a wait: `checkAuthReady` reads a ref, so it
+      // cannot re-run this on its own. The poll below is what retries.
+      setResult({ threadId, confirmations: NO_CONFIRMATIONS, error: null });
       return;
     }
     try {
-      setError(null);
       const res = await fetch(
         `/api/v1/confirmations?thread_id=${encodeURIComponent(threadId)}`,
         { headers: authHeaders() },
@@ -103,26 +118,31 @@ export function useConfirmationsApi(threadId?: string | null): {
       if (!Array.isArray(data.confirmations)) {
         throw new Error('Invalid confirmation list response');
       }
-      const confirmations = data.confirmations;
-      setConfirmations((current) =>
-        sameConfirmations(current, confirmations) ? current : confirmations,
+      const next = data.confirmations;
+      setResult((current) =>
+        current !== null &&
+        current.threadId === threadId &&
+        current.error === null &&
+        sameConfirmations(current.confirmations, next)
+          ? current
+          : { threadId, confirmations: next, error: null },
       );
     } catch {
-      setError('Failed to load confirmations.');
-    } finally {
-      setLoading(false);
+      setResult((current) => ({
+        threadId,
+        confirmations:
+          current !== null && current.threadId === threadId
+            ? current.confirmations
+            : NO_CONFIRMATIONS,
+        error: 'Failed to load confirmations.',
+      }));
     }
   }, [authHeaders, checkAuthReady, threadId]);
 
   const hasPending = confirmations.length > 0;
 
   useEffect(() => {
-    if (!threadId) {
-      setConfirmations((prev) => (prev.length === 0 ? prev : []));
-      setLoading(false);
-      return undefined;
-    }
-    setLoading(true);
+    if (!threadId) return undefined;
     void fetchConfirmations();
     const timer = window.setInterval(
       () => void fetchConfirmations(),
@@ -176,10 +196,17 @@ export function useConfirmationsApi(threadId?: string | null): {
       );
       if (!res.ok) throw new Error('Failed to update confirmation');
       const data = (await res.json()) as ConfirmationResponse;
-      setConfirmations((prev) =>
-        prev.map((item) =>
-          item.confirmation_id === confirmationId ? data.confirmation : item,
-        ),
+      setResult((current) =>
+        current === null
+          ? current
+          : {
+              ...current,
+              confirmations: current.confirmations.map((item) =>
+                item.confirmation_id === confirmationId
+                  ? data.confirmation
+                  : item,
+              ),
+            },
       );
       return data.confirmation;
     },

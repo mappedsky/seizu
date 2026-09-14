@@ -59,6 +59,10 @@ export default [
       ...jsxA11y.flatConfigs.recommended.rules,
       ...importX.flatConfigs.recommended.rules,
       'react-hooks/rules-of-hooks': 'error',
+      // An error, not a warning: state written synchronously from an effect is
+      // the class of bug StrictMode's double-invoked effects exist to surface,
+      // and the app runs under StrictMode (UI-001, UI-002).
+      '@eslint-react/set-state-in-effect': 'error',
       // Project overrides — carried over from the legacy .eslintrc.
       '@eslint-react/exhaustive-deps': 'off',
       'jsx-a11y/anchor-is-valid': 'off',

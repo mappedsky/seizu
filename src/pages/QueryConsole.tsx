@@ -30,13 +30,16 @@ export default function QueryConsole() {
   const fetchHistoryItem = useFetchHistoryItem();
   const { authReady } = useAuthHeaders();
   const [queryText, setQueryText] = useState('');
-  const [submittedQuery, setSubmittedQuery] = useState<string | undefined>(
-    undefined,
-  );
-  const [submittedHistoryId, setSubmittedHistoryId] = useState<
-    string | undefined
-  >(undefined);
-  const [runKey, setRunKey] = useState(0);
+  // What this page last ran, and the URL it corresponds to. Back/forward moves
+  // the URL off that value, and the run to show is then read off the URL — so
+  // the address bar and the results cannot disagree, and nothing has to be
+  // written into state from an effect that watches the location.
+  const [run, setRun] = useState<{
+    search: string;
+    query?: string;
+    historyId?: string;
+    key: number;
+  } | null>(null);
   const [schemaPanelOpen, setSchemaPanelOpen] = useState(() => {
     if (typeof window === 'undefined') return true;
     const storedValue = window.localStorage.getItem(
@@ -49,52 +52,62 @@ export default function QueryConsole() {
   const dragStartY = useRef(0);
   const dragStartHeight = useRef(0);
 
-  // justPushedRef: the history ID we most recently pushed to the URL ourselves,
-  // so we can skip re-running when our own navigate() triggers a location change.
-  const justPushedRef = useRef<string | null>(null);
-
   const handleQueryComplete = useCallback(
     (historyId: string | null) => {
       if (historyId) {
         setHistoryRefreshTrigger((n) => n + 1);
-        justPushedRef.current = historyId;
+        // The run this page is showing now lives at that URL: recording it
+        // here is what stops our own navigate() looking like a back/forward.
+        setRun((previous) =>
+          previous ? { ...previous, search: `?h=${historyId}` } : previous,
+        );
         navigate(`?h=${historyId}`);
       }
     },
     [navigate],
   );
 
-  // Restore and re-run query when URL changes via browser back/forward.
+  const urlHistoryId = new URLSearchParams(location.search).get('h');
+  // The URL has moved off the run this page started: browser back/forward, or
+  // a link straight to a history entry.
+  const restored =
+    urlHistoryId !== null && (run === null || run.search !== location.search);
+  const submittedHistoryId = restored
+    ? urlHistoryId
+    : (run?.historyId ?? undefined);
+  const submittedQuery = restored ? undefined : (run?.query ?? undefined);
+  const runKey = restored ? 0 : (run?.key ?? 0);
+
+  // Put the restored query back in the editor. The run itself is derived
+  // above; this only fills the text area.
   useEffect(() => {
-    const h = new URLSearchParams(location.search).get('h');
-    if (!h) return;
-    if (!authReady) return;
-    if (justPushedRef.current === h) {
-      justPushedRef.current = null;
-      return;
-    }
-    setSubmittedHistoryId(h);
-    setSubmittedQuery(undefined);
-    setRunKey((k) => k + 1);
+    if (!restored || !authReady || urlHistoryId === null) return undefined;
     let cancelled = false;
-    fetchHistoryItem(h).then((item) => {
+    void fetchHistoryItem(urlHistoryId).then((item) => {
       if (cancelled || !item) return;
       setQueryText(item.query);
     });
     return () => {
       cancelled = true;
     };
-  }, [authReady, location.search, fetchHistoryItem]);
+  }, [restored, authReady, urlHistoryId, fetchHistoryItem]);
 
   const queryTextRef = useRef(queryText);
   queryTextRef.current = queryText;
+  // The router's search, not `window.location`: those differ under a memory
+  // router, and a run recorded against the wrong one reads back as a
+  // back/forward the moment it is compared.
+  const searchRef = useRef(location.search);
+  searchRef.current = location.search;
 
   const handleRun = useCallback(() => {
     const trimmed = queryTextRef.current.trim();
     if (!trimmed) return;
-    setSubmittedHistoryId(undefined);
-    setSubmittedQuery(trimmed);
-    setRunKey((k) => k + 1);
+    setRun((previous) => ({
+      search: searchRef.current,
+      query: trimmed,
+      key: (previous?.key ?? 0) + 1,
+    }));
   }, []);
 
   const handleKeyDown = useCallback(
@@ -109,19 +122,22 @@ export default function QueryConsole() {
   /** Insert a query from the schema browser and run it immediately. */
   const handleQuerySelect = useCallback((query: string) => {
     setQueryText(query);
-    setSubmittedQuery(query);
-    setSubmittedHistoryId(undefined);
-    setRunKey((k) => k + 1);
+    setRun((previous) => ({
+      search: searchRef.current,
+      query,
+      key: (previous?.key ?? 0) + 1,
+    }));
   }, []);
 
   /** Load a query from history into the editor and re-execute by history ID. */
   const handleHistorySelect = useCallback(
     (item: QueryHistoryItem) => {
       setQueryText(item.query);
-      setSubmittedHistoryId(item.history_id);
-      setSubmittedQuery(undefined);
-      setRunKey((k) => k + 1);
-      justPushedRef.current = item.history_id;
+      setRun((previous) => ({
+        search: `?h=${item.history_id}`,
+        historyId: item.history_id,
+        key: (previous?.key ?? 0) + 1,
+      }));
       navigate(`?h=${item.history_id}`);
     },
     [navigate],

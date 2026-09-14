@@ -1,5 +1,6 @@
 import { useState, useEffect, useContext, useCallback } from 'react';
 import type { components } from 'src/api/openapi.generated';
+import { resourceKey, useAsyncResource } from 'src/hooks/useAsyncResource';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
 import { Report } from 'src/config.context';
@@ -217,39 +218,32 @@ export function useDashboardReportId(): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [dashboardReportId, setDashboardReportId] = useState<string | null>(
-    null,
-  );
-  const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (auth_required && !accessToken) return;
+  const { data, loading, error } = useAsyncResource<string | null>(
+    resourceKey('dashboard-report-id', auth_required, accessToken, tick),
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const res = await fetch('/api/v1/reports/dashboard', {
+            headers: getApiHeaders(accessToken),
+          });
+          if (res.status === 404) return null;
+          if (!res.ok)
+            throw new Error(`Failed to load dashboard: ${res.status}`);
+          const version: ReportVersion = await res.json();
+          return version.report_id ?? null;
+        },
+    null,
+  );
 
-    setLoading(true);
-    fetch('/api/v1/reports/dashboard', { headers: getApiHeaders(accessToken) })
-      .then((res) => {
-        if (res.status === 404) {
-          setDashboardReportId(null);
-          setLoading(false);
-          return null;
-        }
-        if (!res.ok) throw new Error(`Failed to load dashboard: ${res.status}`);
-        return res.json();
-      })
-      .then((data: ReportVersion | null) => {
-        setDashboardReportId(data?.report_id ?? null);
-        setLoading(false);
-      })
-      .catch(() => {
-        setDashboardReportId(null);
-        setLoading(false);
-      });
-  }, [accessToken, auth_required, tick]);
-
-  return { dashboardReportId, loading, refresh };
+  return {
+    dashboardReportId: error ? null : data,
+    loading,
+    refresh,
+  };
 }
 
 export function useDashboardReport(): {
@@ -261,15 +255,11 @@ export function useDashboardReport(): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  // Initialize from cache immediately to skip the loading flash on repeat visits
-  const [report, setReport] = useState<Report | undefined>(
-    dashboardCacheEntry?.report,
-  );
-  const [queryCapabilities, setQueryCapabilities] = useState<
-    Record<string, string> | undefined
-  >(dashboardCacheEntry?.queryCapabilities);
-  const [loading, setLoading] = useState(!dashboardCacheEntry);
-  const [notConfigured, setNotConfigured] = useState(false);
+  const [result, setResult] = useState<{
+    key: string;
+    entry: DashboardCacheEntry | null;
+    notConfigured: boolean;
+  } | null>(null);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => {
@@ -277,20 +267,21 @@ export function useDashboardReport(): {
     setTick((t) => t + 1);
   }, []);
 
+  const requestKey = resourceKey(
+    'dashboard-report',
+    auth_required,
+    accessToken,
+    tick,
+  );
+  // Read during render, not from an effect: serving the cache from an effect
+  // is what put a loading flash on every repeat visit, and the effect then had
+  // to set three states to undo it.
+  const cached = dashboardCacheEntry;
+  const settled = result !== null && result.key === requestKey ? result : null;
+
   useEffect(() => {
-    if (auth_required && !accessToken) return;
-
-    // Serve from cache if populated
-    if (dashboardCacheEntry) {
-      setReport(dashboardCacheEntry.report);
-      setQueryCapabilities(dashboardCacheEntry.queryCapabilities);
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
-    setQueryCapabilities(undefined);
-    setNotConfigured(false);
+    if (auth_required && !accessToken) return undefined;
+    if (dashboardCacheEntry) return undefined;
 
     let cancelled = false;
 
@@ -299,10 +290,8 @@ export function useDashboardReport(): {
     })
       .then((res) => {
         if (res.status === 404) {
-          if (!cancelled) {
-            setNotConfigured(true);
-            setLoading(false);
-          }
+          if (!cancelled)
+            setResult({ key: requestKey, entry: null, notConfigured: true });
           return null;
         }
         if (!res.ok)
@@ -310,30 +299,34 @@ export function useDashboardReport(): {
         return res.json();
       })
       .then((data: ReportVersion | null) => {
-        if (cancelled) return;
-        if (data) {
-          dashboardCacheEntry = {
-            report: data.config,
-            queryCapabilities: data.query_capabilities ?? undefined,
-          };
-          setReport(data.config);
-          setQueryCapabilities(data.query_capabilities ?? undefined);
-        }
-        setLoading(false);
+        if (cancelled || !data) return;
+        const entry: DashboardCacheEntry = {
+          report: data.config,
+          queryCapabilities: data.query_capabilities ?? undefined,
+        };
+        dashboardCacheEntry = entry;
+        setResult({ key: requestKey, entry, notConfigured: false });
       })
       .catch(() => {
-        if (!cancelled) {
-          setNotConfigured(true);
-          setLoading(false);
-        }
+        if (!cancelled)
+          setResult({ key: requestKey, entry: null, notConfigured: true });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [accessToken, auth_required, tick]);
+  }, [requestKey, accessToken, auth_required]);
 
-  return { report, queryCapabilities, loading, notConfigured, refresh };
+  // As in `useReport`: the dashboard already on screen stays on screen while
+  // the next load runs.
+  const entry = cached ?? result?.entry ?? null;
+  return {
+    report: entry?.report,
+    queryCapabilities: entry?.queryCapabilities,
+    loading: cached === null && settled === null,
+    notConfigured: settled?.notConfigured ?? false,
+    refresh,
+  };
 }
 
 export function useAllReports(): {
@@ -342,40 +335,30 @@ export function useAllReports(): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [reports, setReports] = useState<Report[]>([]);
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-
-    fetch('/api/v1/reports', { headers: getApiHeaders(accessToken) })
-      .then((res) => {
-        if (!res.ok)
-          throw new Error(`Failed to load reports list: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { reports: ReportListItem[] }) => {
-        const items = data.reports ?? [];
-        return Promise.all(
-          items.map((item) =>
-            fetch(`/api/v1/reports/${item.report_id}`, {
-              headers: getApiHeaders(accessToken),
-            })
-              .then((res) => res.json())
-              .then((v: ReportVersion) => v.config),
-          ),
-        );
-      })
-      .then((allReports: Report[]) => {
-        setReports(allReports);
-        setLoading(false);
-      })
-      .catch(() => {
-        setLoading(false);
-      });
-  }, [accessToken, auth_required]);
+  const { data: reports, loading } = useAsyncResource<Report[]>(
+    resourceKey('all-reports', auth_required, accessToken),
+    auth_required && !accessToken
+      ? null
+      : async () => {
+          const res = await fetch('/api/v1/reports', {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load reports list: ${res.status}`);
+          const data: { reports: ReportListItem[] } = await res.json();
+          return Promise.all(
+            (data.reports ?? []).map((item) =>
+              fetch(`/api/v1/reports/${item.report_id}`, {
+                headers: getApiHeaders(accessToken),
+              })
+                .then((response) => response.json())
+                .then((version: ReportVersion) => version.config),
+            ),
+          );
+        },
+    [],
+  );
 
   return { reports, loading };
 }
@@ -590,31 +573,26 @@ export function useReportVersionsList(reportId: string | undefined): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [versions, setVersions] = useState<ReportVersion[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    if (!reportId) return;
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    fetch(`/api/v1/reports/${reportId}/versions`, {
-      headers: getApiHeaders(accessToken),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load versions: ${res.status}`);
-        return res.json();
-      })
-      .then((data: { versions: ReportVersion[] }) => {
-        setVersions(data.versions ?? []);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [reportId, accessToken, auth_required]);
+  const {
+    data: versions,
+    loading,
+    error,
+  } = useAsyncResource<ReportVersion[]>(
+    resourceKey('report-versions', reportId, auth_required, accessToken),
+    !reportId || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(`/api/v1/reports/${reportId}/versions`, {
+            headers: getApiHeaders(accessToken),
+          });
+          if (!res.ok)
+            throw new Error(`Failed to load versions: ${res.status}`);
+          const data: { versions: ReportVersion[] } = await res.json();
+          return data.versions ?? [];
+        },
+    [],
+  );
 
   return { versions, loading, error };
 }
@@ -629,41 +607,31 @@ export function useReportVersion(
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [reportVersion, setReportVersion] = useState<ReportVersion | undefined>(
+
+  const { data, loading, error } = useAsyncResource<ReportVersion | undefined>(
+    resourceKey(
+      'report-version',
+      reportId,
+      versionNum,
+      auth_required,
+      accessToken,
+    ),
+    !reportId || !versionNum || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const res = await fetch(
+            `/api/v1/reports/${reportId}/versions/${versionNum}${REPORT_QUERY_CAPABILITIES_QUERY}`,
+            { headers: getApiHeaders(accessToken) },
+          );
+          if (!res.ok) throw new Error(`Failed to load version: ${res.status}`);
+          return (await res.json()) as ReportVersion;
+        },
     undefined,
   );
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
 
-  useEffect(() => {
-    if (!reportId || !versionNum) return;
-    if (auth_required && !accessToken) return;
-
-    setLoading(true);
-    setReportVersion(undefined);
-    setError(null);
-
-    fetch(
-      `/api/v1/reports/${reportId}/versions/${versionNum}${REPORT_QUERY_CAPABILITIES_QUERY}`,
-      {
-        headers: getApiHeaders(accessToken),
-      },
-    )
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load version: ${res.status}`);
-        return res.json();
-      })
-      .then((data: ReportVersion) => {
-        setReportVersion(data);
-        setLoading(false);
-      })
-      .catch((err: Error) => {
-        setError(err);
-        setLoading(false);
-      });
-  }, [reportId, versionNum, accessToken, auth_required]);
-
-  return { reportVersion, loading, error };
+  // A version already on screen is not an answer about the one being asked
+  // for: this view blanks while it loads rather than showing the last one.
+  return { reportVersion: loading ? undefined : data, loading, error };
 }
 
 export function useReport(reportId: string | undefined): {
@@ -677,24 +645,11 @@ export function useReport(reportId: string | undefined): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  // Initialize from cache immediately to skip the loading flash on repeat visits
-  const cachedCandidate = reportId
-    ? reportCapabilitiesCache.get(reportId)
-    : undefined;
-  const cached =
-    cachedCandidate && hasValidReportRows(cachedCandidate.report)
-      ? cachedCandidate
-      : undefined;
-  const [report, setReport] = useState<Report | undefined>(cached?.report);
-  const [name, setName] = useState<string | undefined>(cached?.name);
-  const [reportVersion, setReportVersion] = useState<ReportVersion | undefined>(
-    cached?.reportVersion,
-  );
-  const [queryCapabilities, setQueryCapabilities] = useState<
-    Record<string, string> | undefined
-  >(cached?.queryCapabilities);
-  const [loading, setLoading] = useState(!cached);
-  const [error, setError] = useState<Error | null>(null);
+  const [result, setResult] = useState<{
+    key: string;
+    entry: ReportCacheEntry | null;
+    error: Error | null;
+  } | null>(null);
   const [tick, setTick] = useState(0);
 
   const refresh = useCallback(() => {
@@ -702,27 +657,34 @@ export function useReport(reportId: string | undefined): {
     setTick((t) => t + 1);
   }, [reportId]);
 
-  useEffect(() => {
-    if (!reportId) return;
-    if (auth_required && !accessToken) return;
+  const requestKey = resourceKey(
+    'report',
+    reportId,
+    auth_required,
+    accessToken,
+    tick,
+  );
+  // Read during render, not copied out of the cache by an effect: serving a hit
+  // from an effect costs a loading flash on every repeat visit, and then five
+  // state writes to take it back.
+  const cachedCandidate = reportId
+    ? reportCapabilitiesCache.get(reportId)
+    : undefined;
+  const cached =
+    cachedCandidate && hasValidReportRows(cachedCandidate.report)
+      ? cachedCandidate
+      : undefined;
+  const settled = result !== null && result.key === requestKey ? result : null;
 
-    // Serve from cache if populated (navigating back to a previously-loaded report)
+  useEffect(() => {
+    if (!reportId) return undefined;
+    if (auth_required && !accessToken) return undefined;
+
     const hit = reportCapabilitiesCache.get(reportId);
-    if (hit && hasValidReportRows(hit.report)) {
-      setReport(hit.report);
-      setName(hit.name);
-      setReportVersion(hit.reportVersion);
-      setQueryCapabilities(hit.queryCapabilities);
-      setLoading(false);
-      return;
-    }
+    if (hit && hasValidReportRows(hit.report)) return undefined;
     if (hit) reportCapabilitiesCache.delete(reportId);
 
     let cancelled = false;
-
-    setLoading(true);
-    setQueryCapabilities(undefined);
-    setError(null);
 
     fetch(`/api/v1/reports/${reportId}${REPORT_QUERY_CAPABILITIES_QUERY}`, {
       headers: getApiHeaders(accessToken),
@@ -740,30 +702,29 @@ export function useReport(reportId: string | undefined): {
           queryCapabilities: data.query_capabilities ?? undefined,
         };
         reportCapabilitiesCache.set(reportId, entry);
-        setReport(data.config);
-        setName(data.name);
-        setReportVersion(data);
-        setQueryCapabilities(data.query_capabilities ?? undefined);
-        setLoading(false);
+        setResult({ key: requestKey, entry, error: null });
       })
       .catch((err: Error) => {
         if (cancelled) return;
-        setError(err);
-        setLoading(false);
+        setResult({ key: requestKey, entry: null, error: err });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [reportId, accessToken, auth_required, tick]);
+  }, [requestKey, reportId, accessToken, auth_required]);
+
+  // The last report loaded stays readable while the next one is fetched, which
+  // is what kept a refresh from blanking the page it is refreshing.
+  const entry = cached ?? result?.entry ?? null;
 
   return {
-    report,
-    name,
-    reportVersion,
-    queryCapabilities,
-    loading,
-    error,
+    report: entry?.report,
+    name: entry?.name,
+    reportVersion: entry?.reportVersion,
+    queryCapabilities: entry?.queryCapabilities,
+    loading: cached === undefined && settled === null,
+    error: settled?.error ?? null,
     refresh,
   };
 }

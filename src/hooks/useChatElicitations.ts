@@ -38,11 +38,23 @@ export interface ChatElicitation {
 
 export type InputAction = 'accept' | 'decline' | 'cancel';
 
+const NO_ELICITATIONS: ChatElicitation[] = [];
+const NO_DISMISSED: string[] = [];
+
 export function useChatElicitations(threadId: string | null, busy: boolean) {
   const { authHeaders, checkAuthReady } = useAuthHeaders();
-  const [items, setItems] = useState<ChatElicitation[]>([]);
-  const [dismissed, setDismissed] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  // Both pieces of per-thread state carry the thread they belong to, so
+  // switching threads drops the previous one's cards and its error by being
+  // read past rather than by an effect that clears them a render later.
+  const [loaded, setLoaded] = useState<{
+    threadId: string;
+    items: ChatElicitation[];
+    error: string | null;
+  } | null>(null);
+  const [dismissed, setDismissed] = useState<{
+    threadId: string | null;
+    ids: string[];
+  }>({ threadId: null, ids: NO_DISMISSED });
   const currentThread = useRef(threadId);
   currentThread.current = threadId;
   const refresh = useCallback(async () => {
@@ -60,19 +72,26 @@ export function useChatElicitations(threadId: string | null, busy: boolean) {
       if (!Array.isArray(data.elicitations))
         throw new Error('Invalid input request list.');
       if (currentThread.current === threadId) {
-        setItems(data.elicitations);
-        setError(null);
+        setLoaded({ threadId, items: data.elicitations, error: null });
       }
     } catch {
       if (currentThread.current === threadId)
-        setError('Could not load external input requests.');
+        setLoaded((current) => ({
+          threadId,
+          items:
+            current !== null && current.threadId === threadId
+              ? current.items
+              : NO_ELICITATIONS,
+          error: 'Could not load external input requests.',
+        }));
     }
   }, [threadId, authHeaders, checkAuthReady]);
-  useEffect(() => {
-    setItems([]);
-    setDismissed([]);
-    setError(null);
-  }, [threadId]);
+  const current =
+    loaded !== null && loaded.threadId === threadId ? loaded : null;
+  const items = current ? current.items : NO_ELICITATIONS;
+  const error = current ? current.error : null;
+  const dismissedIds =
+    dismissed.threadId === threadId ? dismissed.ids : NO_DISMISSED;
   useEffect(() => {
     if (!threadId) return;
     void refresh();
@@ -107,18 +126,31 @@ export function useChatElicitations(threadId: string | null, busy: boolean) {
   // interrupted delivery. Dismissal closes the card over that gap without
   // giving the recovery up -- it is local to this view, so a reload brings an
   // unclaimed card back, and a delivery that fails to dispatch restores it.
-  const dismiss = useCallback((id: string) => {
-    setDismissed((old) => (old.includes(id) ? old : [...old, id]));
-  }, []);
-  const restore = useCallback((id: string) => {
-    setDismissed((old) => old.filter((value) => value !== id));
-  }, []);
+  const dismiss = useCallback(
+    (id: string) => {
+      setDismissed((old) => {
+        if (old.threadId !== threadId) return { threadId, ids: [id] };
+        return old.ids.includes(id) ? old : { threadId, ids: [...old.ids, id] };
+      });
+    },
+    [threadId],
+  );
+  const restore = useCallback(
+    (id: string) => {
+      setDismissed((old) =>
+        old.threadId === threadId
+          ? { threadId, ids: old.ids.filter((value) => value !== id) }
+          : old,
+      );
+    },
+    [threadId],
+  );
   return {
     items: items.filter(
       (item) =>
         item.thread_id === threadId &&
         item.status !== 'consumed' &&
-        !dismissed.includes(item.elicitation_id),
+        !dismissedIds.includes(item.elicitation_id),
     ),
     error,
     respond,

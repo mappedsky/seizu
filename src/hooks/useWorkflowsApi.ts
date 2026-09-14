@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
+import { resourceKey, useAsyncResource } from 'src/hooks/useAsyncResource';
 import { ScheduleSpec } from 'src/scheduleSpec';
 
 export interface WorkflowParameter {
@@ -97,6 +98,8 @@ function headers(token: string | null): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+const NO_WORKFLOWS: WorkflowItem[] = [];
+
 async function apiError(response: Response, fallback: string): Promise<Error> {
   try {
     const data = (await response.json()) as { error?: string; detail?: string };
@@ -114,18 +117,24 @@ export function useWorkflowsList(options: { poll?: boolean } = {}): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
+  // One keyed result rather than a list and an error kept in step by hand: a
+  // poll that fails must not leave the previous poll's error on screen, and
+  // scoping the error to the request that produced it does that without an
+  // effect having to clear it on the way in.
+  const [result, setResult] = useState<{
+    key: string;
+    workflows: WorkflowItem[];
+    error: Error | null;
+  } | null>(null);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((value) => value + 1), []);
+  const requestKey = resourceKey('workflows', auth_required, accessToken, tick);
 
   useEffect(() => {
     if (auth_required && !accessToken) return undefined;
     const controller = new AbortController();
     let cancelled = false;
     let pollTimer: ReturnType<typeof setTimeout> | undefined;
-    setError(null);
     fetch('/api/v1/workflows', {
       headers: headers(accessToken),
       signal: controller.signal,
@@ -136,14 +145,23 @@ export function useWorkflowsList(options: { poll?: boolean } = {}): {
         return response.json() as Promise<{ workflows: WorkflowItem[] }>;
       })
       .then((data) => {
-        if (!cancelled) setWorkflows(data.workflows ?? []);
+        if (!cancelled)
+          setResult({
+            key: requestKey,
+            workflows: data.workflows ?? [],
+            error: null,
+          });
       })
       .catch((reason: Error) => {
-        if (!cancelled && reason.name !== 'AbortError') setError(reason);
+        if (cancelled || reason.name === 'AbortError') return;
+        setResult((previous) => ({
+          key: requestKey,
+          workflows: previous ? previous.workflows : NO_WORKFLOWS,
+          error: reason,
+        }));
       })
       .finally(() => {
         if (cancelled) return;
-        setLoading(false);
         if (options.poll !== false) pollTimer = setTimeout(refresh, 5000);
       });
     return () => {
@@ -151,9 +169,16 @@ export function useWorkflowsList(options: { poll?: boolean } = {}): {
       controller.abort();
       if (pollTimer) clearTimeout(pollTimer);
     };
-  }, [accessToken, auth_required, options.poll, refresh, tick]);
+  }, [accessToken, auth_required, options.poll, refresh, requestKey]);
 
-  return { workflows, loading, error, refresh };
+  return {
+    workflows: result ? result.workflows : NO_WORKFLOWS,
+    // A poll is not a load: `loading` is "nothing has arrived yet", so the
+    // five-second refresh does not flash the list back to a spinner.
+    loading: result === null,
+    error: result !== null && result.key === requestKey ? result.error : null,
+    refresh,
+  };
 }
 
 export function useWorkflow(id: string | null): {
@@ -164,26 +189,29 @@ export function useWorkflow(id: string | null): {
 } {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
-  const [workflow, setWorkflow] = useState<WorkflowItem | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((value) => value + 1), []);
-  useEffect(() => {
-    if (!id || (auth_required && !accessToken)) return;
-    setLoading(true);
-    fetch(`/api/v1/workflows/${encodeURIComponent(id)}`, {
-      headers: headers(accessToken),
-    })
-      .then(async (response) => {
-        if (!response.ok)
-          throw await apiError(response, 'Failed to load workflow.');
-        return response.json() as Promise<WorkflowItem>;
-      })
-      .then(setWorkflow)
-      .catch((reason: Error) => setError(reason))
-      .finally(() => setLoading(false));
-  }, [accessToken, auth_required, id, tick]);
+
+  const {
+    data: workflow,
+    loading,
+    error,
+  } = useAsyncResource<WorkflowItem | null>(
+    resourceKey('workflow', id, auth_required, accessToken, tick),
+    !id || (auth_required && !accessToken)
+      ? null
+      : async () => {
+          const response = await fetch(
+            `/api/v1/workflows/${encodeURIComponent(id)}`,
+            { headers: headers(accessToken) },
+          );
+          if (!response.ok)
+            throw await apiError(response, 'Failed to load workflow.');
+          return (await response.json()) as WorkflowItem;
+        },
+    null,
+  );
+
   return { workflow, loading, error, refresh };
 }
 
