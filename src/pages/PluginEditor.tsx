@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import {
   Alert,
   Box,
@@ -660,9 +660,7 @@ export default function PluginEditor() {
 
   return (
     <>
-      <Helmet>
-        <title>{`Edit ${pluginId} | Seizu`}</title>
-      </Helmet>
+      <PageTitle>{`Edit ${pluginId} | Seizu`}</PageTitle>
       <Box
         sx={{
           display: 'flex',

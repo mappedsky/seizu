@@ -1,12 +1,10 @@
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { Box, Button, Container, Typography } from '@mui/material';
 
 function LoggedOut() {
   return (
     <>
-      <Helmet>
-        <title>Logged out | Seizu</title>
-      </Helmet>
+      <PageTitle>Logged out | Seizu</PageTitle>
       <Box
         sx={{
           backgroundColor: 'background.default',

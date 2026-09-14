@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import {
   Alert,
   Box,
@@ -277,9 +277,7 @@ function ScheduledChats() {
 
   return (
     <>
-      <Helmet>
-        <title>Scheduled Chats | Seizu</title>
-      </Helmet>
+      <PageTitle>Scheduled Chats | Seizu</PageTitle>
       <Box sx={pageContentSx}>
         <ListPageHeader
           title="Scheduled Chats"

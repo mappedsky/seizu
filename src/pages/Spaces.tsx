@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { useNavigate } from 'react-router-dom';
 import {
   Alert,
@@ -273,9 +273,7 @@ function Spaces() {
 
   return (
     <>
-      <Helmet>
-        <title>Spaces | Seizu</title>
-      </Helmet>
+      <PageTitle>Spaces | Seizu</PageTitle>
       <Box sx={pageContentSx}>
         <ListPageHeader
           title="Spaces"

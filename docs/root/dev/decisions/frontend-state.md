@@ -73,3 +73,38 @@ a ref it cleared on entry, which a double-invoked effect defeats by design.
 If the value genuinely cannot be derived — it needs the clock, or a DOM
 measurement — take it where it happens (a state updater, a ref callback) rather
 than in an effect.
+
+## UI-004 — The browser tab is named by `PageTitle`, not a head-management library
+
+**Applies to:** `src/components/PageTitle.tsx`
+
+All 26 call sites used `react-helmet` for a `<title>` and nothing else — no
+`meta`, `link` or `script`. It is replaced by a component that sets
+`document.title` from an effect and restores what `index.html` declared when
+the last one unmounts.
+
+**Why:** `react-helmet` is built on `react-side-effect`, which registers in
+`UNSAFE_componentWillMount`. Under [UI-001](#ui-001-the-app-renders-under-strictmode)
+that logs `Using UNSAFE_componentWillMount in strict mode is not recommended …
+SideEffect(NullComponent)` on every page. The package has not shipped since
+2020, so it will not be fixed, and swapping to a maintained fork would have
+kept a dependency whose entire remaining job is one assignment to
+`document.title`.
+
+**Restoring on unmount is load-bearing,** not tidiness: around a dozen routes
+(the query console, chat, toolsets, roles, …) set no title at all, so without
+it the tab would keep the previous page's title after navigating to one of
+them.
+
+**Exactly one may be mounted at a time,** which is why `ReportView` takes a
+`documentTitle` prop instead of a page rendering a second one beside it. Helmet
+resolved two claims by "innermost wins", an order it got from registering
+during render; effects run child-first, so the naive replacement silently
+inverts that. Rather than depend on an ordering React does not promise, the
+component warns in development when a second one mounts, and the two call sites
+that nested (`SpaceDetail`, `ReportVersionView`) each name one owner. Fixing
+those also revived `ReportVersionView`'s version-qualified title, which the
+nested `ReportView` had been overwriting since it was written.
+
+**Don't:** reintroduce a head library for a title, or render a `PageTitle`
+inside a component that a page may also title.

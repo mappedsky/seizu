@@ -1,5 +1,5 @@
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { Box, Button, Chip, Tooltip, Typography } from '@mui/material';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
@@ -217,11 +217,9 @@ function RoleHistory() {
 
   return (
     <>
-      <Helmet>
-        <title>
-          {roleName ? `History - ${roleName} | Seizu` : 'History | Seizu'}
-        </title>
-      </Helmet>
+      <PageTitle>
+        {roleName ? `History - ${roleName} | Seizu` : 'History | Seizu'}
+      </PageTitle>
       <Box sx={pageContentSx}>
         {fromLabel && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import {
   Box,
   Collapse,
@@ -35,6 +35,13 @@ interface ReportViewProps {
   report: Report;
   title?: string;
   showTitle?: boolean;
+  /**
+   * What the browser tab shows, without the " | Seizu" suffix. Defaults to the
+   * report's own title; a caller that frames the report differently (one
+   * specific version) says so here rather than mounting a second PageTitle, of
+   * which only one may exist.
+   */
+  documentTitle?: string;
   boxSx?: object;
   queryCapabilities?: Record<string, string>;
   toolbarActions?: (controls: RefreshControls) => React.ReactNode;
@@ -86,6 +93,7 @@ function ReportView({
   report,
   title,
   showTitle = false,
+  documentTitle,
   boxSx = { minHeight: '100%', pb: 3 },
   queryCapabilities,
   toolbarActions,
@@ -93,6 +101,7 @@ function ReportView({
   onRefreshCapabilities,
 }: ReportViewProps) {
   const displayTitle = title ?? report.name;
+  const tabTitle = documentTitle ?? displayTitle;
   const reportQueries = useMemo(() => report.queries ?? {}, [report]);
   const reportRows = Array.isArray(report.rows) ? report.rows : [];
   const hasInvalidRows = !Array.isArray(report.rows);
@@ -502,11 +511,7 @@ function ReportView({
 
   return (
     <>
-      {displayTitle && (
-        <Helmet>
-          <title>{displayTitle} | Seizu</title>
-        </Helmet>
-      )}
+      {tabTitle && <PageTitle>{tabTitle} | Seizu</PageTitle>}
       <Box sx={boxSx}>
         {hasToolbarContent && toolbar}
         {isSticky && (

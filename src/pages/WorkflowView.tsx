@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Accordion,
@@ -293,9 +293,7 @@ export default function WorkflowView() {
 
   return (
     <Box sx={pageContentSx}>
-      <Helmet>
-        <title>{workflow.name} | Workflows | Seizu</title>
-      </Helmet>
+      <PageTitle>{workflow.name} | Workflows | Seizu</PageTitle>
       <Button
         size="small"
         startIcon={<ArrowBackIcon />}

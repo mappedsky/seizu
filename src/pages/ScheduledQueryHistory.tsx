@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { Box, Button, Typography } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import HistoryIcon from '@mui/icons-material/History';
@@ -165,11 +165,9 @@ function ScheduledQueryHistory() {
 
   return (
     <>
-      <Helmet>
-        <title>
-          {queryName ? `History – ${queryName} | Seizu` : `History | Seizu`}
-        </title>
-      </Helmet>
+      <PageTitle>
+        {queryName ? `History – ${queryName} | Seizu` : `History | Seizu`}
+      </PageTitle>
       <Box sx={pageContentSx}>
         {fromLabel && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>

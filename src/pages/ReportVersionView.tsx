@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
 import {
   Alert,
   Box,
@@ -104,10 +103,6 @@ function ReportVersionView() {
 
   return (
     <>
-      <Helmet>
-        <title>{`v${reportVersion.version} – ${reportVersion.name} | Seizu`}</title>
-      </Helmet>
-
       {/* Top action bar */}
       <Box
         sx={{
@@ -226,6 +221,7 @@ function ReportVersionView() {
       <ReportView
         report={reportVersion.config as Report}
         title={reportVersion.name}
+        documentTitle={`v${reportVersion.version} – ${reportVersion.name}`}
         showTitle
         queryCapabilities={reportVersion.query_capabilities ?? undefined}
         stickyToolbar={false}

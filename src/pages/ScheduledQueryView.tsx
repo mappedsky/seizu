@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import {
   Accordion,
   AccordionDetails,
@@ -727,11 +727,9 @@ function ScheduledQueryView() {
 
   return (
     <>
-      <Helmet>
-        <title>
-          {query ? `${query.name} | Seizu` : 'Scheduled Query | Seizu'}
-        </title>
-      </Helmet>
+      <PageTitle>
+        {query ? `${query.name} | Seizu` : 'Scheduled Query | Seizu'}
+      </PageTitle>
       <Box sx={pageContentSx}>
         {fromLabel && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>

@@ -28,10 +28,6 @@ jest.mock('src/components/UserDisplay', () => ({
   default: ({ userId }: { userId: string }) => <>{userId}</>,
 }));
 
-jest.mock('react-helmet', () => ({
-  Helmet: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
-
 const mockUsePermissionState =
   usePermissionsModule.usePermissionState as jest.MockedFunction<
     typeof usePermissionsModule.usePermissionState

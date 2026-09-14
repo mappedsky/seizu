@@ -1,5 +1,5 @@
 import { useContext, useEffect, useState } from 'react';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Box, Button, Paper, Typography } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
@@ -49,9 +49,7 @@ export default function WorkflowHistory() {
   );
   return (
     <Box sx={pageContentSx}>
-      <Helmet>
-        <title>History – {name} | Seizu</title>
-      </Helmet>
+      <PageTitle>History – {name} | Seizu</PageTitle>
       <Button
         startIcon={<ArrowBackIcon />}
         onClick={() => navigate(`/app/workflows/${id}`)}

@@ -4,7 +4,7 @@ import {
   useNavigate,
   useSearchParams,
 } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import {
   Box,
   Button,
@@ -600,9 +600,7 @@ function ReportsList() {
 
   return (
     <>
-      <Helmet>
-        <title>Reports | Seizu</title>
-      </Helmet>
+      <PageTitle>Reports | Seizu</PageTitle>
       <Box sx={pageContentSx}>
         <ListPageHeader
           title="Reports"

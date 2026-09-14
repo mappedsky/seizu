@@ -1,5 +1,5 @@
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { Helmet } from 'react-helmet';
+import PageTitle from 'src/components/PageTitle';
 import { Box, Button, Typography } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import HistoryIcon from '@mui/icons-material/History';
@@ -140,13 +140,9 @@ function ScheduledChatHistory() {
 
   return (
     <>
-      <Helmet>
-        <title>
-          {scheduleName
-            ? `History – ${scheduleName} | Seizu`
-            : 'History | Seizu'}
-        </title>
-      </Helmet>
+      <PageTitle>
+        {scheduleName ? `History – ${scheduleName} | Seizu` : 'History | Seizu'}
+      </PageTitle>
       <Box sx={pageContentSx}>
         {fromLabel && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
