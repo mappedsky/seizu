@@ -1177,6 +1177,15 @@ no-op context manager when tracing is off, and budget decisions read the ledger
 (`chat_budget`) rather than any of this. A run must spend the same whether or
 not the collector is reachable.
 
+**The local collector has its own Compose toggle.** `make otel_enable` selects
+the local endpoint and enables telemetry; `make otel_disable` clears that
+endpoint and deselects the collector. `OTEL_COLLECTOR_ENABLED` controls the
+`tracing` profile independently of `TELEMETRY_ENABLED`, because a remote OTLP
+endpoint does not need a local collector. Disable preserves remote endpoints,
+and `make down` includes all Compose profiles even when their toggles are
+already off; otherwise the documented disable-then-restart sequence leaves
+optional services running. This also covers external MCP and auth containers.
+
 **Not metrics.** Step ids are content-derived (`s2-cve-2026-44432-61daf8`), which
 is fine as a span attribute and unusable as a metric label; anything wanting
 aggregate counters should derive them in the backend.
@@ -2044,6 +2053,47 @@ Related, and a hazard in its own right: `reconnectToStream` deletes this
 thread's pending slot on a 204, and a turn admitted while that probe was in
 flight is newer than the answer. It now deletes only the slot it asked about.
 
+**The conversation opens on the session's response, not on the admission's.**
+Both are small writes — locally 10-70ms to create the session and ~30ms to admit
+the turn — but waiting for the pair meant the question left the composer and
+nothing took its place: no route change, no sidebar entry, no transcript. The
+session is enough to be right about everything the page shows, so navigation,
+the seed and the sidebar entry happen on it, and the admission is asked for
+*before* anything re-keys but awaited after. Only the failure report waits: a
+turn that was never admitted leaves the question on screen in a conversation
+that exists, so asking again is retyping nothing.
+
+**And the first turn a process serves is not a small write at all.** Measured
+against a freshly restarted web service, admission took 3.5s on the first
+request of each worker and 30ms on every one after it. Almost all of it is the
+deferred `import litellm` behind the first model-capability lookup (~3.2s in
+this image), with the Temporal client connect another ~100ms; both are one-time
+per process, and both were being paid by whoever opened the first conversation
+after a deploy or a worker recycle. `chat_turns.warm_chat_dispatch`, called from
+the app lifespan when chat is enabled, moves them to startup: the first
+admission after a restart now answers in 60ms.
+
+What it warms is deliberately narrow. The import is the cost, not the lookup, so
+it imports litellm (`chat_models.warm_model_metadata`) rather than resolving a
+model — resolving reads the profile store, and a startup that queries the
+database to warm an import is doing something it was not asked to. It is a
+warm-up, not a precondition: each half is logged and left to the lazy path it
+stood in for, because Temporal being unreachable at boot is not a reason to
+refuse every other request.
+
+That reordering is why the transport records an admission while it is in flight
+(`PendingSend.admission`). The reattach now lands inside that window, and the
+204 hazard above is exactly what it would hit — the probe would answer about a
+turn being admitted right then and discard the record of it. Waiting on the
+admission it is already holding is the only answer that is not a guess; when
+that admission fails there is no stream to hand back, and whoever asked for it
+reports the failure rather than the reattach reporting it twice.
+
+The session is also *named* by the question at creation, rather than by the
+auto-title PATCH that follows the first turn. Same text, same truncation — but
+the sidebar entry arrives readable instead of blank, and a new conversation
+costs one fewer write.
+
 ## AGT-009 — Answer-only plan steps require complete evidence
 
 **Applies to:** `chat_orchestrator._PLANNER_PROMPT`
@@ -2674,6 +2724,12 @@ re-expand itself from a measurement of when it had pinned — inferring the user
 intent from scroll position, and unpredictable to use. Nothing moves it now but a
 click, and its height is bounded (`min(300px, 40vh)`) rather than reserved, so a
 two-entry trace takes two rows.
+
+The pane follows streamed output while the reader is near the bottom, pauses
+when they scroll up, and resumes when they return to the bottom. That position
+is recorded on scroll, before the next content update: measuring it after an
+update mistakes a large chunk of new output for the reader having scrolled away
+and stops following. Reopening the pane also applies the recorded follow state.
 
 **What is *not* persisted:** a plan step's thinking is live-only. Worker
 `LLMTurnResult.details` are dropped, and `_orchestration_details` rebuilds a

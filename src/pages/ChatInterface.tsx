@@ -72,6 +72,7 @@ import type {
 } from 'src/hooks/useChatElicitations';
 import { useChatHumanInputResume } from 'src/hooks/useChatHumanInputResume';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
+import { CHAT_LANDING_PATH, chatSessionPath } from 'src/utils/chatPaths';
 import { pageContentSx } from 'src/theme/layout';
 
 // How often the streamed answer is written into React state.
@@ -86,6 +87,19 @@ import { pageContentSx } from 'src/theme/layout';
 const CHAT_MESSAGE_THROTTLE_MS = import.meta.env.DEV ? 250 : 50;
 // Matches the API's max_length on the session title (reporting/schema/chat.py).
 const MAX_SESSION_TITLE_LENGTH = 200;
+
+/** A session's name, taken from the question that opened it.
+ *
+ * Stores the whole opening message up to the API's limit rather than a short
+ * preview: the sidebar truncates visually with CSS, so a pre-truncated title
+ * left the hover tooltip showing the ellipsis too.
+ */
+function sessionTitleFor(question: string): string {
+  const text = question.trim();
+  return text.length > MAX_SESSION_TITLE_LENGTH
+    ? `${text.slice(0, MAX_SESSION_TITLE_LENGTH - 1).trimEnd()}…`
+    : text;
+}
 const CHAT_HISTORY_POLL_INTERVAL_MS = 2000;
 const CHAT_HISTORY_POLL_MAX_ATTEMPTS = 30;
 const OUTPUT_LIMIT_NOTICE =
@@ -176,8 +190,6 @@ type SeizuChatMessage = UIMessage<
   }
 >;
 
-const CHAT_LANDING_PATH = '/app/chat';
-
 export function ModelProfileSelect({
   profiles,
   profileId,
@@ -246,10 +258,6 @@ export function ModelProfileSelect({
       </Select>
     </FormControl>
   );
-}
-
-function chatSessionPath(threadId: string): string {
-  return `/app/chat/${encodeURIComponent(threadId)}`;
 }
 
 function formatMessageTime(iso: string | undefined): string {
@@ -712,20 +720,19 @@ const ChatMessageDetails = memo(
     isStreaming?: boolean;
   }) {
     const scrollRef = useRef<HTMLDivElement | null>(null);
+    const followOutputRef = useRef(true);
     const tree = useMemo(() => buildDetailTree(details), [details]);
     // Open by default and moved by nothing but a click. Nothing reopens or
     // recloses it as the turn progresses: a block that moves on its own is what
     // made the sticky version unreadable.
     const [expanded, setExpanded] = useState(true);
 
-    // Follow the content while it streams, but only when the user is already near
-    // the bottom — never yank them away from something they scrolled up to read.
+    // Follow streamed content using the position recorded before it grows.
     useEffect(() => {
       const el = scrollRef.current;
-      if (!el || !isStreaming) return;
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-      if (nearBottom) el.scrollTop = el.scrollHeight;
-    }, [details, isStreaming]);
+      if (!el || !expanded || !isStreaming || !followOutputRef.current) return;
+      el.scrollTop = el.scrollHeight;
+    }, [details, expanded, isStreaming]);
 
     if (details.length === 0) return null;
     return (
@@ -781,6 +788,12 @@ const ChatMessageDetails = memo(
           <AccordionDetails sx={{ px: 0, py: 0 }}>
             <Box
               ref={scrollRef}
+              onScroll={(event) => {
+                const el = event.currentTarget;
+                if (el.clientHeight === 0) return;
+                followOutputRef.current =
+                  el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+              }}
               sx={{
                 // A bound, not a reservation: a two-entry trace takes two rows,
                 // and no turn's trace takes over the view it scrolls through.
@@ -1888,13 +1901,7 @@ export default function ChatInterface() {
     if (!activeSession || activeSession.title || !activeThreadId) return;
     if (autoTitleAttemptRef.current === activeThreadId) return;
     if (!chatSummary.firstUserText) return;
-    // Store the full opening message (up to the API's limit) rather than a
-    // 40-character preview: the sidebar truncates visually with CSS, so a
-    // pre-truncated title left the hover tooltip showing the ellipsis too.
-    const title =
-      chatSummary.firstUserText.length > MAX_SESSION_TITLE_LENGTH
-        ? `${chatSummary.firstUserText.slice(0, MAX_SESSION_TITLE_LENGTH - 1).trimEnd()}…`
-        : chatSummary.firstUserText;
+    const title = sessionTitleFor(chatSummary.firstUserText);
     autoTitleAttemptRef.current = activeThreadId;
     void updateSession(activeThreadId, title)
       // Cleared on success rather than on the way in: the banner is about the
@@ -1927,9 +1934,20 @@ export default function ChatInterface() {
     navigate(CHAT_LANDING_PATH);
   }, [navigate, setMessages]);
 
-  // The landing's question: create the session, then let the send happen once
-  // `useChat` has re-keyed to it. Sending in this callback would post to the
-  // chat instance still keyed to the previous thread.
+  // The landing's question: create the session, show it, and admit its turn.
+  //
+  // The conversation opens on the *session's* response, not the admission's.
+  // Creating it is one small write and answers in tens of milliseconds, while
+  // admission also has a workflow to start; waiting for both left the question
+  // gone from the composer and nothing in its place for most of a second. The
+  // session is enough to be right about everything the page shows: the route,
+  // the sidebar entry, and the question itself, seeded into the chat this
+  // commit keys to the new thread.
+  //
+  // The turn is still admitted here rather than sent through the re-keyed chat
+  // -- that ordering is what stopped the first question being lost (AGT-008) --
+  // and the reattach that follows navigation waits on the admission the
+  // transport is holding rather than probing for a turn that has no id yet.
   const handleStartSession = useCallback(
     async (text: string) => {
       setStartError(null);
@@ -1942,14 +1960,17 @@ export default function ChatInterface() {
           throw new Error('Choose a model profile');
         }
         const session = await createSession(
-          '',
+          // Named by the question at creation, so the sidebar entry arrives
+          // readable instead of blank until the turn ends and the auto-title
+          // PATCH lands. Same text, same truncation as that path.
+          sessionTitleFor(text),
           landingProfileId || null,
           landingReasoningEffort || null,
         );
-        // Admitted before anything is navigated or re-keyed, so the question is
-        // the server's before the UI has to be right about anything. If this
-        // throws, the turn does not exist and the user still has their text.
-        await transport.startTurn(session.thread_id, text);
+        // Asked for before anything re-keys, so the transport is holding the
+        // admission by the time the reattach looks for it -- but not awaited
+        // here, which is what the screen used to wait on.
+        const admitted = transport.startTurn(session.thread_id, text);
         setMessages([]);
         setAutoTitleError(null);
         setCreatedHere(session.thread_id);
@@ -1959,6 +1980,9 @@ export default function ChatInterface() {
         setStoredActiveSessionId(session.thread_id);
         setPendingAttach({ threadId: session.thread_id, text });
         navigate(chatSessionPath(session.thread_id));
+        // If this throws the turn does not exist, and the conversation on
+        // screen holds the question: asking again is retyping nothing.
+        await admitted;
       } catch {
         setStartError('Could not start a new conversation. Please try again.');
       } finally {

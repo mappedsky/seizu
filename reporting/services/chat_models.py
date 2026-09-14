@@ -141,6 +141,15 @@ class ModelSpec:
         )
 
 
+def warm_model_metadata() -> None:
+    """Import litellm now, rather than inside the first :func:`capability` call.
+
+    The import is the cost, not the lookup, so this needs no model id and works
+    whatever the deployment is configured with.
+    """
+    import litellm  # noqa: F401
+
+
 @lru_cache(maxsize=64)
 def capability(model_id: str) -> ModelCapability:
     """What litellm knows about a model. Empty for one it does not know."""

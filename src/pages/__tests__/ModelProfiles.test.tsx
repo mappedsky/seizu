@@ -1,11 +1,14 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react';
 import ModelProfiles from 'src/pages/ModelProfiles';
+import { MemoryRouter } from 'react-router-dom';
 import * as permissionsModule from 'src/hooks/usePermissions';
 import * as modelProfilesApi from 'src/hooks/useModelProfilesApi';
 
@@ -22,6 +25,7 @@ jest.mock('src/hooks/useModelProfilesApi', () => ({
     refresh: jest.fn(),
   })),
   useModelProfilesList: jest.fn(),
+  useModelProfileVersionsList: jest.fn(),
   useModelProfileMutations: jest.fn(),
 }));
 
@@ -68,7 +72,11 @@ describe('ModelProfiles', () => {
   afterEach(cleanup);
 
   it('allows the run cost cap to be cleared and replaced', async () => {
-    render(<ModelProfiles />);
+    render(
+      <MemoryRouter>
+        <ModelProfiles />
+      </MemoryRouter>,
+    );
     fireEvent.click(screen.getByRole('button', { name: 'New profile' }));
 
     expect(
@@ -155,9 +163,19 @@ describe('ModelProfiles', () => {
       error: null,
       refresh,
     });
-    render(<ModelProfiles />);
+    render(
+      <MemoryRouter>
+        <ModelProfiles />
+      </MemoryRouter>,
+    );
     expect(screen.getByText('Limited to $1 globally')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Edit Careful' }));
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Model profiles' }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for Careful' }),
+    );
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
     expect(
       screen.getByRole('combobox', {
         name: 'worker summary reasoning',
@@ -185,5 +203,67 @@ describe('ModelProfiles', () => {
     expect(payload).not.toHaveProperty('updated_at');
     expect(payload).not.toHaveProperty('created_by');
     expect(payload).not.toHaveProperty('updated_by');
+  });
+
+  it('confirms deletion and keeps a failed delete open for retry', async () => {
+    const profile: modelProfilesApi.ModelProfile = {
+      profile_id: 'profile-1',
+      name: 'Careful',
+      description: '',
+      enabled: true,
+      is_default: false,
+      primary: { model_id: 'primary-model' },
+      economy: { model_id: 'economy-model', reasoning_effort: 'low' },
+      stage_overrides: {},
+      user_reasoning_efforts: ['low'],
+      default_reasoning_effort: 'low',
+      run_cost_budget_usd: 1,
+      current_version: 1,
+      created_at: '2026-08-25T00:00:00Z',
+      updated_at: '2026-08-25T00:00:00Z',
+      created_by: 'admin',
+    };
+    const remove = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('Delete failed'))
+      .mockResolvedValue(undefined);
+    useModelProfileMutations.mockReturnValue({
+      create,
+      update,
+      remove,
+      versions: jest.fn(),
+    });
+    useModelProfilesList.mockReturnValue({
+      profiles: [profile],
+      globalRunCostBudgetUsd: 1,
+      loading: false,
+      error: null,
+      refresh,
+    });
+    render(
+      <MemoryRouter>
+        <ModelProfiles />
+      </MemoryRouter>,
+    );
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for Careful' }),
+    );
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    const dialog = screen.getByRole('dialog', {
+      name: 'Delete model profile?',
+    });
+    expect(remove).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    });
+    expect(
+      await within(dialog).findByText('Delete failed'),
+    ).toBeInTheDocument();
+    expect(refresh).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    });
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(remove).toHaveBeenNthCalledWith(2, 'profile-1');
   });
 });

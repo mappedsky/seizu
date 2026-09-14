@@ -142,3 +142,38 @@ so was defeated by StrictMode's second pass ([UI-001](#ui-001-the-app-renders-un
 
 **Don't:** compare the URL against the last one the page navigated to. It is
 only *eventually* equal, and the render in between is the bug.
+
+## UI-006 — A feature configures itself at the foot of its own panel
+
+**Applies to:** `src/components/ChatSessionsPanel.tsx`,
+`src/components/SpaceReportsPanel.tsx`, `src/components/DashboardSidebar.tsx`
+
+Settings that belong to a whole feature sit in a bordered footer group at the
+bottom of that feature's panel — a space's sub-space and report actions, chat's
+per-user gateway connections. The main sidebar names product areas and the
+reports pinned to them; it is not where a feature's own configuration goes.
+
+**Why:** "Chat Connections" as a top-level entry read as a peer of Chat, Spaces
+and Workflows, and it is not one — it configures chat, and the page it opens
+already carries a *Back to Chat* button. Reaching it meant leaving the
+conversation through navigation that never mentioned the conversation. The
+space panel had already settled the shape, so chat's version is the same one
+rather than a second idea.
+
+**The other axis is the turn, and it is not this one.** The confirmations pane
+is about the turn on screen, so it stays beside the transcript; the panel footer
+is for what outlives any single conversation. A new chat surface belongs to
+whichever of those it is about.
+
+**Collapsed panels keep the entry**, as an icon with its tooltip: the footer is
+how the setting is reached at all now, so hiding it behind reopening the panel
+would make it harder to find than the sidebar entry it replaced.
+
+**A page opened from a conversation carries it back** (`src/utils/chatPaths.ts`):
+the link names the thread in its query string and the page's back control
+returns there, falling back to the landing only when it was reached some other
+way. In the URL rather than in router state, because connections is where
+someone follows a gateway's authorization link and comes back — a reload must
+not cost them the way back to what they were asking. `/app/chat` is deliberately
+the landing rather than a resumed conversation, so a back link that simply
+pointed at it could not be the way home.

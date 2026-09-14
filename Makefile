@@ -7,7 +7,9 @@ args = `arg="$(filter-out $@,$(MAKECMDGOALS))" && echo $${arg:-${1}}`
 AUTH_PROFILE := $(shell grep -q 'DEVELOPMENT_ONLY_REQUIRE_AUTH=true' .env 2>/dev/null && echo '--profile auth' || echo '')
 # Automatically include --profile external-mcp when its local integration is enabled.
 EXTERNAL_MCP_PROFILE := $(shell grep -q '^MCP_EXTERNAL_ENABLED=true' .env 2>/dev/null && echo '--profile external-mcp' || echo '')
-COMPOSE_PROFILES := $(AUTH_PROFILE) $(EXTERNAL_MCP_PROFILE)
+# Automatically include the local trace collector when enabled in .env.
+OTEL_PROFILE := $(shell grep -q '^OTEL_COLLECTOR_ENABLED=true' .env 2>/dev/null && echo '--profile tracing' || echo '')
+COMPOSE_PROFILES := $(AUTH_PROFILE) $(EXTERNAL_MCP_PROFILE) $(OTEL_PROFILE)
 
 # The environment lives in the image, so a dependency change is a rebuild. A
 # `uv sync` in `docker compose run --rm` is discarded with the container it ran
@@ -217,7 +219,8 @@ up: config_setup check_legacy_persistence_config
 
 .PHONY: down
 down:
-	docker compose $(COMPOSE_PROFILES) down
+	# Stop optional services even after their startup toggles have been disabled.
+	docker compose --profile '*' down
 
 .PHONY: neo4j_current
 neo4j_current: config_setup
@@ -256,8 +259,31 @@ auth_disable:
 	@perl -pi -e 's/DEVELOPMENT_ONLY_REQUIRE_AUTH=true/DEVELOPMENT_ONLY_REQUIRE_AUTH=false/' .env
 	@echo "Auth disabled in .env. Run 'make down && make up' to apply."
 
+.PHONY: otel_enable
+otel_enable:
+	@test -f .env || cp .env.example .env
+	@set -e; for setting in OTEL_COLLECTOR_ENABLED=true TELEMETRY_ENABLED=true TELEMETRY_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces; do \
+		key=$${setting%%=*}; \
+		if grep -q "^$$key=" .env; then \
+			SEIZU_OTEL_KEY="$$key" SEIZU_OTEL_SETTING="$$setting" perl -pi -e 's/^\Q$$ENV{SEIZU_OTEL_KEY}\E=.*/$$ENV{SEIZU_OTEL_SETTING}/' .env; \
+		else \
+			echo "$$setting" >> .env; \
+		fi; \
+	done
+	@echo "Local tracing enabled in .env. Run 'make down && make up' to apply."
+
+.PHONY: otel_disable
+otel_disable:
+	@test -f .env || cp .env.example .env
+	@grep -q '^OTEL_COLLECTOR_ENABLED=' .env \
+		&& perl -pi -e 's/^OTEL_COLLECTOR_ENABLED=.*/OTEL_COLLECTOR_ENABLED=false/' .env \
+		|| echo 'OTEL_COLLECTOR_ENABLED=false' >> .env
+	@perl -pi -e 's|^TELEMETRY_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces\s*$$|TELEMETRY_OTLP_ENDPOINT=\n|' .env
+	@echo "Local tracing disabled in .env. Run 'make down && make up' to apply."
+
 .PHONY: external_mcp_enable
 external_mcp_enable:
+	@test -f .env || cp .env.example .env
 	@grep -q '^MCP_EXTERNAL_ENABLED=' .env 2>/dev/null \
 		&& perl -pi -e 's/^MCP_EXTERNAL_ENABLED=.*/MCP_EXTERNAL_ENABLED=true/' .env \
 		|| echo 'MCP_EXTERNAL_ENABLED=true' >> .env
@@ -265,6 +291,7 @@ external_mcp_enable:
 
 .PHONY: external_mcp_disable
 external_mcp_disable:
+	@test -f .env || cp .env.example .env
 	@grep -q '^MCP_EXTERNAL_ENABLED=' .env 2>/dev/null \
 		&& perl -pi -e 's/^MCP_EXTERNAL_ENABLED=.*/MCP_EXTERNAL_ENABLED=false/' .env \
 		|| echo 'MCP_EXTERNAL_ENABLED=false' >> .env

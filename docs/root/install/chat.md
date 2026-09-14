@@ -95,6 +95,13 @@ version. `model_profiles:read`,
 `model_profiles:write`, and `model_profiles:delete` are granted to the built-in
 Admin role.
 
+The list supports search and status filters. Click a profile name to inspect its
+settings, or open its row menu to edit, view history, or delete it. The history
+page lists revisions with their author, saved time, and comment. Its row menu
+can view a revision's complete settings or restore an older revision as a new
+version; restoring requires `model_profiles:write`. Deleting a profile requires
+confirmation and removes its version history.
+
 Every user with `chat:use` selects one of the levels the profile's admin made
 available; new profiles offer `low`, `medium`, and `high` by default. The full
 admin vocabulary is LiteLLM's `default`, `none`, `minimal`, `low`, `medium`,

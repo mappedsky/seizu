@@ -1,23 +1,18 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Alert,
   Box,
   Button,
   Checkbox,
+  Chip,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   FormControlLabel,
   FormGroup,
-  IconButton,
   MenuItem,
-  Paper,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
   TextField,
   Typography,
 } from '@mui/material';
@@ -25,17 +20,35 @@ import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import HistoryIcon from '@mui/icons-material/History';
+import ToggleOnIcon from '@mui/icons-material/ToggleOn';
+import ToggleOffIcon from '@mui/icons-material/ToggleOff';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
+import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
+import ModelProfileDetailDialog from 'src/components/ModelProfileDetailDialog';
+import ListPageHeader from 'src/components/ListPageHeader';
+import ListTable, {
+  type ListTableColumn,
+  type ListTableFilterGroup,
+  listTableActionColumnSx,
+  listTableMonoCellSx,
+  listTablePrimaryCellSx,
+  listTableSecondaryCellSx,
+  listTableTruncateSx,
+} from 'src/components/ListTable';
+import ListViewState from 'src/components/ListViewState';
+import PageTitle from 'src/components/PageTitle';
+import RowMenu, { type RowMenuAction } from 'src/components/RowMenu';
+import UserDisplay from 'src/components/UserDisplay';
 import { usePermissionState } from 'src/hooks/usePermissions';
 import {
   type ConfiguredReasoningEffort,
   type ModelProfile,
   type ModelProfilePayload,
-  type ModelProfileVersion,
   useModelProfileMutations,
   useModelProfilesList,
 } from 'src/hooks/useModelProfilesApi';
 import { pageContentSx } from 'src/theme/layout';
+import { modelProfilePayload } from 'src/utils/modelProfilePayload';
 
 const stages = [
   'router',
@@ -85,19 +98,7 @@ function emptyPayload(): ModelProfilePayload {
 }
 
 function editablePayload(profile: ModelProfile | null): ModelProfilePayload {
-  if (!profile) return emptyPayload();
-  return {
-    name: profile.name,
-    description: profile.description,
-    enabled: profile.enabled,
-    is_default: profile.is_default,
-    primary: profile.primary,
-    economy: profile.economy,
-    stage_overrides: profile.stage_overrides,
-    user_reasoning_efforts: profile.user_reasoning_efforts,
-    default_reasoning_effort: profile.default_reasoning_effort,
-    run_cost_budget_usd: profile.run_cost_budget_usd,
-  };
+  return profile ? modelProfilePayload(profile) : emptyPayload();
 }
 
 function ProfileDialog({
@@ -192,7 +193,7 @@ function ProfileDialog({
     }
   };
   return (
-    <Dialog open onClose={onClose} fullWidth maxWidth="lg">
+    <Dialog open onClose={onClose} fullWidth maxWidth="sm">
       <DialogTitle>
         {profile ? 'Edit model profile' : 'New model profile'}
       </DialogTitle>
@@ -434,7 +435,7 @@ function ProfileDialog({
           }
           onClick={() => void submit()}
         >
-          Save
+          {saving ? <ConstellationSpinner size={20} /> : 'Save'}
         </Button>
       </DialogActions>
     </Dialog>
@@ -442,6 +443,7 @@ function ProfileDialog({
 }
 
 export default function ModelProfiles() {
+  const navigate = useNavigate();
   const { hasPermission, loading: permissionsLoading } = usePermissionState();
   const canRead = hasPermission('model_profiles:read');
   const canWrite = hasPermission('model_profiles:write');
@@ -450,159 +452,255 @@ export default function ModelProfiles() {
     useModelProfilesList(canRead);
   const mutations = useModelProfileMutations();
   const [editing, setEditing] = useState<ModelProfile | 'new' | null>(null);
-  const [versions, setVersions] = useState<ModelProfileVersion[] | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  if (permissionsLoading || loading)
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <ConstellationSpinner size={48} />
-      </Box>
-    );
-  if (!canRead)
-    return (
-      <Box sx={pageContentSx}>
-        <Typography>You do not have access to model profiles.</Typography>
-      </Box>
-    );
+  const [detail, setDetail] = useState<ModelProfile | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ModelProfile | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const save = async (payload: ModelProfilePayload & { comment?: string }) => {
     if (editing === 'new') await mutations.create(payload);
     else if (editing) await mutations.update(editing.profile_id, payload);
     await refresh();
   };
+  const deleteProfile = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await mutations.remove(deleteTarget.profile_id);
+      setDeleteTarget(null);
+      await refresh();
+    } catch (reason) {
+      setDeleteError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setDeleting(false);
+    }
+  };
+  const rowActions = (profile: ModelProfile): RowMenuAction[] => [
+    {
+      key: 'edit',
+      label: 'Edit',
+      icon: <EditIcon fontSize="small" />,
+      onClick: () => setEditing(profile),
+      disabled: !canWrite,
+      tooltip: !canWrite
+        ? 'You do not have permission to edit model profiles'
+        : undefined,
+    },
+    {
+      key: 'history',
+      label: 'View history',
+      icon: <HistoryIcon fontSize="small" />,
+      onClick: () =>
+        navigate(
+          `/app/model-profiles/${encodeURIComponent(profile.profile_id)}/history`,
+        ),
+    },
+    {
+      key: 'delete',
+      label: 'Delete',
+      icon: <DeleteIcon fontSize="small" />,
+      onClick: () => {
+        setDeleteError(null);
+        setDeleteTarget(profile);
+      },
+      disabled: !canDelete,
+      tooltip: !canDelete
+        ? 'You do not have permission to delete model profiles'
+        : undefined,
+      destructive: true,
+      dividerBefore: true,
+    },
+  ];
+  const columns: ListTableColumn<ModelProfile>[] = [
+    {
+      key: 'name',
+      label: 'Name',
+      cellSx: listTablePrimaryCellSx,
+      render: (profile) => (
+        <Box
+          sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}
+        >
+          <Typography
+            variant="body2"
+            sx={[
+              {
+                cursor: 'pointer',
+                flex: 1,
+                fontWeight: 500,
+                '&:hover': { textDecoration: 'underline' },
+              },
+              listTableTruncateSx,
+            ]}
+            onClick={() => setDetail(profile)}
+          >
+            {profile.name}
+          </Typography>
+          {profile.is_default ? (
+            <Chip
+              label="Default"
+              size="small"
+              color="primary"
+              variant="outlined"
+              sx={{ flexShrink: 0, height: 20, fontSize: '0.7rem' }}
+            />
+          ) : null}
+        </Box>
+      ),
+    },
+    {
+      key: 'primary',
+      label: 'Primary',
+      cellSx: listTableMonoCellSx,
+      render: (profile) => profile.primary.model_id,
+    },
+    {
+      key: 'economy',
+      label: 'Economy',
+      hideBelow: 'md',
+      cellSx: listTableMonoCellSx,
+      render: (profile) => profile.economy.model_id,
+    },
+    {
+      key: 'cost',
+      label: 'Cost cap',
+      cellSx: { ...listTableSecondaryCellSx, width: 160 },
+      render: (profile) => (
+        <>
+          {formatUsd(profile.run_cost_budget_usd)}
+          {globalRunCostBudgetUsd > 0 &&
+          profile.run_cost_budget_usd > globalRunCostBudgetUsd ? (
+            <Typography
+              color="warning.main"
+              variant="caption"
+              sx={{ display: 'block' }}
+            >
+              Limited to {formatUsd(globalRunCostBudgetUsd)} globally
+            </Typography>
+          ) : null}
+        </>
+      ),
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      cellSx: { width: 120 },
+      render: (profile) => (
+        <Chip
+          label={profile.enabled ? 'Enabled' : 'Disabled'}
+          color={profile.enabled ? 'success' : 'default'}
+          size="small"
+        />
+      ),
+    },
+    {
+      key: 'version',
+      label: 'Version',
+      hideBelow: 'sm',
+      cellSx: { ...listTableSecondaryCellSx, width: 96 },
+      render: (profile) => `v${profile.current_version}`,
+    },
+    {
+      key: 'updated_at',
+      label: 'Latest Update',
+      hideBelow: 'xl',
+      cellSx: { ...listTableSecondaryCellSx, width: 180 },
+      render: (profile) => new Date(profile.updated_at).toLocaleString(),
+    },
+    {
+      key: 'updated_by',
+      label: 'Updated By',
+      hideBelow: 'lg',
+      cellSx: { ...listTableSecondaryCellSx, width: 150 },
+      render: (profile) => (
+        <UserDisplay userId={profile.updated_by ?? profile.created_by} />
+      ),
+    },
+    {
+      key: 'actions',
+      align: 'right',
+      cellSx: listTableActionColumnSx,
+      textual: false,
+      render: (profile) => (
+        <RowMenu
+          label={`Actions for ${profile.name}`}
+          actions={rowActions(profile)}
+        />
+      ),
+    },
+  ];
+  const filterGroups: ListTableFilterGroup<ModelProfile>[] = [
+    {
+      key: 'status',
+      label: 'Status',
+      icon: <ToggleOnIcon fontSize="small" />,
+      options: [
+        {
+          key: 'enabled',
+          label: 'Enabled',
+          icon: <ToggleOnIcon fontSize="small" />,
+          matches: (profile) => profile.enabled,
+        },
+        {
+          key: 'disabled',
+          label: 'Disabled',
+          icon: <ToggleOffIcon fontSize="small" />,
+          matches: (profile) => !profile.enabled,
+        },
+      ],
+    },
+  ];
   return (
     <Box sx={pageContentSx}>
-      <Box
-        sx={{
-          alignItems: 'center',
-          display: 'flex',
-          justifyContent: 'space-between',
-          mb: 2,
-        }}
+      <PageTitle>Model profiles | Seizu</PageTitle>
+      <ListPageHeader
+        title="Model profiles"
+        action={
+          canWrite && !permissionsLoading ? (
+            <Button
+              startIcon={<AddIcon />}
+              variant="contained"
+              onClick={() => setEditing('new')}
+            >
+              New profile
+            </Button>
+          ) : null
+        }
+      />
+      <ListViewState
+        loading={permissionsLoading || loading}
+        error={error}
+        errorMessage="Failed to load model profiles"
       >
-        <Box>
-          <Typography variant="h2">Model profiles</Typography>
-          <Typography color="text.secondary">
-            Versioned model, reasoning, and per-run spend choices for chat.
-          </Typography>
-        </Box>
-        {canWrite ? (
-          <Button
-            startIcon={<AddIcon />}
-            variant="contained"
-            onClick={() => setEditing('new')}
-          >
-            New profile
-          </Button>
-        ) : null}
-      </Box>
-      {error || actionError ? (
-        <Alert severity="error" sx={{ mb: 2 }}>
-          {actionError ?? error}
-        </Alert>
-      ) : null}
-      <Paper>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell>Name</TableCell>
-              <TableCell>Primary</TableCell>
-              <TableCell>Economy</TableCell>
-              <TableCell>Cost cap</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell align="right">Actions</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {profiles.map((profile) => (
-              <TableRow key={profile.profile_id}>
-                <TableCell>
-                  {profile.name}
-                  {profile.is_default ? ' (default)' : ''}
-                  <Typography
-                    color="text.secondary"
-                    variant="caption"
-                    sx={{ display: 'block' }}
-                  >
-                    v{profile.current_version}
-                  </Typography>
-                </TableCell>
-                <TableCell>{profile.primary.model_id}</TableCell>
-                <TableCell>{profile.economy.model_id}</TableCell>
-                <TableCell>
-                  {formatUsd(profile.run_cost_budget_usd)}
-                  {globalRunCostBudgetUsd > 0 &&
-                  profile.run_cost_budget_usd > globalRunCostBudgetUsd ? (
-                    <Typography
-                      color="warning.main"
-                      variant="caption"
-                      sx={{ display: 'block' }}
-                    >
-                      Limited to {formatUsd(globalRunCostBudgetUsd)} globally
-                    </Typography>
-                  ) : null}
-                </TableCell>
-                <TableCell>
-                  {profile.enabled ? 'Enabled' : 'Disabled'}
-                </TableCell>
-                <TableCell align="right">
-                  {canWrite ? (
-                    <IconButton
-                      aria-label={`Edit ${profile.name}`}
-                      onClick={() => setEditing(profile)}
-                    >
-                      <EditIcon />
-                    </IconButton>
-                  ) : null}
-                  <IconButton
-                    aria-label={`History for ${profile.name}`}
-                    onClick={() =>
-                      void mutations
-                        .versions(profile.profile_id)
-                        .then(setVersions)
-                        .catch((reason) => setActionError(String(reason)))
-                    }
-                  >
-                    <HistoryIcon />
-                  </IconButton>
-                  {canDelete ? (
-                    <IconButton
-                      aria-label={`Delete ${profile.name}`}
-                      onClick={() => {
-                        if (
-                          !window.confirm(
-                            `Delete model profile “${profile.name}” and its version history?`,
-                          )
-                        )
-                          return;
-                        void mutations
-                          .remove(profile.profile_id)
-                          .then(refresh)
-                          .catch((reason) =>
-                            setActionError(
-                              reason instanceof Error
-                                ? reason.message
-                                : String(reason),
-                            ),
-                          );
-                      }}
-                    >
-                      <DeleteIcon />
-                    </IconButton>
-                  ) : null}
-                </TableCell>
-              </TableRow>
-            ))}
-            {profiles.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={6}>
-                  No model profiles are configured. Chat uses environment
-                  settings until the first enabled profile is created.
-                </TableCell>
-              </TableRow>
-            ) : null}
-          </TableBody>
-        </Table>
-      </Paper>
+        {canRead ? (
+          <ListTable
+            rows={profiles}
+            columns={columns}
+            getRowKey={(profile) => profile.profile_id}
+            filterGroups={filterGroups}
+            emptyMessage="No model profiles are configured. Chat uses environment settings until the first enabled profile is created."
+          />
+        ) : (
+          <Typography>You do not have access to model profiles.</Typography>
+        )}
+      </ListViewState>
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        title="Delete model profile?"
+        deleting={deleting}
+        error={deleteError}
+        onClose={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+        onConfirm={() => void deleteProfile()}
+      >
+        Permanently delete <strong>{deleteTarget?.name}</strong> and its version
+        history? This cannot be undone.
+      </ConfirmDeleteDialog>
+      <ModelProfileDetailDialog
+        profile={detail}
+        version={detail?.current_version}
+        onClose={() => setDetail(null)}
+      />
       {editing ? (
         <ProfileDialog
           key={editing === 'new' ? 'new' : editing.profile_id}
@@ -612,34 +710,6 @@ export default function ModelProfiles() {
           onSave={save}
         />
       ) : null}
-      <Dialog
-        open={versions !== null}
-        onClose={() => setVersions(null)}
-        fullWidth
-        maxWidth="sm"
-      >
-        <DialogTitle>Version history</DialogTitle>
-        <DialogContent dividers>
-          {versions?.map((version) => (
-            <Box key={version.version} sx={{ mb: 2 }}>
-              <Typography sx={{ fontWeight: 600 }}>
-                Version {version.version}: {version.name}
-              </Typography>
-              <Typography color="text.secondary" variant="body2">
-                {version.created_at}
-                {version.comment ? ` — ${version.comment}` : ''}
-              </Typography>
-              <Typography variant="body2">
-                {version.primary.model_id} / {version.economy.model_id}; $
-                {version.run_cost_budget_usd}
-              </Typography>
-            </Box>
-          ))}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setVersions(null)}>Close</Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }

@@ -23,9 +23,10 @@ const connection = {
 function renderPage(
   token: string | null = 'browser-token',
   connectionsEnabled = true,
+  path = '/app/chat/connections',
 ) {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <FeaturesContext.Provider
         value={{
           chat: true,
@@ -214,5 +215,24 @@ describe('Chat connections', () => {
     expect(
       screen.queryByRole('link', { name: /Open gateway/ }),
     ).not.toBeInTheDocument();
+  });
+
+  // This page is where someone follows a gateway's authorization link and comes
+  // back, so the way back has to be to the conversation that sent them, not to
+  // a landing that has forgotten it.
+  it('returns to the conversation it was opened from', async () => {
+    renderPage('browser-token', true, '/app/chat/connections?from=thread-42');
+
+    expect(
+      await screen.findByRole('link', { name: 'Back to chat' }),
+    ).toHaveAttribute('href', '/app/chat/thread-42');
+  });
+
+  it('returns to the landing when it was reached directly', async () => {
+    renderPage();
+
+    expect(
+      await screen.findByRole('link', { name: 'Back to chat' }),
+    ).toHaveAttribute('href', '/app/chat');
   });
 });

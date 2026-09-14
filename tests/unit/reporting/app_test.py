@@ -30,11 +30,15 @@ async def test_lifespan_initializes_and_closes_chat_checkpoints(mocker):
     validate = mocker.patch("reporting.app.validate_chat_llm_config", new=mocker.AsyncMock())
     initialize = mocker.patch("reporting.app.initialize_chat_checkpoints", new=mocker.AsyncMock())
     close = mocker.patch("reporting.app.close_chat_checkpoints", new=mocker.AsyncMock())
+    # Real here would import litellm and connect to Temporal: it is a warm-up
+    # for the first turn, and what it warms belongs to its own tests.
+    warm = mocker.patch("reporting.services.chat_turns.warm_chat_dispatch", new=mocker.AsyncMock())
     app = SimpleNamespace(state=SimpleNamespace(mcp_session_manager=None))
 
     async with lifespan(app):
         validate.assert_awaited_once_with()
         initialize.assert_awaited_once_with()
+        warm.assert_awaited_once_with()
         close.assert_not_awaited()
 
     close.assert_awaited_once_with()
@@ -57,6 +61,7 @@ async def test_lifespan_accepts_environment_model_without_profiles(mocker):
     initialize = mocker.patch("reporting.app.initialize_chat_checkpoints", new=mocker.AsyncMock())
     close = mocker.patch("reporting.app.close_chat_checkpoints", new=mocker.AsyncMock())
     mocker.patch("reporting.app.telemetry.configure")
+    mocker.patch("reporting.services.chat_turns.warm_chat_dispatch", new=mocker.AsyncMock())
     app = SimpleNamespace(state=SimpleNamespace(mcp_session_manager=None))
 
     async with lifespan(app):

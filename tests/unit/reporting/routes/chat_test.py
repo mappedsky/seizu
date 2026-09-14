@@ -2210,3 +2210,36 @@ async def test_stop_works_between_admission_and_the_first_frame(mocker, _chat_tu
             break
         await asyncio.sleep(0.01)
     assert _chat_turn_log[turn_id].status == "canceled"
+
+
+async def test_warm_chat_dispatch_pays_the_first_turn_costs_up_front(mocker):
+    """The first turn a process serves imports litellm and connects to Temporal.
+    Both are one-time and were paid by whoever opened the first conversation."""
+    get_client = mocker.patch(
+        "reporting.services.chat_turns.schedule_reconciler.get_client",
+        new=AsyncMock(),
+    )
+    warm_models = mocker.patch("reporting.services.chat_turns.chat_models.warm_model_metadata")
+
+    await chat_turns.warm_chat_dispatch()
+
+    get_client.assert_awaited_once()
+    warm_models.assert_called_once_with()
+
+
+async def test_warm_chat_dispatch_is_a_warm_up_not_a_precondition(mocker):
+    """An unreachable Temporal at boot is not a reason to refuse every other
+    request: each half is logged and left to the lazy path it stood in for."""
+    mocker.patch(
+        "reporting.services.chat_turns.schedule_reconciler.get_client",
+        new=AsyncMock(side_effect=RuntimeError("no temporal")),
+    )
+    warm_models = mocker.patch(
+        "reporting.services.chat_turns.chat_models.warm_model_metadata",
+        side_effect=RuntimeError("no litellm"),
+    )
+
+    await chat_turns.warm_chat_dispatch()
+
+    # The second half is attempted even though the first failed.
+    warm_models.assert_called_once_with()
