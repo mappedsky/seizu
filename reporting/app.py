@@ -293,6 +293,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await validate_chat_llm_config()
         telemetry.configure()
         await initialize_chat_checkpoints()
+        from reporting.services import chat_turns
+
+        # Before a request needs it: the first turn a worker served paid
+        # seconds for this, and that is somebody's new conversation waiting.
+        await chat_turns.warm_chat_dispatch()
     try:
         mcp_session_manager = getattr(app.state, "mcp_session_manager", None)
         if mcp_session_manager is not None:

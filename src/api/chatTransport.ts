@@ -49,6 +49,15 @@ type PendingSend = {
    * is the only way back to it and must survive the failure.
    */
   unresolved: boolean;
+  /**
+   * The admission still in flight, recorded the moment it is asked for.
+   *
+   * It is what lets the page move to the conversation before the turn has an
+   * id: a reattach arriving in that window waits on this instead of asking
+   * `/turns/active`, which would answer 204 about a turn being admitted right
+   * then and throw away the record of it.
+   */
+  admission: Promise<string> | null;
 };
 
 export type SeizuChatTransportOptions<UI_MESSAGE extends UIMessage> = {
@@ -350,6 +359,7 @@ export class SeizuChatTransport<
             turnId: null,
             stopRequested: false,
             unresolved: false,
+            admission: null,
             body: '',
           };
     const body = JSON.stringify({
@@ -389,6 +399,7 @@ export class SeizuChatTransport<
       turnId: null,
       stopRequested: false,
       unresolved: false,
+      admission: null,
       body: '',
     };
     const body = JSON.stringify({
@@ -398,7 +409,18 @@ export class SeizuChatTransport<
     });
     pending.body = body;
     this.pending.set(threadId, pending);
-    return this.admit(threadId, body, pending);
+    // Recorded before it is awaited, so the caller may show the conversation
+    // straight away: a reattach that lands while this is in flight waits on it.
+    const admission = this.admit(threadId, body, pending);
+    pending.admission = admission;
+    void admission
+      .catch(() => null)
+      .then(() => {
+        // Answered: a turn id is on `pending`, and a failure is the asker's to
+        // report. Either way there is nothing left here to wait for.
+        if (pending.admission === admission) pending.admission = null;
+      });
+    return admission;
   }
 
   async reconnectToStream(
@@ -416,6 +438,19 @@ export class SeizuChatTransport<
     // resolves to a turn that completed while the connection was down.
     const known = this.pending.get(threadId)?.turnId;
     if (known) return this.attach(known);
+    // Admitted by this client and not answered yet -- the landing's question,
+    // whose conversation is on screen before its turn has an id. Waiting is the
+    // whole point: the `/active` probe below would answer 204 about a turn
+    // being admitted right now and delete the record of it. A failed admission
+    // is reported by whoever asked for it, so there is simply no stream here.
+    const admitting = this.pending.get(threadId)?.admission;
+    if (admitting) {
+      const turnId = await admitting.then(
+        (id) => id,
+        () => null,
+      );
+      return turnId === null ? null : this.attach(turnId);
+    }
     // What was here when the question was asked. A send can be admitted while
     // this request is in flight, and 204 then answers a question about a moment
     // that has passed -- see the delete below.
@@ -446,6 +481,7 @@ export class SeizuChatTransport<
       turnId,
       stopRequested: false,
       unresolved: false,
+      admission: null,
     });
     return this.attach(turnId);
   }

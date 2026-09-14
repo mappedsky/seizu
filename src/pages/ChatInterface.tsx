@@ -86,6 +86,19 @@ import { pageContentSx } from 'src/theme/layout';
 const CHAT_MESSAGE_THROTTLE_MS = import.meta.env.DEV ? 250 : 50;
 // Matches the API's max_length on the session title (reporting/schema/chat.py).
 const MAX_SESSION_TITLE_LENGTH = 200;
+
+/** A session's name, taken from the question that opened it.
+ *
+ * Stores the whole opening message up to the API's limit rather than a short
+ * preview: the sidebar truncates visually with CSS, so a pre-truncated title
+ * left the hover tooltip showing the ellipsis too.
+ */
+function sessionTitleFor(question: string): string {
+  const text = question.trim();
+  return text.length > MAX_SESSION_TITLE_LENGTH
+    ? `${text.slice(0, MAX_SESSION_TITLE_LENGTH - 1).trimEnd()}…`
+    : text;
+}
 const CHAT_HISTORY_POLL_INTERVAL_MS = 2000;
 const CHAT_HISTORY_POLL_MAX_ATTEMPTS = 30;
 const OUTPUT_LIMIT_NOTICE =
@@ -1893,13 +1906,7 @@ export default function ChatInterface() {
     if (!activeSession || activeSession.title || !activeThreadId) return;
     if (autoTitleAttemptRef.current === activeThreadId) return;
     if (!chatSummary.firstUserText) return;
-    // Store the full opening message (up to the API's limit) rather than a
-    // 40-character preview: the sidebar truncates visually with CSS, so a
-    // pre-truncated title left the hover tooltip showing the ellipsis too.
-    const title =
-      chatSummary.firstUserText.length > MAX_SESSION_TITLE_LENGTH
-        ? `${chatSummary.firstUserText.slice(0, MAX_SESSION_TITLE_LENGTH - 1).trimEnd()}…`
-        : chatSummary.firstUserText;
+    const title = sessionTitleFor(chatSummary.firstUserText);
     autoTitleAttemptRef.current = activeThreadId;
     void updateSession(activeThreadId, title)
       // Cleared on success rather than on the way in: the banner is about the
@@ -1932,9 +1939,20 @@ export default function ChatInterface() {
     navigate(CHAT_LANDING_PATH);
   }, [navigate, setMessages]);
 
-  // The landing's question: create the session, then let the send happen once
-  // `useChat` has re-keyed to it. Sending in this callback would post to the
-  // chat instance still keyed to the previous thread.
+  // The landing's question: create the session, show it, and admit its turn.
+  //
+  // The conversation opens on the *session's* response, not the admission's.
+  // Creating it is one small write and answers in tens of milliseconds, while
+  // admission also has a workflow to start; waiting for both left the question
+  // gone from the composer and nothing in its place for most of a second. The
+  // session is enough to be right about everything the page shows: the route,
+  // the sidebar entry, and the question itself, seeded into the chat this
+  // commit keys to the new thread.
+  //
+  // The turn is still admitted here rather than sent through the re-keyed chat
+  // -- that ordering is what stopped the first question being lost (AGT-008) --
+  // and the reattach that follows navigation waits on the admission the
+  // transport is holding rather than probing for a turn that has no id yet.
   const handleStartSession = useCallback(
     async (text: string) => {
       setStartError(null);
@@ -1947,14 +1965,17 @@ export default function ChatInterface() {
           throw new Error('Choose a model profile');
         }
         const session = await createSession(
-          '',
+          // Named by the question at creation, so the sidebar entry arrives
+          // readable instead of blank until the turn ends and the auto-title
+          // PATCH lands. Same text, same truncation as that path.
+          sessionTitleFor(text),
           landingProfileId || null,
           landingReasoningEffort || null,
         );
-        // Admitted before anything is navigated or re-keyed, so the question is
-        // the server's before the UI has to be right about anything. If this
-        // throws, the turn does not exist and the user still has their text.
-        await transport.startTurn(session.thread_id, text);
+        // Asked for before anything re-keys, so the transport is holding the
+        // admission by the time the reattach looks for it -- but not awaited
+        // here, which is what the screen used to wait on.
+        const admitted = transport.startTurn(session.thread_id, text);
         setMessages([]);
         setAutoTitleError(null);
         setCreatedHere(session.thread_id);
@@ -1964,6 +1985,9 @@ export default function ChatInterface() {
         setStoredActiveSessionId(session.thread_id);
         setPendingAttach({ threadId: session.thread_id, text });
         navigate(chatSessionPath(session.thread_id));
+        // If this throws the turn does not exist, and the conversation on
+        // screen holds the question: asking again is retyping nothing.
+        await admitted;
       } catch {
         setStartError('Could not start a new conversation. Please try again.');
       } finally {

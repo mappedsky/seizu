@@ -41,7 +41,7 @@ from reporting.schema.chat import (
     ChatTurnRequest,
 )
 from reporting.schema.model_profiles import ResolvedModelProfile
-from reporting.services import model_profiles, report_store, schedule_reconciler
+from reporting.services import chat_models, model_profiles, report_store, schedule_reconciler
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import ChatState, build_turn_config, get_chat_graph
 from reporting.services.chat_messages import CONTINUATION_MARKDOC, MessageTag, tag_message
@@ -282,6 +282,31 @@ def build_graph_input(body: ChatTurnCommand, budget_controller: BudgetController
         "messages": [HumanMessage(content=body.message, id=f"msg_{report_store.generate_id()}")],
         "budget": budget_controller.snapshot(),
     }
+
+
+async def warm_chat_dispatch() -> None:
+    """Pay what a first turn otherwise pays on the request path.
+
+    Three one-time costs, each per process and each on the way to admitting
+    somebody's first question: importing the workflow modules, connecting the
+    Temporal client, and the deferred ``import litellm`` behind the first
+    model-capability lookup.
+
+    Nothing here is required for the process to serve anything else, so a
+    failure is logged and left to the lazy paths it was standing in for.
+    """
+    try:
+        from reporting.temporal_workflows import chat_turn, shared  # noqa: F401
+
+        await schedule_reconciler.get_client()
+    except Exception:
+        logger.warning("Could not prepare Temporal turn dispatch at startup", exc_info=True)
+    try:
+        # In a thread: several seconds of imports on the event loop would stall
+        # every other startup task sharing it.
+        await asyncio.to_thread(chat_models.warm_model_metadata)
+    except Exception:
+        logger.warning("Could not prepare chat model metadata at startup", exc_info=True)
 
 
 async def start_turn(

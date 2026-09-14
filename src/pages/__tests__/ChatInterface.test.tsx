@@ -1049,6 +1049,98 @@ describe('ChatInterface', () => {
     fetchMock.mockRestore();
   }, 15_000);
 
+  it('opens the conversation on the session, not on its turn being admitted', async () => {
+    // Creating the session is one small write; admitting its turn also starts a
+    // workflow. Waiting for both left the question gone from the composer and
+    // nothing in its place. The session is all the page needs to be right:
+    // the route, the sidebar entry and the question itself.
+    let sessions: {
+      thread_id: string;
+      title: string;
+      created_at: string;
+      updated_at: string;
+    }[] = [];
+    const createSession = jest
+      .fn()
+      .mockImplementation(async (title: string) => {
+        const session = {
+          thread_id: 'thread-new',
+          title,
+          created_at: '2024-01-02T00:00:00+00:00',
+          updated_at: '2024-01-02T00:00:00+00:00',
+        };
+        sessions = [session];
+        return session;
+      });
+    mockUseChatSessions.mockImplementation(() => ({
+      sessions,
+      loading: false,
+      error: null,
+      createSession,
+      getSession: jest.fn().mockResolvedValue(null),
+      updateSession: jest.fn(),
+      deleteSession: jest.fn(),
+      touchSession: jest.fn(),
+    }));
+    mockUseChatHistory.mockReturnValue(jest.fn().mockResolvedValue([]));
+
+    let admit: (value: Response) => void = () => {};
+    const admitted = new Promise<Response>((resolve) => {
+      admit = resolve;
+    });
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes('/turns') && !url.includes('/stream')) return admitted;
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat' });
+    await act(async () => {});
+    fireEvent.change(screen.getByPlaceholderText('Ask Seizu...'), {
+      target: { value: 'Which repos are exposed?' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    // The conversation is on screen, with the question in it, while the
+    // admission this test is still holding has answered nothing.
+    await waitFor(() => {
+      const built = chatInits()
+        .filter((init) => init.id === 'thread-new')
+        .at(-1);
+      expect(built?.messages).toEqual([
+        expect.objectContaining({
+          role: 'user',
+          parts: [{ type: 'text', text: 'Which repos are exposed?' }],
+        }),
+      ]);
+    });
+    // Read off the live DOM a commit later: navigation settles after the chat
+    // for the new thread is built.
+    await waitFor(() => {
+      expect(document.body.textContent).not.toContain(
+        'What should we ask the security graph?',
+      );
+    });
+    // ...and the sidebar entry is named by the question rather than blank until
+    // the turn ends and the auto-title PATCH lands.
+    expect(createSession).toHaveBeenCalledWith(
+      'Which repos are exposed?',
+      null,
+      null,
+    );
+
+    admit(
+      new Response(JSON.stringify({ turn_id: 'turn-new', status: 'created' }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    await act(async () => {});
+    fetchMock.mockRestore();
+  }, 15_000);
+
   it('does not reload the session it is leaving on New session', async () => {
     // The route and `activeThreadId` disagree for a commit on the way out.
     // Clearing the thread locally made the URL-sync effect re-adopt the session
