@@ -72,6 +72,7 @@ import type {
 } from 'src/hooks/useChatElicitations';
 import { useChatHumanInputResume } from 'src/hooks/useChatHumanInputResume';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
+import { CHAT_LANDING_PATH, chatSessionPath } from 'src/utils/chatPaths';
 import { pageContentSx } from 'src/theme/layout';
 
 // How often the streamed answer is written into React state.
@@ -189,8 +190,6 @@ type SeizuChatMessage = UIMessage<
   }
 >;
 
-const CHAT_LANDING_PATH = '/app/chat';
-
 export function ModelProfileSelect({
   profiles,
   profileId,
@@ -259,10 +258,6 @@ export function ModelProfileSelect({
       </Select>
     </FormControl>
   );
-}
-
-function chatSessionPath(threadId: string): string {
-  return `/app/chat/${encodeURIComponent(threadId)}`;
 }
 
 function formatMessageTime(iso: string | undefined): string {

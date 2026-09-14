@@ -28,6 +28,7 @@ import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import { useFeature } from 'src/features.context';
 import type { ChatSession } from 'src/hooks/useChatSessions';
+import { chatConnectionsPath } from 'src/utils/chatPaths';
 
 const PANEL_WIDTH = 260;
 // Tightened from the MUI default so the footer sits at the same rhythm as the
@@ -69,6 +70,9 @@ function ChatSessionsPanel({
   // Only when a gateway actually delegates per user: with none configured there
   // is no per-user status to show.
   const connectionsEnabled = useFeature('chat_connections');
+  // Carries the conversation, so the page it opens returns to *this* chat
+  // rather than to the landing.
+  const connectionsPath = chatConnectionsPath(activeThreadId);
 
   const sessionToDelete = sessions.find((s) => s.thread_id === deleteThreadId);
 
@@ -279,15 +283,16 @@ function ChatSessionsPanel({
               borderColor: 'divider',
               flexShrink: 0,
               mt: 'auto',
+              // The group is the last thing in the panel, so it has the panel
+              // edge below it and the session list's scroll above: without its
+              // own padding it reads as a row that fell off the list.
+              py: 1,
             }}
           >
             {open ? (
               <List dense disablePadding>
                 <ListItem disablePadding>
-                  <ListItemButton
-                    component={RouterLink}
-                    to="/app/chat/connections"
-                  >
+                  <ListItemButton component={RouterLink} to={connectionsPath}>
                     <ListItemIcon sx={footerActionIconSx}>
                       <Hub fontSize="small" />
                     </ListItemIcon>
@@ -296,11 +301,11 @@ function ChatSessionsPanel({
                 </ListItem>
               </List>
             ) : (
-              <Box sx={{ display: 'flex', justifyContent: 'center', py: 0.5 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'center' }}>
                 <Tooltip title="Connections" placement="right">
                   <IconButton
                     component={RouterLink}
-                    to="/app/chat/connections"
+                    to={connectionsPath}
                     size="small"
                     aria-label="Connections"
                   >

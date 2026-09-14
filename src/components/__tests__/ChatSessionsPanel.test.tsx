@@ -70,9 +70,11 @@ describe('ChatSessionsPanel', () => {
   it('offers connections below the sessions when a gateway delegates per user', () => {
     renderPanel([session()], { connections: true });
 
+    // Carrying the conversation, so the page returns to it rather than to the
+    // landing.
     expect(screen.getByRole('link', { name: 'Connections' })).toHaveAttribute(
       'href',
-      '/app/chat/connections',
+      '/app/chat/connections?from=thread-1',
     );
   });
 
@@ -92,7 +94,7 @@ describe('ChatSessionsPanel', () => {
     expect(screen.queryByText('Session 1')).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Connections' })).toHaveAttribute(
       'href',
-      '/app/chat/connections',
+      '/app/chat/connections?from=thread-1',
     );
   });
 });

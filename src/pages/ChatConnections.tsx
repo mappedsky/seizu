@@ -1,5 +1,6 @@
 import { Alert, Box, Button, Paper, Stack, Typography } from '@mui/material';
-import { Link as RouterLink } from 'react-router-dom';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import { Link as RouterLink, useSearchParams } from 'react-router-dom';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { useFeature } from 'src/features.context';
 import { usePermissionState } from 'src/hooks/usePermissions';
@@ -8,6 +9,7 @@ import {
   useChatConnections,
 } from 'src/hooks/useChatConnections';
 import { pageContentSx } from 'src/theme/layout';
+import { CHAT_RETURN_PARAM, chatReturnPath } from 'src/utils/chatPaths';
 
 const labels: Record<ConnectionStatus, string> = {
   unknown: 'Not checked',
@@ -20,6 +22,10 @@ const labels: Record<ConnectionStatus, string> = {
 };
 
 export default function ChatConnections() {
+  const [searchParams] = useSearchParams();
+  // Back to the conversation this was opened from, and only to the landing
+  // when it was reached some other way.
+  const backTo = chatReturnPath(searchParams.get(CHAT_RETURN_PARAM));
   const chatEnabled = useFeature('chat');
   const connectionsEnabled = useFeature('chat_connections');
   const enabled = chatEnabled && connectionsEnabled;
@@ -35,8 +41,14 @@ export default function ChatConnections() {
 
   return (
     <Box sx={pageContentSx}>
-      <Button component={RouterLink} to="/app/chat">
-        Back to Chat
+      <Button
+        component={RouterLink}
+        to={backTo}
+        size="small"
+        startIcon={<ArrowBackIcon />}
+        sx={{ mb: 1 }}
+      >
+        Back to chat
       </Button>
       <Typography variant="h1" sx={{ mb: 2 }}>
         Chat connections

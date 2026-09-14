@@ -168,3 +168,12 @@ whichever of those it is about.
 **Collapsed panels keep the entry**, as an icon with its tooltip: the footer is
 how the setting is reached at all now, so hiding it behind reopening the panel
 would make it harder to find than the sidebar entry it replaced.
+
+**A page opened from a conversation carries it back** (`src/utils/chatPaths.ts`):
+the link names the thread in its query string and the page's back control
+returns there, falling back to the landing only when it was reached some other
+way. In the URL rather than in router state, because connections is where
+someone follows a gateway's authorization link and comes back — a reload must
+not cost them the way back to what they were asking. `/app/chat` is deliberately
+the landing rather than a resumed conversation, so a back link that simply
+pointed at it could not be the way home.
