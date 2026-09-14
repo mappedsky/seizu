@@ -86,9 +86,18 @@ const DENIED_STATE: QueryState = {
  * One `run()`. The sequence number is what makes a repeat of the same query a
  * new request, and what tells an arriving result whether it is still the
  * answer to the question being asked.
+ *
+ * The query and the token are captured here rather than read from the render
+ * that happens to dispatch it. A request is for the cypher it was made
+ * against: a panel whose `cypher` prop changes without running again has not
+ * asked a new question, and the query console sets `cypher` to undefined when
+ * it switches to a history query, which resent the last request with no
+ * `query` field at all (a 422).
  */
 interface QueryRequest {
   seq: number;
+  cypher?: string;
+  reportToken?: string;
   params?: Record<string, unknown>;
   options?: RunOptions;
 }
@@ -143,10 +152,18 @@ export function useLazyCypherQuery(
     (params?: Record<string, unknown>, options?: RunOptions) => {
       if (!cypher) return;
       seqRef.current += 1;
-      setRequest({ seq: seqRef.current, params, options });
+      setRequest({ seq: seqRef.current, cypher, reportToken, params, options });
     },
-    [cypher],
+    [cypher, reportToken],
   );
+
+  // Read at dispatch rather than depended on: a token rotation must not resend
+  // every panel's query behind its back. What makes a waiting request runnable
+  // is `ready` below, which moves when the token first arrives.
+  const accessTokenRef = useRef(accessToken);
+  useEffect(() => {
+    accessTokenRef.current = accessToken;
+  });
 
   const ready = !(auth_required && !accessToken) && !permissionsLoading;
   const permitted = hasPermission(
@@ -158,16 +175,22 @@ export function useLazyCypherQuery(
     request !== null &&
     ready &&
     permitted &&
-    reportToken &&
+    request.reportToken &&
     !request.options?.force
-      ? readQueryCache(reportToken, request.params)
+      ? readQueryCache(request.reportToken, request.params)
       : undefined;
 
   useEffect(() => {
     if (request === null || !ready || !permitted) return undefined;
     if (cached !== undefined) return undefined;
 
-    const { seq, params } = request;
+    const {
+      seq,
+      params,
+      cypher: requestCypher,
+      reportToken: requestToken,
+    } = request;
+    if (!requestCypher && !requestToken) return undefined;
     let cancelled = false;
     const settle = (state: QueryState) => {
       if (!cancelled) setOutcome({ seq, state });
@@ -176,16 +199,16 @@ export function useLazyCypherQuery(
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
-    if (accessToken) {
-      headers['Authorization'] = `Bearer ${accessToken}`;
+    if (accessTokenRef.current) {
+      headers['Authorization'] = `Bearer ${accessTokenRef.current}`;
     }
 
-    const endpoint = reportToken
+    const endpoint = requestToken
       ? '/api/v1/query/report'
       : '/api/v1/query/adhoc';
-    const body = reportToken
-      ? { token: reportToken, params }
-      : { query: cypher, params };
+    const body = requestToken
+      ? { token: requestToken, params }
+      : { query: requestCypher, params };
 
     fetch(endpoint, {
       method: 'POST',
@@ -229,8 +252,8 @@ export function useLazyCypherQuery(
         }
 
         const results = data.results ?? [];
-        if (reportToken) {
-          writeQueryCache(reportToken, params, results);
+        if (requestToken) {
+          writeQueryCache(requestToken, params, results);
         }
         settle({
           ...IDLE_STATE,
@@ -247,7 +270,7 @@ export function useLazyCypherQuery(
     return () => {
       cancelled = true;
     };
-  }, [request, ready, permitted, cached, accessToken, cypher, reportToken]);
+  }, [request, ready, permitted, cached]);
 
   const state = useMemo<QueryState>(() => {
     if (request === null) return IDLE_STATE;
@@ -285,6 +308,13 @@ export function useLazyHistoryQuery(): [
     setRequest({ seq: seqRef.current, historyId });
   }, []);
 
+  // As above: read at dispatch, not depended on, so a token rotation does not
+  // resend the request.
+  const accessTokenRef = useRef(accessToken);
+  useEffect(() => {
+    accessTokenRef.current = accessToken;
+  });
+
   const ready = !(auth_required && !accessToken) && !permissionsLoading;
   const permitted = hasPermission('query:execute');
 
@@ -300,8 +330,8 @@ export function useLazyHistoryQuery(): [
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
-    if (accessToken) {
-      headers['Authorization'] = `Bearer ${accessToken}`;
+    if (accessTokenRef.current) {
+      headers['Authorization'] = `Bearer ${accessTokenRef.current}`;
     }
 
     fetch('/api/v1/query/history', {
@@ -341,7 +371,7 @@ export function useLazyHistoryQuery(): [
     return () => {
       cancelled = true;
     };
-  }, [request, ready, permitted, accessToken]);
+  }, [request, ready, permitted]);
 
   const state = useMemo<QueryState>(() => {
     if (request === null) return IDLE_STATE;

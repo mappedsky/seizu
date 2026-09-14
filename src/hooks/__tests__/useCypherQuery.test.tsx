@@ -97,6 +97,64 @@ describe('useLazyCypherQuery', () => {
     });
   });
 
+  // The query console hands this hook a `cypher` that becomes undefined when it
+  // switches to a history query, and changes it whenever the editor runs
+  // something new. A request belongs to the cypher it was made against.
+  it('does not resend a settled request when cypher changes', async () => {
+    const { result, rerender } = renderHook(
+      ({ cypher }: { cypher?: string }) => useLazyCypherQuery(cypher),
+      { wrapper: makeWrapper(false, null), initialProps: { cypher: CYPHER } },
+    );
+    act(() => {
+      result.current[0]();
+    });
+    await waitFor(() => expect(result.current[1].loading).toBe(false));
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    rerender({ cypher: 'MATCH (m) RETURN m' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('never posts a body without a query when cypher goes away', async () => {
+    const { result, rerender } = renderHook(
+      ({ cypher }: { cypher?: string }) => useLazyCypherQuery(cypher),
+      { wrapper: makeWrapper(false, null), initialProps: { cypher: CYPHER } },
+    );
+    act(() => {
+      result.current[0]();
+    });
+    await waitFor(() => expect(result.current[1].loading).toBe(false));
+
+    // What the console does when a history entry is selected.
+    rerender({ cypher: undefined });
+
+    const bodies = (global.fetch as jest.Mock).mock.calls.map((call) =>
+      JSON.parse(call[1].body),
+    );
+    expect(bodies).toHaveLength(1);
+    for (const body of bodies) {
+      expect(typeof body.query).toBe('string');
+    }
+  });
+
+  it('does not resend when only the access token rotates', async () => {
+    const { result } = renderHook(() => useLazyCypherQuery(CYPHER), {
+      wrapper: StatefulWrapper,
+    });
+    act(() => {
+      _setToken!('token-1');
+    });
+    act(() => {
+      result.current[0]();
+    });
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      _setToken!('token-2');
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('does not fetch when auth_required and accessToken is null', () => {
     const { result } = renderHook(() => useLazyCypherQuery(CYPHER), {
       wrapper: makeWrapper(true, null),
