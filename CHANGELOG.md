@@ -4,6 +4,245 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.5.0] - 2026-09-14
+
+This release lets an external MCP server ask the person a question in the middle
+of a tool call and resume the turn from the answer, makes a mis-clicked denial
+recoverable, and puts the frontend back under `StrictMode` with the state that
+was hiding behind an effect derived instead. One additive schema migration
+(`0014`); one default changes behavior — a denied action now gets one extra
+prompt, and a session's denials are budgeted — and nothing is removed.
+
+### Added
+
+- **An external MCP server can ask for input mid-call, and the turn resumes
+  from the answer** (#324). A modern (2026-07-28) interactive call that elicits
+  is parked rather than cancelled: the request is stored as a bounded
+  owner-scoped group (migration `0014`), the turn ends, and chat renders a card
+  per request naming the server, the tool and its question — a form with Submit,
+  Decline and Cancel, or a URL card showing the destination host. Answering the
+  last card in a group resumes the original call with its own arguments and the
+  upstream's opaque continuation state, so nothing holds a worker slot while
+  someone reads the question, and a pending or answered card survives a reload
+  (**Continue chat** resumes an answered request whose delivery was
+  interrupted). The replay re-checks the caller's current permissions, tool
+  discovery and confirmation policy, and consumes the group exactly once;
+  declined, cancelled and expired requests are terminal. Off by default: set
+  `MCP_EXTERNAL_ELICITATION_ENABLED=true` on the web service **and**
+  `seizu-temporal-worker`, and opt each proxy into
+  `"elicitation": {"form": true, "url": true}`. Form schemas are a bounded flat
+  primitive subset (`CHAT_ELICITATION_MAX_FIELDS`, default and ceiling 32;
+  4096 characters per string) rendered as escaped text, and requests expire on
+  `CHAT_ELICITATION_TTL_SECONDS` (default 3600). **Submitted values are not
+  redacted from tool results** — they can reach chat history and model context,
+  so forms are for ordinary input and credential collection stays in URL
+  elicitation on the external site. Discovery, detached runs and sandbox
+  sub-agents never advertise form capability, and legacy in-call callbacks still
+  cancel. Rationale: [AGT-055](docs/root/dev/decisions/chat-agent.md),
+  [AGT-056](docs/root/dev/decisions/chat-agent.md),
+  [STO-014](docs/root/dev/decisions/report-store.md).
+- **A denied confirmation is recoverable** (#320). Denying an action used to be
+  sticky by fingerprint, so an honest identical retry was locked out while
+  changing one argument prompted without limit. An identical action now gets one
+  extra prompt (`ACTION_CONFIRMATION_DENIAL_RETRIES`, default `1`; `0` disables
+  retries), and five unexpired denials scoped to the user, source and session
+  refuse further prompts — including calls with changed arguments — with
+  `block_reason: confirmation_denial_limit`
+  (`ACTION_CONFIRMATION_SESSION_DENIAL_LIMIT`, default `5`, minimum `1`). The
+  window is the existing `ACTION_CONFIRMATION_TTL_SECONDS`, so there is no new
+  timer and no migration. Past either budget, the owner can open a live denied
+  action's confirmation page and allow it, and chat's confirmations pane now
+  lists **Previously denied** requests with the same Allow/Deny controls;
+  execution still validates current permissions and claims the grant once. MCP
+  form continuations never reverse a denial or open a retry prompt. Rationale:
+  [AGT-054](docs/root/dev/decisions/chat-agent.md).
+- **Model profiles and workflow history join the shared list conventions**
+  (#330, #332). Model profiles get search, a status filter, a row menu, a
+  confirmation dialog for delete and a `/app/model-profiles/:id/history` page
+  whose rows show a revision's complete settings or restore it as a new version
+  — one dialog and one payload builder serve both a profile and a revision, so
+  restoring cannot drift from editing. `WorkflowHistory` was the last page
+  rendering stacked cards over a raw fetch; it moves onto
+  `ListTable`/`ListViewState`/`RowMenu` with real loading and error states from
+  a new `useWorkflowVersionsList`, and one module now holds the trigger and
+  pipeline phrasing so the workflows list and its history describe a workflow
+  identically.
+- **A local OpenTelemetry collector, toggled like the other optional services**
+  (#330). `make otel_enable` / `make otel_disable` (then `make down && make up`)
+  select the `tracing` Compose profile, point telemetry at
+  `http://otel-collector:4318/v1/traces` and write span batches to
+  `.compose/otel/spans.jsonl`; disabling clears only the local endpoint and
+  preserves a configured remote one. `make down` now takes every profile down,
+  so the documented disable-then-restart sequence no longer leaves optional
+  services running.
+- **The elicitation tester runs in the stack** (#324), as an `external-mcp`
+  profile service on a published port — both sides need to reach it — with two
+  proxies, because one endpoint cannot serve both protocols. The bundled
+  `elicitation-testing` Agent Plugin declares their tools so the scenarios are
+  reachable under progressive disclosure, and **ships disabled**: its skills are
+  useless, and their declared dependencies unresolvable, wherever the tester is
+  not running. A standalone fixture (`scripts/elicitation_mcp_server.py`) covers
+  the same paths without it.
+
+### Changed
+
+- **The app renders under `StrictMode` again, and
+  `@eslint-react/set-state-in-effect` is an error** (#329). That rule stood at
+  133 findings across 31 files, each a value that follows a prop, a route
+  parameter or a fetched result copied into state by an effect watching it — so
+  the first render after the input moved showed the previous value, and the
+  correcting effect ran twice under the double-invoke. They are now derived:
+  `src/hooks/useAsyncResource.ts` packages the request-key shape the list and
+  detail hooks share (`loading` means "the settled result is not an answer to
+  the request this render is asking for"), drafts carry the value they were
+  typed against, dialogs mount their form per open behind a `key`, and the
+  measured toolbars use a callback ref. `react-helmet` — unshipped since 2020,
+  built on a library that registers during render — is replaced across all 26
+  call sites by `src/components/PageTitle.tsx`, which hands the tab title back
+  when the last one unmounts and warns in development if two mount at once.
+  Rationale: [UI-001 – UI-004](docs/root/dev/decisions/frontend-state.md).
+- **A new conversation opens on the session rather than on its first turn**
+  (#330). Asking the landing's question waited on two requests before anything
+  moved: the text left the composer and nothing took its place. Navigation, the
+  seeded question and the sidebar entry now happen on the session's own
+  response, the admission is requested before anything re-keys and awaited
+  after, and a turn that was never admitted leaves the question on screen in a
+  conversation that exists. That exposed the real delay — measured against a
+  freshly restarted web service, admission took 3.5s on the first request each
+  worker served and 30ms on every one after, almost all of it the deferred
+  `import litellm` behind the first model-capability lookup plus the Temporal
+  client connect. `warm_chat_dispatch` moves both to startup (it warms an
+  import rather than resolving a model, so startup gains no database read) and
+  the first admission after a restart now answers in 60ms.
+- **The chat page no longer re-renders on every streamed token** (#326). Nothing
+  the page does with the chat needs the message subscription, so it builds the
+  `Chat` instance and subscribes to nothing; `ChatTranscript` owns everything
+  derived from messages and `ChatSubscriptionBridge` reports back the four
+  values the page still renders from. Measured on one answer at the unthrottled
+  50ms cadence: `ChatInterface` 65 renders → 7, `ChatSessionsPanel` 60 → 1,
+  `ChatConfirmationsPanel` 60 → 0, and the transcript rows 383 → 67 now that
+  only the streaming message re-renders. This is also what removes the
+  dev-server "Maximum update depth exceeded": commits finish fast enough that
+  the store is no longer rewritten between render and commit, so
+  `useSyncExternalStore` stops forcing a synchronous re-render out of each one.
+- **Chat connections moved from the main sidebar into the chat panel's own
+  footer** (#330), which is where a feature configures itself; the collapsed
+  panel keeps it as an icon. The back control now carries the thread in the
+  query string and returns to the conversation that opened it — this is the page
+  someone leaves to follow a gateway's authorization link, and a reload must not
+  cost them the way back. Rationale:
+  [UI-006](docs/root/dev/decisions/frontend-state.md).
+- **`bun run build` forces `NODE_ENV=production`** (#325). `vite build` picks
+  its resolve conditions from `NODE_ENV`, and the dev Compose service exports
+  `NODE_ENV=development` — so building from inside it produced a bundle carrying
+  React's development runtime. Nothing shipped (the output is gitignored and
+  dockerignored), but the backend serves whatever `build/` holds, so a developer
+  who built that way browsed a dev bundle at `:8080` believing it was
+  production, and a rendering problem measured against one looked like a
+  production defect. The streamed-message cadence also drops to 250ms under the
+  dev server only; production keeps the responsive 50ms.
+
+### Fixed
+
+- **The turn that summarized an answered input request could answer with
+  nothing** (#328). The resume turn ran with no tools at all while the base
+  system prompt requires a post-action answer to arrive through
+  `respond_to_user` — so the model called it, the call was dropped along with
+  the tools it was never given, and `content` was empty. An empty assistant
+  message is dropped from history, so the turn vanished on reload and the parked
+  tool detail reverted to awaiting: live delivery showed the settled result and
+  a reload took it away. The finish tool is now offered and its answer read, and
+  a turn that still produces nothing reports the tool result rather than
+  persisting an empty message. Measured through a browser: before, one run in
+  three lost its answer; after, three of three keep it. Rationale:
+  [AGT-057](docs/root/dev/decisions/chat-agent.md).
+- **Choosing a node label in the query console's schema panel re-ran its query
+  forever** (#329). The console derived what to run from `location` during
+  render, and a finished query publishes its own `?h=<id>`; `navigate` reaches
+  the router a commit after the state set beside it, so there was a render in
+  which the URL and the run disagreed and read as "the user asked for a history
+  entry". The dev database recorded one such query 222 times, once every ~2.5
+  seconds — its own duration, each run started by the previous one finishing,
+  and nothing ever settled so no results appeared. What the console runs is now
+  explicit state changed only by what the user did, and the address bar
+  re-enters through one effect that adopts a `?h=` the page did not publish.
+  Rationale: [UI-005](docs/root/dev/decisions/frontend-state.md).
+- **A report panel resent its last query when its `cypher` or report token
+  moved** (#329), which logged `POST /api/v1/query/adhoc 422` whenever the
+  console switched from an ad-hoc query to a history entry: the effect that
+  dispatches built the request body from the render that happened to dispatch
+  it, with `cypher` and `reportToken` in its dependency list, so selecting a
+  history entry resent the settled request as `{"params": null}` against a
+  required field. A request now carries the cypher and token it was made with,
+  and a token rotation or a capabilities refresh no longer resends every panel's
+  query behind its back.
+- **`ReportVersionView`'s version-qualified tab title was silently overwritten**
+  (#329) by the nested `ReportView`, and `SpaceDetail` fought the report pane
+  for the same claim. `ReportView` takes a `documentTitle` prop instead, and
+  each nesting site names one owner.
+- **The wide list and history tables overflowed their page** (#332). `ListTable`
+  solves its minimum width rather than summing it — a percentage column takes
+  its share of whatever the table ends up being, so the minimum is
+  `pixelTotal / (1 - percentSum)` and stacking percentages divides every other
+  column by a smaller number. No list or history column carries a percentage
+  now; Name, Comment and Permissions absorb the slack and everything else is
+  sized to its content, and the workflows list gains the responsive `hideBelow`
+  tiers it never had. Measured minimum against the space available at each
+  breakpoint: the workflows list 1656px → 1338px at `xl` (1489 available),
+  `WorkflowHistory` 2264 → 1058, `RoleHistory` 2075 → 858,
+  `ScheduledChatHistory` 1465 → 898 at `lg` and 588 → 468 at `sm`,
+  `ReportHistory` 1186 → 738, `ToolsetHistory` 1038 → 738.
+- **The chat details pane stopped following streamed output** (#330). It
+  compared against a position measured after the content grew, which read a
+  large chunk of new output as the reader having scrolled away; it now follows
+  from the position recorded on scroll.
+- **A row menu's label was repeated by its cell's hover tooltip and joined the
+  row's search text** (#330) — `ListTable` derives both from cell text, and
+  `getNodeTextContent` reads a `label` prop. A column whose cells are controls
+  declares `textual: false`.
+- **The skill editor's tool chooser pushed its dialog sideways** (#332): a tool
+  declaration is one unbroken token that nothing in the label chain could shrink
+  or break. The "Choose tools" button also takes the `BuildIcon` that Toolsets
+  already uses for tools, and the model profile dialog's Economy column no
+  longer drifts out of line with the Base column beside it — two grid items in
+  one row, with three rows against four and `align-content` defaulting to
+  stretch.
+
+### Documentation
+
+- New [frontend state decision log](docs/root/dev/decisions/frontend-state.md)
+  (`UI`), recording `StrictMode`, the `set-state-in-effect` rule and the four
+  shapes that replace copying an input into state (#329).
+- `chat.md` documents the external input cards and the model profiles list and
+  history; `external-mcp.md` gains the in-chat input request reference — the
+  two opt-ins, the form and URL limits, what happens to submitted values, and
+  the local fixtures; `mcp-toolsets.md` documents the denial budget and owner
+  recovery; `quickstart.md` covers the local collector and disabling external
+  MCP (#320, #324, #330).
+
+### Upgrade notes {#upgrade-notes-550}
+
+One additive schema migration (`0014`); no removed settings, and every new
+capability is off by default.
+
+1. **In-chat input requests are opt-in twice.** Set
+   `MCP_EXTERNAL_ELICITATION_ENABLED=true` on the web service *and*
+   `seizu-temporal-worker`, then opt each proxy into
+   `"elicitation": {"form": true, "url": true}`. URL requests additionally need
+   `user_authorization` with a `reauthorize_url` on the same origin as the
+   requested browser URL. Read the data-flow note before enabling forms:
+   submitted values are not redacted from tool results.
+2. **Denials are now budgeted rather than sticky.** An identical denied action
+   gets one extra prompt and a session's sixth live denial is refused with
+   `confirmation_denial_limit`. Set `ACTION_CONFIRMATION_DENIAL_RETRIES=0` to
+   keep a single prompt per action; the budget window is the existing
+   `ACTION_CONFIRMATION_TTL_SECONDS`.
+3. If you build the frontend outside CI, note that `bun run build` now forces
+   `NODE_ENV=production` — a bundle built inside the dev Compose service was
+   carrying React's development runtime.
+
+Full procedures: [Upgrading Seizu — 5.5.0](docs/root/install/upgrading.md#550).
+
 ## [5.4.0] - 2026-09-11
 
 This release widens the agent's reach into third-party MCP servers and into its
@@ -1591,6 +1830,7 @@ frontend, storage, auth, and integrations.
 Initial release of the original reporting tool that Seizu was built from —
 Dockerized build, GitHub Container Registry publishing, and quickstart docs.
 
+[5.5.0]: https://github.com/mappedsky/seizu/compare/v5.4.0...v5.5.0
 [5.4.0]: https://github.com/mappedsky/seizu/compare/v5.3.0...v5.4.0
 [5.3.0]: https://github.com/mappedsky/seizu/compare/v5.2.0...v5.3.0
 [5.2.0]: https://github.com/mappedsky/seizu/compare/v5.1.0...v5.2.0
