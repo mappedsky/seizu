@@ -32,27 +32,27 @@ import {
   useWorkflowMutations,
   useWorkflowsList,
 } from 'src/hooks/useWorkflowsApi';
+import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
 import { temporalStatusColor, temporalStatusLabel } from 'src/temporalStatus';
+import {
+  workflowPipelineLabel,
+  workflowTriggerLabel,
+} from 'src/workflowTrigger';
 
-function triggerLabel(item: WorkflowItem): string {
-  if (item.watch_scans.length)
-    return `${item.watch_scans.length} watch scan(s)`;
-  if (!item.schedule) return 'Manual only';
-  if (item.schedule.type === 'interval')
-    return `Every ${item.schedule.interval_minutes} min`;
-  if (item.schedule.type === 'hourly')
-    return `Every ${item.schedule.interval_hours} hour(s)`;
-  return item.schedule.type === 'daily' ? 'Daily schedule' : 'Monthly schedule';
-}
-
-const nameColumnSx = { ...listTablePrimaryCellSx, width: '28%' };
-const statusColumnSx = { width: 160 };
-const lastRunColumnSx = { width: 184 };
-const enabledColumnSx = { width: 120 };
-const versionColumnSx = { width: 96 };
-const updatedColumnSx = { width: 184 };
-const updatedByColumnSx = { width: 160 };
+// A percentage width is what makes a wide table overflow: the table's minimum
+// is solved, not summed, so every pixel column is divided by what the
+// percentages leave over. The name column takes the slack instead, and the
+// rest are sized to their content.
+const nameColumnSx = listTablePrimaryCellSx;
+const triggerColumnSx = { width: 150 };
+const pipelineColumnSx = { width: 170 };
+const statusColumnSx = { width: 140 };
+const lastRunColumnSx = { width: 180 };
+const enabledColumnSx = { width: 110 };
+const versionColumnSx = { width: 90 };
+const updatedColumnSx = { width: 180 };
+const updatedByColumnSx = { width: 150 };
 
 export default function Workflows() {
   const navigate = useNavigate();
@@ -124,10 +124,12 @@ export default function Workflows() {
       {
         key: 'trigger',
         label: 'Trigger',
+        hideBelow: 'sm',
+        cellSx: triggerColumnSx,
         render: (item) => (
           <Box sx={{ alignItems: 'center', display: 'flex', gap: 0.5 }}>
             <Typography variant="body2" sx={listTableTruncateSx}>
-              {triggerLabel(item)}
+              {workflowTriggerLabel(item)}
             </Typography>
             {item.schedule_sync_status !== 'synced' && (
               <Tooltip
@@ -148,8 +150,9 @@ export default function Workflows() {
       {
         key: 'pipeline',
         label: 'Pipeline',
-        render: (item) =>
-          `${item.stages.length} stage(s), ${item.stages.reduce((total, stage) => total + stage.activities.length, 0)} activity(ies)`,
+        hideBelow: 'xl',
+        cellSx: pipelineColumnSx,
+        render: (item) => workflowPipelineLabel(item),
       },
       {
         key: 'status',
@@ -167,6 +170,7 @@ export default function Workflows() {
       {
         key: 'last_run_at',
         label: 'Last Run',
+        hideBelow: 'lg',
         cellSx: lastRunColumnSx,
         render: (item) =>
           item.last_run_at
@@ -176,6 +180,7 @@ export default function Workflows() {
       {
         key: 'enabled',
         label: 'Enabled',
+        hideBelow: 'md',
         cellSx: enabledColumnSx,
         render: (item) => (
           <Chip
@@ -188,18 +193,21 @@ export default function Workflows() {
       {
         key: 'version',
         label: 'Version',
+        hideBelow: 'lg',
         cellSx: versionColumnSx,
         render: (item) => item.current_version,
       },
       {
         key: 'updated',
         label: 'Latest Update',
+        hideBelow: 'xl',
         cellSx: updatedColumnSx,
         render: (item) => new Date(item.updated_at).toLocaleString(),
       },
       {
         key: 'updated_by',
         label: 'Updated By',
+        hideBelow: 'xl',
         cellSx: updatedByColumnSx,
         render: (item) => (
           <UserDisplay userId={item.updated_by ?? item.created_by} />
@@ -208,6 +216,7 @@ export default function Workflows() {
       {
         key: 'actions',
         label: '',
+        align: 'right',
         cellSx: listTableActionColumnSx,
         render: (item) => {
           const actions: RowMenuAction[] = [
@@ -242,7 +251,9 @@ export default function Workflows() {
               label: 'View history',
               icon: <HistoryIcon />,
               onClick: () =>
-                navigate(`/app/workflows/${item.workflow_id}/history`),
+                navigate(`/app/workflows/${item.workflow_id}/history`, {
+                  state: { fromLabel: 'Workflows' } satisfies BackState,
+                }),
             },
             {
               key: 'delete',

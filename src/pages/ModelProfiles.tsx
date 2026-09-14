@@ -242,7 +242,7 @@ function ProfileDialog({
             }
             sx={{ gridColumn: { md: '1 / -1' } }}
           />
-          <Box sx={{ display: 'grid', gap: 1 }}>
+          <Box sx={{ alignContent: 'start', display: 'grid', gap: 1 }}>
             <Typography variant="subtitle2">Base primary model</Typography>
             <TextField
               label="Primary model ID"
@@ -299,7 +299,7 @@ function ProfileDialog({
               </FormGroup>
             </Box>
           </Box>
-          <Box sx={{ display: 'grid', gap: 1 }}>
+          <Box sx={{ alignContent: 'start', display: 'grid', gap: 1 }}>
             <Typography variant="subtitle2">Economy fallback</Typography>
             <TextField
               label="Economy model ID"

@@ -24,6 +24,7 @@ import {
   Typography,
 } from '@mui/material';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircle';
+import BuildIcon from '@mui/icons-material/Build';
 import DeleteIcon from '@mui/icons-material/Delete';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircle';
@@ -205,7 +206,11 @@ function AllowedToolsDialog({
             }}
           >
             {groups.map((group) => (
-              <Paper key={group.key} variant="outlined" sx={{ p: 1.5 }}>
+              <Paper
+                key={group.key}
+                variant="outlined"
+                sx={{ minWidth: 0, p: 1.5 }}
+              >
                 <Typography variant="body2" sx={{ fontWeight: 700, mb: 0.5 }}>
                   {group.label}
                 </Typography>
@@ -217,6 +222,14 @@ function AllowedToolsDialog({
                     return (
                       <FormControlLabel
                         key={declaration}
+                        // A tool declaration is one unbroken token, so the
+                        // label must be allowed to shrink and to break inside
+                        // a word or it pushes the dialog sideways.
+                        sx={{
+                          minWidth: 0,
+                          mr: 0,
+                          '& .MuiFormControlLabel-label': { minWidth: 0 },
+                        }}
                         control={
                           <Checkbox
                             checked={selection.includes(declaration)}
@@ -225,13 +238,20 @@ function AllowedToolsDialog({
                         }
                         label={
                           <Box sx={{ minWidth: 0 }}>
-                            <Typography variant="body2">
+                            <Typography
+                              variant="body2"
+                              sx={{ overflowWrap: 'anywhere' }}
+                            >
                               {tool.name || tool.mcp_name}
                             </Typography>
                             <Typography
                               variant="caption"
                               color="text.secondary"
-                              sx={{ fontFamily: 'monospace' }}
+                              sx={{
+                                display: 'block',
+                                fontFamily: 'monospace',
+                                overflowWrap: 'anywhere',
+                              }}
                             >
                               {declaration}
                             </Typography>
@@ -656,10 +676,24 @@ export default function PluginSkillEditor({
             py: 1,
           }}
         >
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+          <Box
+            sx={{
+              display: 'flex',
+              flex: 1,
+              flexWrap: 'wrap',
+              gap: 0.5,
+              minWidth: 0,
+            }}
+          >
             {allowedTools.length ? (
               allowedTools.map((name) => (
-                <Chip key={name} label={name} size="small" variant="outlined" />
+                <Chip
+                  key={name}
+                  label={name}
+                  size="small"
+                  variant="outlined"
+                  sx={{ maxWidth: '100%' }}
+                />
               ))
             ) : (
               <Typography variant="body2" color="text.secondary">
@@ -670,7 +704,9 @@ export default function PluginSkillEditor({
           <Button
             variant="outlined"
             size="small"
+            startIcon={<BuildIcon fontSize="small" />}
             onClick={() => setAllowedToolsOpen(true)}
+            sx={{ flexShrink: 0, whiteSpace: 'nowrap' }}
           >
             Choose tools
           </Button>
