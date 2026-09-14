@@ -17,8 +17,12 @@ import {
   useFetchHistoryItem,
   QueryHistoryItem,
 } from 'src/hooks/useQueryHistory';
-import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
 import { pageContentSx } from 'src/theme/layout';
+
+/** Exactly one thing is running: a typed query, or a stored history entry. */
+type ConsoleRun =
+  | { kind: 'query'; query: string; key: number }
+  | { kind: 'history'; historyId: string; key: number };
 
 const QUERY_CONSOLE_SCHEMA_PANEL_STORAGE_KEY =
   'seizu:query-console:schema-panel-open';
@@ -28,18 +32,21 @@ export default function QueryConsole() {
   const navigate = useNavigate();
   const location = useLocation();
   const fetchHistoryItem = useFetchHistoryItem();
-  const { authReady } = useAuthHeaders();
   const [queryText, setQueryText] = useState('');
-  // What this page last ran, and the URL it corresponds to. Back/forward moves
-  // the URL off that value, and the run to show is then read off the URL — so
-  // the address bar and the results cannot disagree, and nothing has to be
-  // written into state from an effect that watches the location.
-  const [run, setRun] = useState<{
-    search: string;
-    query?: string;
-    historyId?: string;
-    key: number;
-  } | null>(null);
+  // What this page is showing, and nothing else decides it. `location` is
+  // deliberately absent from this: deriving the run from the address bar means
+  // re-deriving it while our own navigate() is still settling, and a completed
+  // query that publishes its URL then reads back as a request to run something,
+  // which publishes again. The console re-ran one query 222 times that way.
+  const [run, setRun] = useState<ConsoleRun | null>(null);
+  // Every `?h=` this page put in the address bar, and the last URL the restore
+  // below has already acted on. Both are refs mutated only from callbacks and
+  // never cleared on read, so a double-invoked effect or render repeats no work
+  // -- unlike the `justPushedRef` this replaces, which cleared its flag as it
+  // read it and so was defeated by StrictMode's second pass.
+  const ownHistoryIds = useRef<Set<string>>(new Set());
+  const handledSearch = useRef<string | null>(null);
+
   const [schemaPanelOpen, setSchemaPanelOpen] = useState(() => {
     if (typeof window === 'undefined') return true;
     const storedValue = window.localStorage.getItem(
@@ -54,57 +61,66 @@ export default function QueryConsole() {
 
   const handleQueryComplete = useCallback(
     (historyId: string | null) => {
-      if (historyId) {
-        setHistoryRefreshTrigger((n) => n + 1);
-        // The run this page is showing now lives at that URL: recording it
-        // here is what stops our own navigate() looking like a back/forward.
-        setRun((previous) =>
-          previous ? { ...previous, search: `?h=${historyId}` } : previous,
-        );
-        navigate(`?h=${historyId}`);
-      }
+      // Null for a re-executed history entry, which creates no new record and
+      // so has nothing to publish.
+      if (!historyId) return;
+      setHistoryRefreshTrigger((n) => n + 1);
+      // Claimed before navigating, so the restore below never treats this
+      // page's own URL as somewhere the user asked to go.
+      ownHistoryIds.current.add(historyId);
+      handledSearch.current = `?h=${historyId}`;
+      navigate(`?h=${historyId}`);
     },
     [navigate],
   );
 
-  const urlHistoryId = new URLSearchParams(location.search).get('h');
-  // The URL has moved off the run this page started: browser back/forward, or
-  // a link straight to a history entry.
-  const restored =
-    urlHistoryId !== null && (run === null || run.search !== location.search);
-  const submittedHistoryId = restored
-    ? urlHistoryId
-    : (run?.historyId ?? undefined);
-  const submittedQuery = restored ? undefined : (run?.query ?? undefined);
-  const runKey = restored ? 0 : (run?.key ?? 0);
+  const submittedQuery = run?.kind === 'query' ? run.query : undefined;
+  const submittedHistoryId =
+    run?.kind === 'history' ? run.historyId : undefined;
+  const runKey = run?.key ?? 0;
 
-  // Put the restored query back in the editor. The run itself is derived
-  // above; this only fills the text area.
+  // The address bar is an *input* only when it names a history entry this page
+  // did not publish: a back/forward, or a link opened cold. That is a change in
+  // an external system (the history stack) rather than a value this render
+  // could derive, so it is read here and acted on once per URL -- the narrow
+  // case UI-003 leaves to an effect.
   useEffect(() => {
-    if (!restored || !authReady || urlHistoryId === null) return undefined;
+    if (handledSearch.current === location.search) return undefined;
+    handledSearch.current = location.search;
+
+    const historyId = new URLSearchParams(location.search).get('h');
+    if (!historyId || ownHistoryIds.current.has(historyId)) return undefined;
+    ownHistoryIds.current.add(historyId);
+
     let cancelled = false;
-    void fetchHistoryItem(urlHistoryId).then((item) => {
+    // The one place this page writes run state from an effect, because the
+    // history stack is an external system rather than something this render
+    // can derive -- the carve-out UI-003 names, recorded as UI-005.
+    // eslint-disable-next-line @eslint-react/set-state-in-effect -- see UI-005
+    setRun((previous) => ({
+      kind: 'history',
+      historyId,
+      key: (previous?.key ?? 0) + 1,
+    }));
+    void fetchHistoryItem(historyId).then((item) => {
       if (cancelled || !item) return;
       setQueryText(item.query);
     });
     return () => {
       cancelled = true;
     };
-  }, [restored, authReady, urlHistoryId, fetchHistoryItem]);
+    // `fetchHistoryItem` resolves null until there is a token, so the editor
+    // text needs no gate of its own here.
+  }, [location.search, fetchHistoryItem]);
 
   const queryTextRef = useRef(queryText);
   queryTextRef.current = queryText;
-  // The router's search, not `window.location`: those differ under a memory
-  // router, and a run recorded against the wrong one reads back as a
-  // back/forward the moment it is compared.
-  const searchRef = useRef(location.search);
-  searchRef.current = location.search;
 
   const handleRun = useCallback(() => {
     const trimmed = queryTextRef.current.trim();
     if (!trimmed) return;
     setRun((previous) => ({
-      search: searchRef.current,
+      kind: 'query',
       query: trimmed,
       key: (previous?.key ?? 0) + 1,
     }));
@@ -123,7 +139,7 @@ export default function QueryConsole() {
   const handleQuerySelect = useCallback((query: string) => {
     setQueryText(query);
     setRun((previous) => ({
-      search: searchRef.current,
+      kind: 'query',
       query,
       key: (previous?.key ?? 0) + 1,
     }));
@@ -133,8 +149,10 @@ export default function QueryConsole() {
   const handleHistorySelect = useCallback(
     (item: QueryHistoryItem) => {
       setQueryText(item.query);
+      ownHistoryIds.current.add(item.history_id);
+      handledSearch.current = `?h=${item.history_id}`;
       setRun((previous) => ({
-        search: `?h=${item.history_id}`,
+        kind: 'history',
         historyId: item.history_id,
         key: (previous?.key ?? 0) + 1,
       }));

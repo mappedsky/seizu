@@ -108,3 +108,37 @@ nested `ReportView` had been overwriting since it was written.
 
 **Don't:** reintroduce a head library for a title, or render a `PageTitle`
 inside a component that a page may also title.
+
+## UI-005 — The query console's run is state, and the address bar is an event
+
+**Applies to:** `src/pages/QueryConsole.tsx`
+
+What the console is running — a typed query or a stored history entry — is
+explicit state changed only by what the user did. `location` is deliberately
+absent from the render-time derivation. A completed query publishes its
+`?h=<id>` and records the id as one of its own; the address bar re-enters the
+console only through a single effect, which adopts a `?h=` the page did not
+publish and does so once per URL.
+
+**Why:** deriving the run from the URL means re-deriving it while the page's own
+`navigate` is still settling. `navigate` reaches the router through its history
+listener, a commit after the state set beside it, and in that window the URL and
+the run disagree — which read as "the user asked for a history entry", ran it,
+published a new URL, and raced again. Measured in the dev database: one
+schema-panel query re-executed **222 times, once every ~2.5 seconds** — the
+query's own duration, because each run was triggered by the previous one
+finishing. It never settled, so nothing was ever displayed.
+
+**Why an effect here, against [UI-002](#ui-002-set-state-in-effect-is-an-error):**
+the history stack is an external system, not a value this render can compute,
+which is the case [UI-003](#ui-003-state-that-follows-an-input-is-derived-from-it-not-copied-into-state)
+leaves to an effect. It carries the only `set-state-in-effect` disable in the
+codebase, and it is narrow: one URL, adopted once.
+
+**Both guards are refs that are never cleared on read** — the set of ids this
+page published, and the last URL the restore acted on. That is the difference
+from the `justPushedRef` this replaces, which cleared its flag as it read it and
+so was defeated by StrictMode's second pass ([UI-001](#ui-001-the-app-renders-under-strictmode)).
+
+**Don't:** compare the URL against the last one the page navigated to. It is
+only *eventually* equal, and the render in between is the bug.

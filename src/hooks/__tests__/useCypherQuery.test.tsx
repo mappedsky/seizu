@@ -103,7 +103,10 @@ describe('useLazyCypherQuery', () => {
   it('does not resend a settled request when cypher changes', async () => {
     const { result, rerender } = renderHook(
       ({ cypher }: { cypher?: string }) => useLazyCypherQuery(cypher),
-      { wrapper: makeWrapper(false, null), initialProps: { cypher: CYPHER } },
+      {
+        wrapper: makeWrapper(false, null),
+        initialProps: { cypher: CYPHER } as { cypher?: string },
+      },
     );
     act(() => {
       result.current[0]();
@@ -118,7 +121,10 @@ describe('useLazyCypherQuery', () => {
   it('never posts a body without a query when cypher goes away', async () => {
     const { result, rerender } = renderHook(
       ({ cypher }: { cypher?: string }) => useLazyCypherQuery(cypher),
-      { wrapper: makeWrapper(false, null), initialProps: { cypher: CYPHER } },
+      {
+        wrapper: makeWrapper(false, null),
+        initialProps: { cypher: CYPHER } as { cypher?: string },
+      },
     );
     act(() => {
       result.current[0]();
