@@ -25,6 +25,64 @@ For every production upgrade:
    database written by a newer one unless its upgrade procedure explicitly says
    that downgrade is supported.
 
+## 5.5.0
+
+One additive schema migration (`0014`) and no removed settings. In-chat input
+requests are opt-in; the denial budget applies on upgrade and changes how a
+denied action behaves by default.
+
+### In-chat input requests from external MCP servers
+
+An external MCP server can now ask the person a question during a tool call and
+have the conversation resume from the answer. The capability is off until you
+enable it twice.
+
+1. Set `MCP_EXTERNAL_ELICITATION_ENABLED=true` on the web service **and**
+   `seizu-temporal-worker`. Interactive turns run on the worker, so enabling it
+   on one side only leaves the feature inert.
+2. Opt each proxy that should use it into `"elicitation": {"form": true, "url":
+   true}` in `MCP_EXTERNAL_PROXIES`. Both kinds default to false. URL requests
+   additionally require `user_authorization` with a `reauthorize_url` on the
+   same origin as the requested browser URL.
+3. Decide whether forms are acceptable for your deployment before enabling
+   them. **Submitted values are not redacted from tool results**: an upstream
+   may echo them, and they then enter chat history and model context. Forms are
+   for ordinary input; credential collection belongs in URL elicitation on the
+   external service's own site. The card in chat warns the person not to enter
+   passwords, API keys, access tokens or verification codes.
+4. Tune `CHAT_ELICITATION_TTL_SECONDS` (default 3600, bounded 1–86400) and
+   `CHAT_ELICITATION_MAX_FIELDS` (default and ceiling 32) if the defaults do not
+   suit. Expired requests cannot be answered or replayed.
+
+Migration `0014` adds the `chat_elicitations` table and applies automatically.
+Detached work — scheduled chats, workflow agent sessions, sandbox sub-agents —
+never advertises form capability and keeps the existing recovery flow. See
+[external-mcp.md](external-mcp.html#in-chat-input-requests) and
+[AGT-055](../dev/decisions/chat-agent.md).
+
+### Denied action confirmations are budgeted rather than sticky
+
+Denying a mutating action no longer refuses every later attempt at the same
+action for the rest of its confirmation window.
+
+1. An identical action gets one extra prompt after a denial
+   (`ACTION_CONFIRMATION_DENIAL_RETRIES`, default `1`). Set it to `0` to keep
+   exactly one prompt per action.
+2. Five unexpired denials scoped to the user, source and session refuse further
+   prompts — including calls with changed arguments — with an error carrying
+   `block_reason: confirmation_denial_limit`
+   (`ACTION_CONFIRMATION_SESSION_DENIAL_LIMIT`, default `5`, minimum `1`).
+3. The window is the existing `ACTION_CONFIRMATION_TTL_SECONDS` (default 1800
+   seconds from creation). There is no new timer and no migration.
+4. An owner can open a live denied action's confirmation page and allow it, then
+   retry the action; execution still validates the caller's current permissions
+   and claims the grant once. MCP form continuations cannot reverse a denial.
+
+Already approved grants remain consumable, and outstanding pending
+confirmations can still receive decisions. See
+[mcp-toolsets.md](mcp-toolsets.html) and
+[AGT-054](../dev/decisions/chat-agent.md).
+
 ## 5.4.0
 
 Two additive schema migrations (`0012`, `0013`); no removed settings. One
