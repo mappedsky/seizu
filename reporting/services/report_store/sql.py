@@ -3986,6 +3986,11 @@ class SQLModelReportStore(ReportStore):
                                 comment=f"Default changed to {data['name']}",
                             )
                         )
+                # The partial unique index admits one default row at a time, so
+                # the rows losing the flag must reach the database before the
+                # row gaining it -- the flush order of a single unit of work
+                # does not guarantee that on its own.
+                await session.flush()
             record = ModelProfileRecord(
                 profile_id=profile_id,
                 name=str(data["name"]),
@@ -4066,6 +4071,10 @@ class SQLModelReportStore(ReportStore):
                                 comment=f"Default changed to {data['name']}",
                             )
                         )
+                # Emit the rows losing the default flag before the row gaining
+                # it: the partial unique index admits one default at a time,
+                # and a single flush orders these updates by primary key.
+                await session.flush()
             version = record.current_version + 1
             record.name = str(data["name"])
             record.description = str(data.get("description") or "")

@@ -3379,6 +3379,26 @@ async def test_model_profiles_are_versioned_and_keep_one_default(store):
     assert versions[0].stage_overrides["worker_summary"].reasoning_effort == "none"
 
 
+async def test_model_profile_default_moves_to_an_older_profile(store):
+    """The default can be handed back to a profile created before the current one.
+
+    ``profile_id`` is time-ordered, so this is the direction in which the row
+    gaining the default flag sorts ahead of the row losing it.
+    """
+    first = await store.create_model_profile(_model_profile_data(name="First"), "admin")
+    second = await store.create_model_profile(_model_profile_data(name="Second", is_default=True), "admin")
+    assert second.is_default is True
+
+    updated = await store.update_model_profile(
+        first.profile_id,
+        _model_profile_data(name="First", is_default=True),
+        "admin",
+    )
+    assert updated is not None
+    assert updated.is_default is True
+    assert (await store.get_model_profile(second.profile_id)).is_default is False
+
+
 async def test_model_profiles_read_legacy_static_reasoning_without_rewriting_history(store):
     created = await store.create_model_profile(_model_profile_data(), "admin")
     async with AsyncSession(sql_module._get_engine()) as session:
