@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import secure
+from asgi_correlation_id import CorrelationIdMiddleware
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +19,7 @@ from starlette.types import ASGIApp as StarletteASGIApp
 from starlette.types import Receive, Scope, Send
 
 from reporting import settings
+from reporting.access_log import AccessLogMiddleware, silence_uvicorn_access_log
 from reporting.routes import auth as auth_routes
 from reporting.routes import chat as chat_routes
 from reporting.routes import chat_connections as chat_connections_routes
@@ -289,9 +291,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings.validate_persistence_settings()
     await oauth_client.verify_issuer_consistency()
     await report_store.initialize()
+    # Not inside the chat guard: the per-request HTTP spans need the tracer
+    # provider installed whether or not chat is enabled. `configure` gates
+    # itself on TELEMETRY_ENABLED and is idempotent.
+    telemetry.configure()
     if settings.CHAT_ENABLED:
         await validate_chat_llm_config()
-        telemetry.configure()
         await initialize_chat_checkpoints()
         from reporting.services import chat_turns
 
@@ -387,6 +392,22 @@ def create_app() -> FastAPI:
         mcp_session_manager, mcp_asgi = get_mcp_app()
         app.state.mcp_session_manager = mcp_session_manager
         app.add_middleware(_MCPMiddleware, mcp_app=mcp_asgi)
+
+    # Access logging, added last because Starlette builds the stack so that the
+    # most recently added middleware is outermost. Outermost is what this needs:
+    # a response short-circuited by an inner middleware -- a CSRF rejection, a
+    # timeout, an MCP request -- has to be logged like any other.
+    #
+    # The order of these two matters. CorrelationIdMiddleware ends up outside
+    # AccessLogMiddleware, so the request id is in the context by the time the
+    # access record is emitted; reversed, every access line would be missing the
+    # id that every other line of the request carries.
+    app.add_middleware(AccessLogMiddleware)
+    app.add_middleware(CorrelationIdMiddleware)
+    # AccessLogMiddleware is the access log now, so uvicorn's smaller line would
+    # only double every request.
+    silence_uvicorn_access_log()
+    telemetry.instrument_fastapi(app)
 
     # Static files from the React build
     static_folder = settings.STATIC_FOLDER

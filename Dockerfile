@@ -54,4 +54,4 @@ COPY --chown=seizu:seizu . .
 
 COPY --chown=seizu:seizu --from=nodebuilder /home/node/seizu/build /build
 
-CMD ["gunicorn", "--config", "/home/seizu/seizu/gunicorn.conf", "reporting.asgi:application", "--workers=2", "-k", "uvicorn.workers.UvicornWorker", "--access-logfile=-", "--error-logfile=-"]
+CMD ["gunicorn", "--config", "/home/seizu/seizu/gunicorn.conf", "reporting.asgi:application", "--workers=2", "-k", "uvicorn_worker.UvicornWorker", "--access-logfile=-", "--error-logfile=-"]

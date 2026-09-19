@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
+    "asgi-correlation-id>=5.0.1",
     "asyncpg>=0.31.0",
     "authlib>=1.6.0",
     "e2b-code-interpreter>=1.0.0",
@@ -41,12 +42,14 @@ dependencies = [
     "typer>=0.25.0",
     "uuid-utils>=0.16.0",
     "uvicorn>=0.46.0",
+    "uvicorn-worker>=0.4.0",
     "langgraph>=1.2.1",
     "langgraph-checkpoint-postgres>=3.1.1",
     "psycopg[binary]>=3.3.4",
     "alembic>=1.18.5",
     "opentelemetry-sdk>=1.30",
     "opentelemetry-exporter-otlp-proto-http>=1.30",
+    "opentelemetry-instrumentation-fastapi>=0.50b0",
 ]
 
 [project.scripts]
