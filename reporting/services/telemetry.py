@@ -77,6 +77,34 @@ def configure() -> None:
         _tracer = None
 
 
+# Health checks are polled on a short interval by orchestrators and load
+# balancers and carry no diagnostic value; a span each can easily outnumber
+# every request that does. They stay in the stdout access log, which is cheap.
+_UNTRACED_URLS = "healthcheck"
+
+
+def instrument_fastapi(app: Any) -> None:
+    """Emit a span per HTTP request, if tracing is switched on and importable.
+
+    This is the per-request half of what a rich access log used to provide:
+    route, method, status and duration, queryable in the trace backend beside
+    the chat spans and correlated with them, which a line of stdout cannot be.
+    ``reporting.access_log`` keeps that stdout line for when the backend is
+    unreachable.
+
+    Idempotent and never fatal, for the same reasons ``configure`` is.
+    """
+    if not settings.TELEMETRY_ENABLED or not settings.TELEMETRY_OTLP_ENDPOINT.strip():
+        return
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        FastAPIInstrumentor.instrument_app(app, excluded_urls=_UNTRACED_URLS)
+    except Exception:
+        # Same posture as `configure`: the run is the product, the trace is not.
+        logger.warning("HTTP tracing could not be instrumented; continuing without it", exc_info=True)
+
+
 def _parse_headers(raw: str) -> dict[str, str]:
     """``k=v,k2=v2`` into a dict, the form OTLP endpoints take API keys in."""
     headers: dict[str, str] = {}

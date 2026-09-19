@@ -49,7 +49,7 @@ elif [ -n "${DEV_OIDC_LOOPBACK_TARGET:-}" ]; then
 fi
 
 gunicorn --config "$SEIZU_DIR/gunicorn.conf" reporting.asgi:application \
-    --reload --workers=2 -k uvicorn.workers.UvicornWorker \
+    --reload --workers=2 -k uvicorn_worker.UvicornWorker \
     --access-logfile=- --error-logfile=- &
 pids+=($!)
 
