@@ -1422,9 +1422,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "xxhash" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5c/55/e42f59b5e4cce75085f68abb77114c4d1152628157bd60c2587881bca559/langgraph-1.2.3.tar.gz", hash = "sha256:7f89cd5f0946fe29bd7ca048e2a84d3c14e7f652e38bb98e00f0ba8b7004b9d0", size = 718812, upload-time = "2026-06-01T18:55:54" }
+sdist = { url = "https://files.pythonhosted.org/packages/5c/55/e42f59b5e4cce75085f68abb77114c4d1152628157bd60c2587881bca559/langgraph-1.2.3.tar.gz", hash = "sha256:7f89cd5f0946fe29bd7ca048e2a84d3c14e7f652e38bb98e00f0ba8b7004b9d0", size = 718812, upload-time = "2026-06-01T18:55:54Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/9b/287f11be799f2f4dd289ab19d23788df22ac20ce884a010d0696f79016db/langgraph-1.2.3-py3-none-any.whl", hash = "sha256:22e6c89084adb3edb7855f6ffa692af3d75925f9c70deb43b86da14db1b02c78", size = 244841, upload-time = "2026-06-01T18:55:52" },
+    { url = "https://files.pythonhosted.org/packages/39/9b/287f11be799f2f4dd289ab19d23788df22ac20ce884a010d0696f79016db/langgraph-1.2.3-py3-none-any.whl", hash = "sha256:22e6c89084adb3edb7855f6ffa692af3d75925f9c70deb43b86da14db1b02c78", size = 244841, upload-time = "2026-06-01T18:55:52Z" },
 ]
 
 [[package]]
@@ -1479,9 +1479,9 @@ dependencies = [
     { name = "orjson" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3f/ae/91446c1fffa04a2dc1f81afbfb5bfff3590452891a72bd9098a656ab2657/langgraph_sdk-0.4.4.tar.gz", hash = "sha256:4e651ffa09de695681579396375377bdde23bedbc8e35b070e615cbd5af7da8b", size = 345789, upload-time = "2026-08-27T21:25:22" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/ae/91446c1fffa04a2dc1f81afbfb5bfff3590452891a72bd9098a656ab2657/langgraph_sdk-0.4.4.tar.gz", hash = "sha256:4e651ffa09de695681579396375377bdde23bedbc8e35b070e615cbd5af7da8b", size = 345789, upload-time = "2026-08-27T21:25:22Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/43/d5/2ad7f3a835c6fcebf58b6669552536ecd52d2dfe4cf49c6c36648fd83572/langgraph_sdk-0.4.4-py3-none-any.whl", hash = "sha256:39afe416c91742925e6f8a93715f566d499b36e1b636b804a4ffe3190e4f4e64", size = 162270, upload-time = "2026-08-27T21:25:21" },
+    { url = "https://files.pythonhosted.org/packages/43/d5/2ad7f3a835c6fcebf58b6669552536ecd52d2dfe4cf49c6c36648fd83572/langgraph_sdk-0.4.4-py3-none-any.whl", hash = "sha256:39afe416c91742925e6f8a93715f566d499b36e1b636b804a4ffe3190e4f4e64", size = 162270, upload-time = "2026-08-27T21:25:21Z" },
 ]
 
 [[package]]
