@@ -2723,7 +2723,8 @@ async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> 
     """
     from reporting.services import chat_elicitations
 
-    input_config_token = chat_elicitations.worker_config.set(kwargs.get("config") or {})
+    step_config: RunnableConfig = kwargs.get("config") or RunnableConfig()
+    input_config_token = chat_elicitations.worker_config.set(step_config)
     input_step_token = chat_elicitations.worker_step_id.set(str(step["id"]))
     required = _required_action_spec(kwargs.get("tool_specs") or [], step)
     skill_id = required.skill_id if required is not None and required.kind == "skill" else ""
@@ -2763,7 +2764,7 @@ async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> 
         # but an exception in the loop skipped that -- and because open_scope
         # does not reset accumulated spend, a retry of the same step id would
         # inherit the failed attempt's spend and be capped before doing any work.
-        controller = _budget_controller(kwargs.get("config") or {})
+        controller = _budget_controller(step_config)
         if controller is not None:
             controller.close_scope(f"worker:{step['id']}")
         chat_budget.set_current_budget_scope("")
