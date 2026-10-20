@@ -30,10 +30,14 @@ repos:
     rev: v1.0.0
     hooks:
     -   id: mypy
+        # Pinned, not floating: an unpinned entry resolves whatever is
+        # newest whenever the hook environment is rebuilt, so lint checks the
+        # tree against a library the app does not run. `pydantic` must equal
+        # the version resolved in `uv.lock`; `lint_env_test.py` asserts it.
         additional_dependencies:
-          - pydantic
-          - types-PyYAML
-          - types-requests
+          - pydantic==2.13.4
+          - types-PyYAML==6.0.12.20260906
+          - types-requests==2.33.0.20261006
 -   repo: https://github.com/pre-commit/mirrors-eslint
     rev: v10.4.0
     hooks:
