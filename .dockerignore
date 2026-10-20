@@ -17,3 +17,7 @@ dist
 __pycache__
 
 .secrets.venv
+# Lint and local tooling run from a host venv (see AGENTS.MD). The image builds
+# its own environment at UV_PROJECT_ENVIRONMENT, so a host one is pure context
+# weight.
+.venv

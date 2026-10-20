@@ -13,7 +13,7 @@ def upgrade() -> None:
     from reporting.services.report_store.sql import ChatElicitationRecord
 
     if "chat_elicitations" not in sa.inspect(op.get_bind()).get_table_names():
-        ChatElicitationRecord.__table__.create(op.get_bind())
+        ChatElicitationRecord.metadata.tables["chat_elicitations"].create(op.get_bind())
 
 
 def downgrade() -> None:
