@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from typing import Annotated, Any, Literal, NotRequired, Protocol
+from typing import Annotated, Any, Literal, NotRequired, Protocol, cast
 
 from langchain_core.messages import (
     AIMessage,
@@ -25,6 +25,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from mcp.types import Prompt, Tool, ToolAnnotations
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel
@@ -176,15 +177,23 @@ class ChatState(TypedDict):
 
 
 class ChatGraph(Protocol):
+    """The two methods Seizu calls on a compiled graph.
+
+    ``config`` and ``stream_mode`` are deliberately untyped: this Protocol
+    exists so the module does not depend on LangGraph's own generics, and the
+    concrete signatures are narrower than a caller here needs to know
+    (``stream_mode`` is a Literal union, ``config`` a TypedDict).
+    """
+
     def astream(
         self,
         input: ChatState,
-        config: dict[str, Any],
+        config: Any,
         *,
-        stream_mode: str,
+        stream_mode: Any,
     ) -> Any: ...
 
-    def aget_state(self, config: dict[str, Any]) -> Any: ...
+    def aget_state(self, config: Any) -> Any: ...
 
 
 class ChatModel(Protocol):
@@ -197,7 +206,14 @@ class ChatModel(Protocol):
 
 
 _chat_graph: ChatGraph | None = None
-_chat_checkpoint_pool: AsyncConnectionPool | None = None
+# What the pool actually yields: it is constructed with
+# ``row_factory=dict_row``, which typing cannot see. psycopg types a pool by
+# its connection class, and a parameterized one must not be passed --
+# psycopg_pool substitutes its own ``AsyncPoolConnection`` only when
+# ``connection_class is AsyncConnection``.
+type _DictRowPool = AsyncConnectionPool[AsyncConnection[dict[str, Any]]]
+
+_chat_checkpoint_pool: _DictRowPool | None = None
 
 
 @dataclass(frozen=True)
@@ -429,7 +445,7 @@ def build_turn_config(
     headless: bool = False,
     bypass_confirmations: bool = False,
     turn_id: str = "",
-) -> dict[str, Any]:
+) -> RunnableConfig:
     """Build the ``configurable`` a turn runs under.
 
     One builder for every surface that drives the graph -- the interactive turn
@@ -2321,8 +2337,11 @@ def _trim_inner_loop_messages(messages: list[BaseMessage], *, model: Any, max_to
         if not isinstance(first, AIMessage):
             continue
         tool_messages: list[ToolMessage] = []
-        while body and isinstance(body[0], ToolMessage):
-            tool_dropped = body.pop(0)
+        while body:
+            tool_dropped = body[0]
+            if not isinstance(tool_dropped, ToolMessage):
+                break
+            body.pop(0)
             total -= _message_context_tokens(model, tool_dropped)
             tool_messages.append(tool_dropped)
         fresh.extend(_digest_dropped_exchange(first, tool_messages))
@@ -4562,16 +4581,19 @@ async def _initialize_postgres_chat_checkpoints() -> None:
             "must satisfy 0 <= min_size <= max_size and max_size >= 1"
         )
 
-    pool = AsyncConnectionPool(
-        conninfo=url,
-        min_size=min_size,
-        max_size=max_size,
-        open=False,
-        kwargs={
-            "autocommit": True,
-            "prepare_threshold": 0,
-            "row_factory": dict_row,
-        },
+    pool: _DictRowPool = cast(
+        _DictRowPool,
+        AsyncConnectionPool(
+            conninfo=url,
+            min_size=min_size,
+            max_size=max_size,
+            open=False,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+        ),
     )
     try:
         await pool.open()
@@ -4587,7 +4609,7 @@ async def _initialize_postgres_chat_checkpoints() -> None:
     _chat_graph = build_chat_graph(checkpointer)
 
 
-async def _setup_postgres_checkpointer(pool: AsyncConnectionPool) -> None:
+async def _setup_postgres_checkpointer(pool: _DictRowPool) -> None:
     # Gunicorn workers run lifespan concurrently. LangGraph records each
     # migration version with a primary-key insert, so serialize setup across
     # workers to avoid a first-deploy migration race. Poll with the non-blocking
