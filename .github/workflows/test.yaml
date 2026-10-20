@@ -128,6 +128,11 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          # The mypy hook runs `uv run --frozen`, which builds the project
+          # environment on a runner that has none.
+          enable-cache: true
+          cache-dependency-glob: uv.lock
       - uses: oven-sh/setup-bun@f4d14e03ff726c06358e5557344e1da148b56cf7 # v1
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
