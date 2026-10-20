@@ -26,18 +26,18 @@ repos:
     -   id: ruff
         args: [--fix]
     -   id: ruff-format
--   repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.0.0
+-   repo: local
     hooks:
     -   id: mypy
-        # Pinned, not floating: an unpinned entry resolves whatever is
-        # newest whenever the hook environment is rebuilt, so lint checks the
-        # tree against a library the app does not run. `pydantic` must equal
-        # the version resolved in `uv.lock`; `lint_env_test.py` asserts it.
-        additional_dependencies:
-          - pydantic==2.13.4
-          - types-PyYAML==6.0.12.20260906
-          - types-requests==2.33.0.20261006
+        name: mypy
+        # Runs from the project environment rather than an isolated one
+        # pre-commit builds; the script explains the sync flags. Needs `uv` on
+        # PATH -- `language: system` means pre-commit installs nothing here.
+        entry: scripts/run_mypy.sh
+        language: system
+        types_or: [python, pyi]
+        args: [--scripts-are-modules]
+        require_serial: true
 -   repo: https://github.com/pre-commit/mirrors-eslint
     rev: v10.4.0
     hooks:
