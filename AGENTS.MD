@@ -105,7 +105,7 @@ docker compose build seizu                     # REQUIRED after any dependency c
 
 **Docs (Sphinx):** isolated venv under `docs/.venv`, pinned in `docs/requirements.txt`. Sphinx is **not** in the project `pyproject.toml` — don't add it there. `make docs` runs `docs/build.sh` (bootstraps the venv). To change a docs dep, edit `docs/requirements.txt` and re-run `make docs`.
 
-**Linting:** run pre-commit **on the host** (the `seizu` container lacks git): `pre-commit run --all-files` or `make lint`.
+**Linting:** run pre-commit **on the host** (the `seizu` container lacks git): `pre-commit run --all-files` or `make lint`. The mypy hook's `additional_dependencies` are pinned to exact versions and its `pydantic` pin must equal the one in `uv.lock`, so lint type-checks against the library the app runs; `tests/unit/reporting/lint_env_test.py` asserts both, which means a pydantic bump moves `.pre-commit-config.yaml` too.
 
 **Git:** never push to `master`. Push feature branches and open a PR.
 
@@ -552,4 +552,4 @@ List-view conventions live in shared components — compose these rather than re
 
 ## Keeping Supporting Files Up to Date
 
-When changing the codebase, update as needed: **`Makefile`** (new targets), **`.github/workflows/`** (CI), **`Dockerfile`/`docker-compose.yml`** (services, files, env), **`.pre-commit-config.yaml`** (linting), **`pyproject.toml` + `uv.lock`** (commit together; `uv lock` after edits, then `docker compose build`), **`docs/`** (user-facing changes — grep for removed items), **`schema/reporting-schema.json`** (`make schema` after Pydantic changes), **`.env.example`** (env vars), **`AGENTS.MD`** (conventions/tooling changes).
+When changing the codebase, update as needed: **`Makefile`** (new targets), **`.github/workflows/`** (CI), **`Dockerfile`/`docker-compose.yml`** (services, files, env), **`.pre-commit-config.yaml`** (linting; a pydantic bump moves the mypy hook's pin with it), **`pyproject.toml` + `uv.lock`** (commit together; `uv lock` after edits, then `docker compose build`), **`docs/`** (user-facing changes — grep for removed items), **`schema/reporting-schema.json`** (`make schema` after Pydantic changes), **`.env.example`** (env vars), **`AGENTS.MD`** (conventions/tooling changes).
