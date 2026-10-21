@@ -15,6 +15,23 @@ function role(hue: Hue, mode: 'light' | 'dark') {
 }
 
 /**
+ * Hover, selected and disabled washes drawn from the primary hue at the brand
+ * opacity rungs, instead of MUI's neutral black or white, so every tinted
+ * surface (code wells, selected rows, disabled fills) shares the canvas's hue.
+ */
+function tintedActions(
+  hue: string,
+  [hover, selected, strong]: [number, number, number],
+): PaletteOptions['action'] {
+  return {
+    hover: alpha(hue, hover),
+    selected: alpha(hue, selected),
+    focus: alpha(hue, strong),
+    disabledBackground: alpha(hue, strong),
+  };
+}
+
+/**
  * The MUI palette for one mode, composed from the brand roles. Every color
  * here comes from `brand.ts`; status colors use the same hues as the rest of
  * the UI rather than MUI's defaults.
@@ -40,15 +57,17 @@ export function paletteFor(mode: 'light' | 'dark'): PaletteOptions {
           background: { default: brand.space, paper: brand.spaceRaised },
           text: { primary: brand.paper, secondary: brand.mist },
           divider: alpha(brand.starlight, 0.15),
+          action: tintedActions(brand.starlight, [0.08, 0.12, 0.12]),
         }
       : {
           mode,
           primary: { main: brand.starlightDark, contrastText: '#fff' },
           // White text on emberDark falls below AA; Space clears it.
           secondary: { main: brand.emberDark, contrastText: brand.space },
-          background: { default: brand.paper, paper: '#fff' },
+          background: { default: brand.paperCanvas, paper: '#fff' },
           text: { primary: brand.space, secondary: brand.slate },
           divider: alpha(brand.starlightDark, 0.16),
+          action: tintedActions(brand.starlightDark, [0.04, 0.08, 0.12]),
         }),
   };
 }

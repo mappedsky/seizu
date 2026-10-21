@@ -265,8 +265,7 @@ export default function CypherVerticalTable({
           {caption}
           <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         </Typography>
-        <Divider />
-        <TableContainer component={Paper} sx={{ p: 2 }}>
+        <TableContainer component={Paper} variant="outlined" sx={{ p: 2 }}>
           {table}
         </TableContainer>
       </Box>,

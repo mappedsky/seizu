@@ -12,22 +12,22 @@ const renderWithMode = (mode: 'light' | 'dark') =>
 describe('Logo', () => {
   afterEach(cleanup);
 
-  it('renders the white lockup in light mode (dark primary background)', () => {
+  it('renders the black lockup in light mode (light app bar)', () => {
     renderWithMode('light');
     const img = screen.getByAltText('Seizu');
     expect(img).toBeInTheDocument();
     expect(img).toHaveAttribute(
       'src',
-      '/static/images/logo-horizontal-white.svg',
+      '/static/images/logo-horizontal-black.svg',
     );
     expect(img).toHaveAttribute('height', '50');
   });
 
-  it('renders the black lockup in dark mode (light primary background)', () => {
+  it('renders the white lockup in dark mode (dark app bar)', () => {
     renderWithMode('dark');
     expect(screen.getByAltText('Seizu')).toHaveAttribute(
       'src',
-      '/static/images/logo-horizontal-black.svg',
+      '/static/images/logo-horizontal-white.svg',
     );
   });
 

@@ -1,10 +1,11 @@
 import { GlobalStyles as MuiGlobalStyles } from '@mui/material';
+import { alpha, type Theme } from '@mui/material/styles';
 import { fontFamilyMono } from 'src/theme/typography';
 
 function GlobalStyles() {
   return (
     <MuiGlobalStyles
-      styles={{
+      styles={(theme: Theme) => ({
         '*': {
           boxSizing: 'border-box',
           margin: 0,
@@ -13,6 +14,9 @@ function GlobalStyles() {
         html: {
           WebkitFontSmoothing: 'antialiased',
           MozOsxFontSmoothing: 'grayscale',
+          // Scrollbars take the palette rather than the browser's grey: a
+          // starlight thumb on a clear track. The property is inherited.
+          scrollbarColor: `${alpha(theme.palette.primary.main, 0.25)} transparent`,
         },
         body: {
           height: '100%',
@@ -50,7 +54,7 @@ function GlobalStyles() {
           paddingTop: 10,
           paddingBottom: 10,
         },
-      }}
+      })}
     />
   );
 }

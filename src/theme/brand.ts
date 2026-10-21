@@ -14,6 +14,9 @@ export const brand = {
   // Core surfaces
   space: '#0A0F22',
   paper: '#F5F6FB',
+  // The light app canvas: white with 3% starlightDark, so it reads as the same
+  // sheet as the white chrome and panels rather than a grey well between them.
+  paperCanvas: '#F9FAFC',
   // Raised surface (cards, panels) on Space.
   spaceRaised: '#111A33',
   // Secondary text: on Space, and on Paper.

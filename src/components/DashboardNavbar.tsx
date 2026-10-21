@@ -63,8 +63,6 @@ function DashboardNavbar({
 
   const retVal = (
     <AppBar
-      enableColorOnDark
-      elevation={0}
       sx={[
         (theme) => ({
           transition: theme.transitions.create(['left', 'width'], {
