@@ -11,6 +11,7 @@ import {
   Tabs,
   Tooltip,
   Typography,
+  useMediaQuery,
 } from '@mui/material';
 import CypherTable from 'src/components/reports/CypherTable';
 import { useTheme } from '@mui/material/styles';
@@ -52,6 +53,7 @@ import GraphDetailPanel, {
   GraphSummaryPanel,
 } from 'src/components/reports/GraphDetailPanel';
 import { chartPalette } from 'src/theme/brand';
+import { fontFamilyMono } from 'src/theme/typography';
 
 interface GraphSettings {
   node_label?: string;
@@ -1146,7 +1148,10 @@ function CypherGraph({
       tab,
     }));
 
-  const [detailOpen, setDetailOpen] = useState(defaultDetailOpen);
+  // Below `md` the detail panel would leave the graph a sliver, so it starts
+  // closed there and opens over the canvas rather than beside it.
+  const narrow = useMediaQuery(theme.breakpoints.down('md'), { noSsr: true });
+  const [detailOpen, setDetailOpen] = useState(defaultDetailOpen && !narrow);
   const [repulsion, setRepulsion] = useState(1);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -1281,7 +1286,10 @@ function CypherGraph({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -1310,7 +1318,10 @@ function CypherGraph({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -1347,7 +1358,10 @@ function CypherGraph({
               container
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -1385,7 +1399,10 @@ function CypherGraph({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -1419,7 +1436,7 @@ function CypherGraph({
               borderColor: 'divider',
               borderRadius: 1,
               p: 1,
-              fontFamily: 'monospace',
+              fontFamily: fontFamilyMono,
               fontSize: 12,
               whiteSpace: 'pre',
             }}
@@ -1479,6 +1496,7 @@ function CypherGraph({
         {caption && (
           <Typography
             variant="subtitle1"
+            component="h3"
             sx={{ ml: 'auto', pr: 2, color: 'text.secondary' }}
           >
             {caption}
@@ -1509,7 +1527,7 @@ function CypherGraph({
               ...(fillHeight ? { flex: 1, minHeight: 0 } : { height: 450 }),
               overflow: 'auto',
               p: 2,
-              fontFamily: 'monospace',
+              fontFamily: fontFamilyMono,
               fontSize: 12,
               bgcolor: 'action.hover',
               whiteSpace: 'pre',
@@ -1524,6 +1542,7 @@ function CypherGraph({
           <Box
             sx={{
               display: 'flex',
+              position: 'relative',
               ...(fillHeight ? { flex: 1, minHeight: 0 } : { height: 450 }),
             }}
           >
@@ -1599,6 +1618,17 @@ function CypherGraph({
                   borderColor: 'divider',
                   overflow: 'auto',
                   p: 2,
+                  ...(narrow && {
+                    // Left of the toggle handle, which stays the way to close it.
+                    position: 'absolute',
+                    top: 0,
+                    bottom: 0,
+                    right: 28,
+                    width: `min(${DETAIL_PANEL_WIDTH}px, calc(100% - 56px))`,
+                    zIndex: 1,
+                    bgcolor: 'background.paper',
+                    boxShadow: 8,
+                  }),
                 }}
               >
                 {selectedItem ? (

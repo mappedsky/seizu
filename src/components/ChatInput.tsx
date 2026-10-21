@@ -5,20 +5,13 @@ import {
   type ReactNode,
   memo,
   useCallback,
-  useRef,
   useState,
 } from 'react';
 import Box from '@mui/material/Box';
-import Card from '@mui/material/Card';
-import CardContent from '@mui/material/CardContent';
-import FormControlLabel from '@mui/material/FormControlLabel';
 import IconButton from '@mui/material/IconButton';
-import InputAdornment from '@mui/material/InputAdornment';
-import Switch from '@mui/material/Switch';
-import TextField from '@mui/material/TextField';
+import InputBase from '@mui/material/InputBase';
 import Tooltip from '@mui/material/Tooltip';
-import Typography from '@mui/material/Typography';
-import Send from '@mui/icons-material/Send';
+import ArrowUpward from '@mui/icons-material/ArrowUpward';
 import Stop from '@mui/icons-material/Stop';
 
 interface ChatInputProps {
@@ -26,75 +19,33 @@ interface ChatInputProps {
   disabled: boolean;
   onSubmit: (text: string) => void;
   onStop: () => void;
-  /** Optional controls shown on the left side of the composer footer. Keep the
-   *  node referentially stable while streaming so this component stays memoized. */
+  /** Optional controls shown on the left of the composer's control row. Keep
+   *  the node referentially stable while streaming so this stays memoized. */
   footerControls?: ReactNode;
-  /** Whether the caller may bypass confirmations at all; hides the control when
-   *  false. Passed as flags rather than a rendered node so this stays memoized
-   *  against a parent that re-renders on every streamed frame. */
-  showBypassConfirmations?: boolean;
-  bypassConfirmations?: boolean;
-  onBypassConfirmationsChange?: (value: boolean) => void;
 }
 
-const DEFAULT_INPUT_HEIGHT = 140;
-const MAX_AUTO_INPUT_HEIGHT = DEFAULT_INPUT_HEIGHT * 2;
+// One line to start; the field grows with its text up to this many lines and
+// scrolls beyond it.
+const MAX_ROWS = 8;
 
+/**
+ * The message composer: one surface holding the text and, beneath it, a single
+ * row of controls — model and send. Enter sends;
+ * Shift+Enter, Ctrl+Enter and Cmd+Enter each start a new line.
+ */
 export default memo(function ChatInput({
   busy,
   disabled,
   onSubmit,
   onStop,
   footerControls,
-  showBypassConfirmations = false,
-  bypassConfirmations = false,
-  onBypassConfirmationsChange,
 }: ChatInputProps) {
   const [input, setInput] = useState('');
-  const [inputHeight, setInputHeight] = useState(DEFAULT_INPUT_HEIGHT);
-  const inputHeightRef = useRef(inputHeight);
-  inputHeightRef.current = inputHeight;
-  const autoSizingEnabledRef = useRef(true);
-  const dragStartYRef = useRef(0);
-  const dragStartHeightRef = useRef(0);
-
-  const handleInputChange = (
-    event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
-  ) => {
-    setInput(event.target.value);
-    if (
-      !autoSizingEnabledRef.current ||
-      !(event.target instanceof HTMLTextAreaElement)
-    ) {
-      return;
-    }
-    const textarea = event.target;
-    const nonTextHeight = Math.max(
-      0,
-      inputHeightRef.current - textarea.clientHeight,
-    );
-    const previousHeight = textarea.style.getPropertyValue('height');
-    const previousPriority = textarea.style.getPropertyPriority('height');
-    textarea.style.setProperty('height', '0px', 'important');
-    const contentHeight = textarea.scrollHeight;
-    if (previousHeight) {
-      textarea.style.setProperty('height', previousHeight, previousPriority);
-    } else {
-      textarea.style.removeProperty('height');
-    }
-    setInputHeight(
-      Math.max(
-        DEFAULT_INPUT_HEIGHT,
-        Math.min(MAX_AUTO_INPUT_HEIGHT, contentHeight + nonTextHeight),
-      ),
-    );
-  };
 
   const submitInput = useCallback(() => {
     const trimmed = input.trim();
     if (!trimmed || busy || disabled) return false;
     setInput('');
-    if (autoSizingEnabledRef.current) setInputHeight(DEFAULT_INPUT_HEIGHT);
     onSubmit(trimmed);
     return true;
   }, [busy, disabled, input, onSubmit]);
@@ -104,164 +55,109 @@ export default memo(function ChatInput({
     submitInput();
   };
 
-  const handleInputKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+  const handleInputKeyDown = (
+    event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
+  ) => {
     if (event.key !== 'Enter' || event.shiftKey) return;
     if (event.nativeEvent.isComposing) return;
     event.preventDefault();
+    if (event.metaKey || event.ctrlKey) {
+      // Either modifier means "new line", whichever a platform reaches for.
+      // The browser inserts nothing for these itself, so place the line
+      // break at the caret (replacing any selection) and keep the caret
+      // after it.
+      const field = event.currentTarget;
+      const start = field.selectionStart ?? input.length;
+      const end = field.selectionEnd ?? start;
+      setInput(`${input.slice(0, start)}\n${input.slice(end)}`);
+      requestAnimationFrame(() => {
+        field.selectionStart = field.selectionEnd = start + 1;
+      });
+      return;
+    }
     submitInput();
   };
 
-  const handleDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    autoSizingEnabledRef.current = false;
-    dragStartYRef.current = e.clientY;
-    dragStartHeightRef.current = inputHeightRef.current;
-    document.body.style.cursor = 'ns-resize';
-    document.body.style.userSelect = 'none';
-
-    const handleMouseMove = (ev: MouseEvent) => {
-      const delta = dragStartYRef.current - ev.clientY;
-      setInputHeight(
-        Math.max(100, Math.min(420, dragStartHeightRef.current + delta)),
-      );
-    };
-
-    const handleMouseUp = () => {
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  }, []);
+  const canSend = !busy && !!input.trim() && !disabled;
 
   return (
-    <>
-      <Box
-        onMouseDown={handleDragStart}
-        sx={{
-          alignItems: 'center',
-          cursor: 'ns-resize',
-          display: 'flex',
-          flexShrink: 0,
-          height: 8,
-          justifyContent: 'center',
-          my: 0.5,
-          '&::after': {
-            bgcolor: 'divider',
-            borderRadius: 2,
-            content: '""',
-            display: 'block',
-            height: 4,
-            transition: 'background-color 0.15s',
-            width: 48,
-          },
-          '&:hover::after': { bgcolor: 'primary.main' },
-        }}
+    <Box
+      component="form"
+      data-testid="chat-composer"
+      onSubmit={handleSubmit}
+      sx={{
+        bgcolor: 'background.paper',
+        border: 1,
+        borderColor: 'divider',
+        borderRadius: 3,
+        flexShrink: 0,
+        mt: 1,
+        pb: 0.75,
+        pt: 1,
+        px: 1.5,
+        transition: 'border-color 120ms ease',
+        '&:focus-within': { borderColor: 'primary.main' },
+      }}
+    >
+      <InputBase
+        multiline
+        fullWidth
+        minRows={1}
+        maxRows={MAX_ROWS}
+        value={input}
+        onChange={(
+          event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+        ) => setInput(event.target.value)}
+        onKeyDown={handleInputKeyDown}
+        placeholder="Ask Seizu..."
+        disabled={busy}
+        inputProps={{ 'aria-label': 'Message' }}
+        sx={(theme) => ({
+          fontSize: theme.typography.body1.fontSize,
+          lineHeight: 1.5,
+          px: 0.5,
+          py: 0.5,
+        })}
       />
       <Box
-        data-testid="chat-composer"
-        style={{ height: inputHeight }}
-        sx={{ flexShrink: 0 }}
+        sx={{
+          alignItems: 'center',
+          display: 'flex',
+          gap: 0.5,
+          minWidth: 0,
+          mt: 0.5,
+        }}
       >
-        <Card sx={{ height: '100%' }}>
-          <CardContent
-            component="form"
-            onSubmit={handleSubmit}
-            sx={{
-              display: 'flex',
-              flexDirection: 'column',
-              height: '100%',
-              '&:last-child': { pb: 2 },
-            }}
-          >
-            <TextField
-              multiline
-              fullWidth
-              value={input}
-              onChange={handleInputChange}
-              onKeyDown={handleInputKeyDown}
-              placeholder="Ask Seizu..."
-              disabled={busy}
-              variant="outlined"
-              slotProps={{
-                input: {
-                  endAdornment: (
-                    <InputAdornment
-                      position="end"
-                      sx={{ alignSelf: 'flex-end', mb: 0.5 }}
-                    >
-                      <Tooltip title={busy ? 'Stop response' : 'Send message'}>
-                        <span>
-                          <IconButton
-                            aria-label={busy ? 'Stop' : 'Send'}
-                            color="primary"
-                            disabled={!busy && (!input.trim() || disabled)}
-                            onClick={busy ? onStop : undefined}
-                            type={busy ? 'button' : 'submit'}
-                          >
-                            {busy ? <Stop /> : <Send />}
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                    </InputAdornment>
-                  ),
-                },
-              }}
+        {footerControls}
+        <Tooltip title={busy ? 'Stop response' : 'Send message'}>
+          <span style={{ marginLeft: 'auto', flexShrink: 0 }}>
+            <IconButton
+              aria-label={busy ? 'Stop' : 'Send'}
+              disabled={!busy && !canSend}
+              onClick={busy ? onStop : undefined}
+              size="small"
+              type={busy ? 'button' : 'submit'}
               sx={{
-                flex: 1,
-                minHeight: 0,
-                '& .MuiInputBase-root': {
-                  alignItems: 'flex-start',
-                  height: '100%',
-                },
-                '& .MuiInputBase-input': {
-                  boxSizing: 'border-box',
-                  height: '100% !important',
-                  overflow: 'auto !important',
+                bgcolor: 'primary.main',
+                color: 'primary.contrastText',
+                height: 32,
+                width: 32,
+                '&:hover': { bgcolor: 'primary.dark' },
+                '&.Mui-disabled': {
+                  bgcolor: 'action.disabledBackground',
+                  color: 'action.disabled',
                 },
               }}
-            />
-            {footerControls || showBypassConfirmations ? (
-              <Box
-                sx={{
-                  alignItems: 'center',
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  gap: 1,
-                  justifyContent: 'space-between',
-                  mt: 1.5,
-                }}
-              >
-                {footerControls}
-                {showBypassConfirmations ? (
-                  <Tooltip title="Run actions without per-action confirmation prompts. Every bypassed action is audit-logged.">
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={bypassConfirmations}
-                          onChange={(event) =>
-                            onBypassConfirmationsChange?.(event.target.checked)
-                          }
-                          size="small"
-                        />
-                      }
-                      label={
-                        <Typography color="text.secondary" variant="caption">
-                          Bypass confirmations
-                        </Typography>
-                      }
-                      sx={{ ml: 'auto', mr: 0 }}
-                    />
-                  </Tooltip>
-                ) : null}
-              </Box>
-            ) : null}
-          </CardContent>
-        </Card>
+            >
+              {busy ? (
+                <Stop fontSize="small" />
+              ) : (
+                <ArrowUpward fontSize="small" />
+              )}
+            </IconButton>
+          </span>
+        </Tooltip>
       </Box>
-    </>
+    </Box>
   );
 });

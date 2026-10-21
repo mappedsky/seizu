@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Box,
   Divider,
-  IconButton,
   List,
   ListItem,
   Paper,
@@ -13,7 +12,6 @@ import {
   TableContainer,
   TableRow,
 } from '@mui/material';
-import Info from '@mui/icons-material/Info';
 import Error from '@mui/icons-material/Error';
 
 import { useLazyCypherQuery, QueryRecord } from 'src/hooks/useCypherQuery';
@@ -40,9 +38,12 @@ function flattenRecord(record: QueryRecord): QueryRecord {
   }
   return record;
 }
-import CypherDetails from 'src/components/reports/CypherDetails';
+import CypherDetails from 'src/components/reports/LazyCypherDetails';
 import { VerticalTableSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
 import QueryValidationBadge from 'src/components/reports/QueryValidationBadge';
+import PanelInfoButton, {
+  panelInfoRevealSx,
+} from 'src/components/reports/PanelInfoButton';
 
 const fillSx = {
   height: '100%',
@@ -253,25 +254,14 @@ export default function CypherVerticalTable({
     const caption = String(mungedData[id ?? '']);
     const table = makeTable(mungedData);
     tables.push(
-      <Box
-        key={i}
-        sx={{ position: 'relative', '&:hover .panel-info-btn': { opacity: 1 } }}
-      >
-        <IconButton
-          className="panel-info-btn"
-          size="small"
-          onClick={handleClickOpen}
-          sx={{
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            opacity: 0,
-            transition: 'opacity 0.2s',
-          }}
+      <Box key={i} sx={{ position: 'relative', ...panelInfoRevealSx }}>
+        <PanelInfoButton onClick={handleClickOpen} inset={0} />
+        <Typography
+          gutterBottom
+          variant="h4"
+          component="div"
+          className="panel-info-caption"
         >
-          <Info fontSize="small" />
-        </IconButton>
-        <Typography gutterBottom variant="h4" component="div">
           {caption}
           <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         </Typography>

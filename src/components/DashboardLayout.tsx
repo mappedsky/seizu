@@ -1,5 +1,6 @@
-import { useState, type CSSProperties } from 'react';
+import { Suspense, useState, type CSSProperties } from 'react';
 import { Outlet } from 'react-router-dom';
+import PageLoading from 'src/components/PageLoading';
 import { styled } from '@mui/material';
 import DashboardNavbar from 'src/components/DashboardNavbar';
 import DashboardSidebar from 'src/components/DashboardSidebar';
@@ -104,7 +105,9 @@ function DashboardLayout() {
       <DashboardLayoutWrapper>
         <DashboardLayoutContainer>
           <DashboardLayoutContent>
-            <Outlet />
+            <Suspense fallback={<PageLoading />}>
+              <Outlet />
+            </Suspense>
           </DashboardLayoutContent>
         </DashboardLayoutContainer>
       </DashboardLayoutWrapper>

@@ -5,19 +5,20 @@ import {
   CardContent,
   CardHeader,
   Divider,
-  IconButton,
   Grid,
   Typography,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
-import Info from '@mui/icons-material/Info';
 import Error from '@mui/icons-material/Error';
 import { PieChart } from '@mui/x-charts/PieChart';
-import { chartColorsFor } from 'src/theme/brand';
+import { brand, chartColorsFor } from 'src/theme/brand';
 import { useLazyCypherQuery, QueryRecord } from 'src/hooks/useCypherQuery';
-import CypherDetails from 'src/components/reports/CypherDetails';
+import CypherDetails from 'src/components/reports/LazyCypherDetails';
 import { ChartPanelSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
 import QueryValidationBadge from 'src/components/reports/QueryValidationBadge';
+import PanelInfoButton, {
+  panelInfoRevealSx,
+} from 'src/components/reports/PanelInfoButton';
 
 const fillCardSx = {
   height: '100%',
@@ -117,7 +118,10 @@ export default function CypherPie({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -146,7 +150,10 @@ export default function CypherPie({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -183,7 +190,10 @@ export default function CypherPie({
               container
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -221,7 +231,10 @@ export default function CypherPie({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -249,30 +262,20 @@ export default function CypherPie({
         sx={{
           ...fillCardSx,
           position: 'relative',
-          '&:hover .panel-info-btn': { opacity: 1 },
+          ...panelInfoRevealSx,
         }}
       >
-        <IconButton
-          className="panel-info-btn"
-          size="small"
-          onClick={() => setOpen(true)}
-          sx={{
-            position: 'absolute',
-            top: 8,
-            right: 8,
-            opacity: 0,
-            transition: 'opacity 0.2s',
-          }}
-        >
-          <Info fontSize="small" />
-        </IconButton>
+        <PanelInfoButton onClick={() => setOpen(true)} />
         {caption && (
           <>
             <Grid
               container
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -326,9 +329,12 @@ export default function CypherPie({
               }),
               pieArcLabel: {
                 style: {
+                  // The dark-mode palette is all light tones, which white
+                  // text cannot be read against; Space reads on every one.
+                  fill: theme.palette.mode === 'dark' ? brand.space : '#fff',
                   fontFamily: theme.typography.fontFamily ?? undefined,
                   fontSize: 12,
-                  fontWeight: 500,
+                  fontWeight: 600,
                 },
               },
             }}

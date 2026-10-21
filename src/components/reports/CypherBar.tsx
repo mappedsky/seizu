@@ -5,19 +5,20 @@ import {
   CardContent,
   CardHeader,
   Divider,
-  IconButton,
   Grid,
   Typography,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
-import Info from '@mui/icons-material/Info';
 import Error from '@mui/icons-material/Error';
 import { BarChart } from '@mui/x-charts/BarChart';
 import { chartColorsFor } from 'src/theme/brand';
 import { useLazyCypherQuery, QueryRecord } from 'src/hooks/useCypherQuery';
-import CypherDetails from 'src/components/reports/CypherDetails';
+import CypherDetails from 'src/components/reports/LazyCypherDetails';
 import { ChartPanelSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
 import QueryValidationBadge from 'src/components/reports/QueryValidationBadge';
+import PanelInfoButton, {
+  panelInfoRevealSx,
+} from 'src/components/reports/PanelInfoButton';
 
 const fillCardSx = {
   height: '100%',
@@ -185,7 +186,10 @@ export default function CypherBar({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -214,7 +218,10 @@ export default function CypherBar({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -251,7 +258,10 @@ export default function CypherBar({
               container
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -289,7 +299,10 @@ export default function CypherBar({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -323,30 +336,20 @@ export default function CypherBar({
         sx={{
           ...fillCardSx,
           position: 'relative',
-          '&:hover .panel-info-btn': { opacity: 1 },
+          ...panelInfoRevealSx,
         }}
       >
-        <IconButton
-          className="panel-info-btn"
-          size="small"
-          onClick={() => setOpen(true)}
-          sx={{
-            position: 'absolute',
-            top: 8,
-            right: 8,
-            opacity: 0,
-            transition: 'opacity 0.2s',
-          }}
-        >
-          <Info fontSize="small" />
-        </IconButton>
+        <PanelInfoButton onClick={() => setOpen(true)} />
         {caption && (
           <>
             <Grid
               container
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>

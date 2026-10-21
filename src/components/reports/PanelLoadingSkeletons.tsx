@@ -15,7 +15,13 @@ interface CaptionProps {
 
 function HeaderSkeleton({ caption }: CaptionProps) {
   if (!caption) return null;
-  return <CardHeader title={caption} sx={{ textAlign: 'center' }} />;
+  return (
+    <CardHeader
+      title={caption}
+      slotProps={{ title: { component: 'h3' } }}
+      sx={{ textAlign: 'center' }}
+    />
+  );
 }
 
 /** SVG graph content shared between standalone and inline modes. */

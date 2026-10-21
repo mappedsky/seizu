@@ -21,8 +21,8 @@ import { colorForGroup } from 'src/components/reports/CypherGraph';
 import { chartPalette } from 'src/theme/brand';
 import QueryConsoleHistoryPanel from 'src/components/QueryConsoleHistoryPanel';
 import { QueryHistoryItem } from 'src/hooks/useQueryHistory';
-
-const PANEL_WIDTH = 260;
+import SidePanelFrame from 'src/components/SidePanelFrame';
+import { fontFamilyMono, fontSizeMin } from 'src/theme/typography';
 
 /** Render an index target like "(:CVE) {id}" or "[:DEPENDS_ON] {version}". */
 function indexTarget(index: GraphIndex): string {
@@ -42,6 +42,8 @@ type ActiveTab = 'schema' | 'history';
 
 interface QueryConsoleSchemaProps {
   open: boolean;
+  /** Float over the console instead of beside it (see `useSidePanel`). */
+  overlay?: boolean;
   onToggle: (tab?: ActiveTab) => void;
   onQuerySelect: (query: string) => void;
   onHistorySelect: (item: QueryHistoryItem) => void;
@@ -50,6 +52,7 @@ interface QueryConsoleSchemaProps {
 
 function QueryConsoleSchemaPanel({
   open,
+  overlay = false,
   onToggle,
   onQuerySelect,
   onHistorySelect,
@@ -82,19 +85,7 @@ function QueryConsoleSchemaPanel({
   };
 
   return (
-    <Box
-      sx={{
-        width: open ? PANEL_WIDTH : 40,
-        height: '100%',
-        flexShrink: 0,
-        borderRight: 1,
-        borderColor: 'divider',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s ease',
-      }}
-    >
+    <SidePanelFrame open={open} overlay={overlay} onClose={() => onToggle()}>
       {/* Header / toggle */}
       <Box
         sx={{
@@ -302,8 +293,8 @@ function QueryConsoleSchemaPanel({
                               borderRadius: 0.5,
                               px: 0.75,
                               lineHeight: '18px',
-                              fontSize: 10,
-                              fontFamily: 'monospace',
+                              fontSize: fontSizeMin,
+                              fontFamily: fontFamilyMono,
                               color: 'text.secondary',
                               whiteSpace: 'nowrap',
                               overflow: 'hidden',
@@ -383,7 +374,7 @@ function QueryConsoleSchemaPanel({
                           variant="body2"
                           noWrap
                           sx={{
-                            fontFamily: 'monospace',
+                            fontFamily: fontFamilyMono,
                             fontSize: 12,
                             color: 'text.secondary',
                           }}
@@ -433,7 +424,7 @@ function QueryConsoleSchemaPanel({
                         <Typography
                           variant="body2"
                           sx={{
-                            fontFamily: 'monospace',
+                            fontFamily: fontFamilyMono,
                             fontSize: 12,
                             color: 'text.secondary',
                             whiteSpace: 'normal',
@@ -471,7 +462,7 @@ function QueryConsoleSchemaPanel({
           )}
         </Box>
       )}
-    </Box>
+    </SidePanelFrame>
   );
 }
 

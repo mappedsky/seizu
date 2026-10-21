@@ -47,6 +47,7 @@ import { usePermissions } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { describeSchedule } from 'src/scheduleSpec';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 function triggerLabel(item: ScheduledQueryItem): string {
   if (item.watch_scans.length > 0)
@@ -135,7 +136,7 @@ function JsonDetailPre({ label, value }: { label: string; value: string }) {
             style={style}
             sx={{
               borderRadius: 1,
-              fontFamily: 'monospace',
+              fontFamily: fontFamilyMono,
               fontSize: 12,
               m: 0,
               maxHeight: 240,
@@ -475,7 +476,7 @@ function QueryPanels({ query }: { query: ScheduledQueryItem }) {
             sx={{
               bgcolor: 'action.hover',
               borderRadius: 1,
-              fontFamily: 'monospace',
+              fontFamily: fontFamilyMono,
               fontSize: 13,
               m: 0,
               maxHeight: 240,
@@ -498,7 +499,7 @@ function QueryPanels({ query }: { query: ScheduledQueryItem }) {
                     <Typography
                       variant="body2"
                       sx={{
-                        fontFamily: 'monospace',
+                        fontFamily: fontFamilyMono,
                         fontWeight: 600,
                         minWidth: 120,
                       }}
@@ -508,7 +509,7 @@ function QueryPanels({ query }: { query: ScheduledQueryItem }) {
                     <Typography
                       variant="body2"
                       color="text.secondary"
-                      sx={{ fontFamily: 'monospace' }}
+                      sx={{ fontFamily: fontFamilyMono }}
                     >
                       {Array.isArray(p.value)
                         ? (p.value as unknown[]).join(', ')
@@ -564,14 +565,14 @@ function QueryPanels({ query }: { query: ScheduledQueryItem }) {
                             <Typography
                               variant="caption"
                               color="text.secondary"
-                              sx={{ fontFamily: 'monospace', minWidth: 140 }}
+                              sx={{ fontFamily: fontFamilyMono, minWidth: 140 }}
                             >
                               {k}
                             </Typography>
                             <Typography
                               variant="caption"
                               color="text.secondary"
-                              sx={{ fontFamily: 'monospace' }}
+                              sx={{ fontFamily: fontFamilyMono }}
                             >
                               {Array.isArray(v)
                                 ? (v as unknown[]).join(', ')

@@ -32,13 +32,16 @@ import {
   TablePagination,
   TableRow,
   Typography,
+  useMediaQuery,
 } from '@mui/material';
 import AllInclusiveIcon from '@mui/icons-material/AllInclusive';
 import CheckIcon from '@mui/icons-material/Check';
 import FilterAltIcon from '@mui/icons-material/FilterAlt';
 import SearchIcon from '@mui/icons-material/Search';
 import Clear from '@mui/icons-material/Clear';
+import { useTheme } from '@mui/material/styles';
 import type { Breakpoint, SxProps, Theme } from '@mui/material/styles';
+import { fontFamilyMono } from 'src/theme/typography';
 
 type ColumnAlign = 'inherit' | 'left' | 'center' | 'right' | 'justify';
 type ColumnWidth = number | string;
@@ -240,7 +243,7 @@ export const listTableSecondaryCellSx = {
 
 export const listTableMonoCellSx = {
   color: 'text.secondary',
-  fontFamily: 'monospace',
+  fontFamily: fontFamilyMono,
 } as const;
 
 export const listTableTruncateSx = {
@@ -280,6 +283,20 @@ function TableCellHoverTooltip({
       </Box>
     </Tooltip>
   );
+}
+
+/** The widest theme breakpoint the viewport currently reaches. */
+function useCurrentBreakpoint(): Breakpoint {
+  const theme = useTheme();
+  const sm = useMediaQuery(theme.breakpoints.up('sm'), { noSsr: true });
+  const md = useMediaQuery(theme.breakpoints.up('md'), { noSsr: true });
+  const lg = useMediaQuery(theme.breakpoints.up('lg'), { noSsr: true });
+  const xl = useMediaQuery(theme.breakpoints.up('xl'), { noSsr: true });
+  if (xl) return 'xl';
+  if (lg) return 'lg';
+  if (md) return 'md';
+  if (sm) return 'sm';
+  return 'xs';
 }
 
 export default function ListTable<T>({
@@ -364,6 +381,10 @@ export default function ListTable<T>({
     [],
   );
 
+  const breakpoint = useCurrentBreakpoint();
+  const emptyRowSpan =
+    columns.filter((column) => isVisibleAt(column.hideBelow, breakpoint))
+      .length + (selectable ? 1 : 0);
   const filteredRows = useMemo(() => {
     const normalizedFilter = normalizeFilterText(filterText);
     const activeFilterEntries = Object.entries(selectedFilterKeys).filter(
@@ -1023,7 +1044,10 @@ export default function ListTable<T>({
           <TableBody>
             {filteredRows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={columns.length + (selectable ? 1 : 0)}>
+                {/* Only the columns shown at this width: spanning hidden
+                    ones leaves phantom columns that take width from the
+                    visible headers. */}
+                <TableCell colSpan={emptyRowSpan}>
                   <Box component="div" sx={listTableCellContentSx}>
                     <Typography color="text.secondary" sx={{ py: 1 }}>
                       {hasSearch || hasActiveFilters

@@ -1,0 +1,54 @@
+import { alpha, type PaletteOptions } from '@mui/material/styles';
+import { brand, hueFor, roles, type Hue } from 'src/theme/brand';
+
+declare module '@mui/material/styles' {
+  interface Palette {
+    tertiary: Palette['primary'];
+  }
+  interface PaletteOptions {
+    tertiary?: PaletteOptions['primary'];
+  }
+}
+
+function role(hue: Hue, mode: 'light' | 'dark') {
+  return { main: hueFor(hue, mode) };
+}
+
+/**
+ * The MUI palette for one mode, composed from the brand roles. Every color
+ * here comes from `brand.ts`; status colors use the same hues as the rest of
+ * the UI rather than MUI's defaults.
+ */
+export function paletteFor(mode: 'light' | 'dark'): PaletteOptions {
+  const status = {
+    error: role(roles.danger, mode),
+    warning: role(roles.warning, mode),
+    success: role(roles.success, mode),
+    info: role(roles.info, mode),
+    tertiary: role(roles.tertiary, mode),
+  };
+  return {
+    // getContrastText (filled chips, buttons, graph nodes) picks dark text
+    // wherever white would fall below WCAG AA for normal text.
+    contrastThreshold: 4.5,
+    ...status,
+    ...(mode === 'dark'
+      ? {
+          mode,
+          primary: { main: brand.starlight, contrastText: brand.space },
+          secondary: { main: brand.ember, contrastText: brand.space },
+          background: { default: brand.space, paper: brand.spaceRaised },
+          text: { primary: brand.paper, secondary: brand.mist },
+          divider: alpha(brand.starlight, 0.15),
+        }
+      : {
+          mode,
+          primary: { main: brand.starlightDark, contrastText: '#fff' },
+          // White text on emberDark falls below AA; Space clears it.
+          secondary: { main: brand.emberDark, contrastText: brand.space },
+          background: { default: brand.paper, paper: '#fff' },
+          text: { primary: brand.space, secondary: brand.slate },
+          divider: alpha(brand.starlightDark, 0.16),
+        }),
+  };
+}

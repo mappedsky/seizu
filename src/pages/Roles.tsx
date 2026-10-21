@@ -49,6 +49,7 @@ import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 const descriptionColumnSx = { ...listTableSecondaryCellSx, width: '22%' };
 const permissionsColumnSx = { width: '18%' };
@@ -854,7 +855,7 @@ function Roles() {
               <Box
                 component="li"
                 key={p}
-                sx={{ fontFamily: 'monospace', fontSize: 13 }}
+                sx={{ fontFamily: fontFamilyMono, fontSize: 13 }}
               >
                 {p}
               </Box>

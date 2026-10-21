@@ -1,15 +1,23 @@
-import { memo } from 'react';
+import { lazy, memo, Suspense } from 'react';
 import { Box } from '@mui/material';
 
 import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import { Panel, ReportInput } from 'src/config.context';
 import CypherBar from 'src/components/reports/CypherBar';
 import CypherCount from 'src/components/reports/CypherCount';
-import CypherGraph from 'src/components/reports/CypherGraph';
 import CypherPie from 'src/components/reports/CypherPie';
 import CypherProgress from 'src/components/reports/CypherProgress';
-import CypherTable from 'src/components/reports/CypherTable';
 import CypherVerticalTable from 'src/components/reports/CypherVerticalTable';
+import {
+  GraphPanelSkeleton,
+  TablePanelSkeleton,
+} from 'src/components/reports/PanelLoadingSkeletons';
+
+// The graph panel carries the graph-layout libraries; only a report with a
+// graph panel fetches them.
+const CypherGraph = lazy(() => import('src/components/reports/CypherGraph'));
+// Likewise the table panel and its data-grid code.
+const CypherTable = lazy(() => import('src/components/reports/CypherTable'));
 
 export interface PanelItemProps {
   item: Panel;
@@ -135,19 +143,25 @@ const PanelItem = memo(
       );
     } else if (item.type === 'graph') {
       itemComponent = (
-        <CypherGraph
-          cypher={resolveQuery(item.cypher)}
-          params={params}
-          caption={effectiveCaption}
-          graphSettings={item.graph_settings}
-          needInputs={needInputs}
-          fillHeight
-          reportQueryToken={resolveCapability(
-            `rows.${rowIndex}.panels.${index}.cypher`,
-          )}
-          refreshKey={refreshKey}
-          onTokenExpired={onTokenExpired}
-        />
+        <Suspense
+          fallback={
+            <GraphPanelSkeleton caption={effectiveCaption} fillHeight />
+          }
+        >
+          <CypherGraph
+            cypher={resolveQuery(item.cypher)}
+            params={params}
+            caption={effectiveCaption}
+            graphSettings={item.graph_settings}
+            needInputs={needInputs}
+            fillHeight
+            reportQueryToken={resolveCapability(
+              `rows.${rowIndex}.panels.${index}.cypher`,
+            )}
+            refreshKey={refreshKey}
+            onTokenExpired={onTokenExpired}
+          />
+        </Suspense>
       );
     } else if (item.type === 'count') {
       itemComponent = (
@@ -168,19 +182,21 @@ const PanelItem = memo(
       );
     } else if (item.type === 'table') {
       itemComponent = (
-        <CypherTable
-          cypher={resolveQuery(item.cypher)}
-          params={params}
-          columns={item.columns}
-          caption={effectiveCaption}
-          details={details}
-          needInputs={needInputs}
-          reportQueryToken={resolveCapability(
-            `rows.${rowIndex}.panels.${index}.cypher`,
-          )}
-          refreshKey={refreshKey}
-          onTokenExpired={onTokenExpired}
-        />
+        <Suspense fallback={<TablePanelSkeleton />}>
+          <CypherTable
+            cypher={resolveQuery(item.cypher)}
+            params={params}
+            columns={item.columns}
+            caption={effectiveCaption}
+            details={details}
+            needInputs={needInputs}
+            reportQueryToken={resolveCapability(
+              `rows.${rowIndex}.panels.${index}.cypher`,
+            )}
+            refreshKey={refreshKey}
+            onTokenExpired={onTokenExpired}
+          />
+        </Suspense>
       );
     } else if (item.type === 'vertical-table') {
       itemComponent = (

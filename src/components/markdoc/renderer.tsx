@@ -24,6 +24,7 @@ import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
 import { brand } from 'src/theme/brand';
+import { fontFamilyMono } from 'src/theme/typography';
 
 function MarkdocTable({ children }: { children?: React.ReactNode }) {
   return (
@@ -129,7 +130,7 @@ function MarkdocContinuation() {
         component="span"
         sx={{
           color: 'inherit',
-          fontFamily: '"JetBrains Mono", monospace',
+          fontFamily: fontFamilyMono,
           fontSize: '0.8em',
           fontWeight: 700,
           lineHeight: 1,

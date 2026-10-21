@@ -18,11 +18,18 @@ import {
   QueryHistoryItem,
 } from 'src/hooks/useQueryHistory';
 import { pageContentSx } from 'src/theme/layout';
+import { useSidePanel } from 'src/hooks/useSidePanel';
+import { fontFamilyMono } from 'src/theme/typography';
 
 /** Exactly one thing is running: a typed query, or a stored history entry. */
 type ConsoleRun =
   | { kind: 'query'; query: string; key: number }
   | { kind: 'history'; historyId: string; key: number };
+
+const QUERY_HEIGHT_MIN = 100;
+const QUERY_HEIGHT_MAX = 600;
+const clampQueryHeight = (h: number) =>
+  Math.max(QUERY_HEIGHT_MIN, Math.min(QUERY_HEIGHT_MAX, h));
 
 const QUERY_CONSOLE_SCHEMA_PANEL_STORAGE_KEY =
   'seizu:query-console:schema-panel-open';
@@ -54,6 +61,9 @@ export default function QueryConsole() {
     );
     return storedValue === null ? true : storedValue === 'true';
   });
+  const schemaPanel = useSidePanel(schemaPanelOpen, setSchemaPanelOpen);
+  const { dismiss: dismissSchemaPanel, setOpen: setSchemaPanelShown } =
+    schemaPanel;
   const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0);
   const [queryHeight, setQueryHeight] = useState(220);
   const dragStartY = useRef(0);
@@ -136,14 +146,18 @@ export default function QueryConsole() {
   );
 
   /** Insert a query from the schema browser and run it immediately. */
-  const handleQuerySelect = useCallback((query: string) => {
-    setQueryText(query);
-    setRun((previous) => ({
-      kind: 'query',
-      query,
-      key: (previous?.key ?? 0) + 1,
-    }));
-  }, []);
+  const handleQuerySelect = useCallback(
+    (query: string) => {
+      setQueryText(query);
+      setRun((previous) => ({
+        kind: 'query',
+        query,
+        key: (previous?.key ?? 0) + 1,
+      }));
+      dismissSchemaPanel();
+    },
+    [dismissSchemaPanel],
+  );
 
   /** Load a query from history into the editor and re-execute by history ID. */
   const handleHistorySelect = useCallback(
@@ -157,17 +171,21 @@ export default function QueryConsole() {
         key: (previous?.key ?? 0) + 1,
       }));
       navigate(`?h=${item.history_id}`);
+      dismissSchemaPanel();
     },
-    [navigate],
+    [navigate, dismissSchemaPanel],
   );
 
-  const handleSchemaPanelToggle = useCallback((tab?: 'schema' | 'history') => {
-    if (tab) {
-      setSchemaPanelOpen(true);
-      return;
-    }
-    setSchemaPanelOpen((value) => !value);
-  }, []);
+  const handleSchemaPanelToggle = useCallback(
+    (tab?: 'schema' | 'history') => {
+      if (tab) {
+        setSchemaPanelShown(true);
+        return;
+      }
+      setSchemaPanelShown((value) => !value);
+    },
+    [setSchemaPanelShown],
+  );
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -176,33 +194,46 @@ export default function QueryConsole() {
     );
   }, [schemaPanelOpen]);
 
+  // Pointer events, so the handle drags by mouse, touch and pen alike;
+  // capture keeps the drag alive when the pointer leaves the handle.
   const handleDragStart = useCallback(
-    (e: React.MouseEvent) => {
+    (e: React.PointerEvent<HTMLElement>) => {
       e.preventDefault();
+      const handle = e.currentTarget;
+      handle.setPointerCapture(e.pointerId);
       dragStartY.current = e.clientY;
       dragStartHeight.current = queryHeight;
-      document.body.style.cursor = 'ns-resize';
       document.body.style.userSelect = 'none';
 
-      const handleMouseMove = (ev: MouseEvent) => {
+      const handlePointerMove = (ev: PointerEvent) => {
         const delta = dragStartY.current - ev.clientY;
-        setQueryHeight(
-          Math.max(100, Math.min(600, dragStartHeight.current + delta)),
-        );
+        setQueryHeight(clampQueryHeight(dragStartHeight.current + delta));
       };
 
-      const handleMouseUp = () => {
-        document.body.style.cursor = '';
+      const handlePointerUp = () => {
         document.body.style.userSelect = '';
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
+        handle.removeEventListener('pointermove', handlePointerMove);
+        handle.removeEventListener('pointerup', handlePointerUp);
+        handle.removeEventListener('pointercancel', handlePointerUp);
       };
 
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
+      handle.addEventListener('pointermove', handlePointerMove);
+      handle.addEventListener('pointerup', handlePointerUp);
+      handle.addEventListener('pointercancel', handlePointerUp);
     },
     [queryHeight],
   );
+
+  const handleResizeKey = useCallback((e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 80 : 20;
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setQueryHeight((h) => clampQueryHeight(h + step));
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setQueryHeight((h) => clampQueryHeight(h - step));
+    }
+  }, []);
 
   if (permissionsLoading) {
     return (
@@ -226,7 +257,8 @@ export default function QueryConsole() {
     >
       {/* Side panel (schema / history) */}
       <QueryConsoleSchemaPanel
-        open={schemaPanelOpen}
+        open={schemaPanel.open}
+        overlay={schemaPanel.overlay}
         onToggle={handleSchemaPanelToggle}
         onQuerySelect={handleQuerySelect}
         onHistorySelect={handleHistorySelect}
@@ -280,15 +312,27 @@ export default function QueryConsole() {
 
         {/* Resize handle */}
         <Box
-          onMouseDown={handleDragStart}
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize query editor"
+          aria-valuenow={queryHeight}
+          aria-valuemin={QUERY_HEIGHT_MIN}
+          aria-valuemax={QUERY_HEIGHT_MAX}
+          tabIndex={0}
+          onPointerDown={handleDragStart}
+          onKeyDown={handleResizeKey}
           sx={{
-            height: 8,
+            // A 24px touch target around the 4px grip; the negative margin
+            // keeps the layout spacing it had at 8px.
+            height: 24,
+            my: -0.5,
+            touchAction: 'none',
             flexShrink: 0,
             cursor: 'ns-resize',
+            '&:focus-visible::after': { bgcolor: 'primary.main' },
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            my: 0.5,
             '&::after': {
               content: '""',
               display: 'block',
@@ -337,7 +381,7 @@ export default function QueryConsole() {
                 }}
                 slotProps={{
                   htmlInput: {
-                    style: { fontFamily: 'monospace', fontSize: 13 },
+                    style: { fontFamily: fontFamilyMono, fontSize: 13 },
                   },
                 }}
               />

@@ -79,6 +79,7 @@ import {
   DASHBOARD_SIDEBAR_WIDTH_VAR,
 } from 'src/components/dashboardLayoutConstants';
 import { contentContainerSx } from 'src/theme/layout';
+import { fontFamilyMono, fontSizeMin } from 'src/theme/typography';
 
 // ---------------------------------------------------------------------------
 // Edit-state types (panels/rows get stable _id for DnD keys)
@@ -175,7 +176,7 @@ function PanelTypeChip({ type }: { type: string }) {
       size="small"
       variant="outlined"
       color="primary"
-      sx={{ fontSize: '0.65rem', height: 20 }}
+      sx={{ fontSize: fontSizeMin, height: 20 }}
     />
   );
 }
@@ -401,7 +402,7 @@ function InputCard({ input, onEdit, onDelete, onResize }: InputCardProps) {
             size="small"
             variant="outlined"
             color="secondary"
-            sx={{ fontSize: '0.65rem', height: 20 }}
+            sx={{ fontSize: fontSizeMin, height: 20 }}
           />
           <Typography variant="body2" noWrap sx={{ fontWeight: 500 }}>
             {input.label || <em>no label</em>}
@@ -575,7 +576,7 @@ function InputEditorForm({
                 onChange={(e) => set('cypher', e.target.value || undefined)}
                 slotProps={{
                   htmlInput: {
-                    style: { fontFamily: 'monospace', fontSize: '0.8rem' },
+                    style: { fontFamily: fontFamilyMono, fontSize: '0.8rem' },
                   },
                 }}
                 helperText="Query to populate the dropdown. Must return a 'value' column."
@@ -710,7 +711,7 @@ function QueryRow({
         slotProps={{
           htmlInput: {
             'data-query-value': queryKey,
-            style: { fontFamily: 'monospace', fontSize: '0.8rem' },
+            style: { fontFamily: fontFamilyMono, fontSize: '0.8rem' },
           },
         }}
       />

@@ -1221,9 +1221,10 @@ describe('ChatInterface', () => {
       target: { value: 'Map my graph' },
     });
     const sendButton = screen.getByRole('button', { name: 'Send' });
-    expect(
-      screen.getByPlaceholderText('Ask Seizu...').closest('.MuiInputBase-root'),
-    ).toContainElement(sendButton);
+    // In the composer's own control row.
+    expect(sendButton.closest('form')).toBe(
+      screen.getByPlaceholderText('Ask Seizu...').closest('form'),
+    );
     fireEvent.click(sendButton);
 
     await waitFor(() => {
@@ -2845,7 +2846,12 @@ describe('ChatInterface', () => {
     renderChat();
     await act(async () => {});
 
-    expect(screen.queryByText('Bypass confirmations')).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Open confirmations/ }),
+    );
+    expect(
+      screen.queryByRole('switch', { name: 'Bypass confirmations' }),
+    ).not.toBeInTheDocument();
   });
 
   it('shows the bypass confirmations toggle, default off, with the permission', async () => {
@@ -2859,19 +2865,27 @@ describe('ChatInterface', () => {
     renderChat();
     await act(async () => {});
 
-    expect(screen.getByText('Bypass confirmations')).toBeInTheDocument();
-    const toggle = screen.getByRole('switch');
+    // A setting of the confirmations panel, not of the composer.
+    expect(
+      screen.queryByRole('switch', { name: 'Bypass confirmations' }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Open confirmations/ }),
+    );
+    const toggle = screen.getByRole('switch', { name: 'Bypass confirmations' });
     expect(toggle).not.toBeChecked();
-    // In the composer, not floating between it and the conversation: it is a
-    // property of the message about to be sent.
-    const composer = screen
-      .getByPlaceholderText('Ask Seizu...')
-      .closest('form');
-    expect(composer).not.toBeNull();
-    expect(within(composer!).getByRole('switch')).toBe(toggle);
+    expect(
+      screen.getByPlaceholderText('Ask Seizu...').closest('form'),
+    ).not.toBe(toggle.closest('form'));
+
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
+    expect(
+      screen.getByRole('button', { name: 'Collapse confirmations' }),
+    ).toBeInTheDocument();
   });
 
-  it('shows the bypass confirmations toggle on the new-session composer', async () => {
+  it('offers the bypass confirmations toggle on the new-session landing', async () => {
     mockUsePermissionState.mockReturnValue({
       hasPermission: (permission: string) =>
         permission === 'chat:use' || permission === 'chat:bypass_permissions',
@@ -2882,14 +2896,12 @@ describe('ChatInterface', () => {
     renderChat({ initialPath: '/app/chat' });
     await act(async () => {});
 
-    const composer = screen
-      .getByPlaceholderText('Ask Seizu...')
-      .closest('form');
-    expect(composer).not.toBeNull();
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Open confirmations/ }),
+    );
     expect(
-      within(composer!).getByText('Bypass confirmations'),
-    ).toBeInTheDocument();
-    expect(within(composer!).getByRole('switch')).not.toBeChecked();
+      screen.getByRole('switch', { name: 'Bypass confirmations' }),
+    ).not.toBeChecked();
   });
   it('reattaches only once the real thread id is known, not to the placeholder', async () => {
     // useChat's resume effect depends on the flag, not on the chat id, so a

@@ -308,7 +308,7 @@ function GridActionToolbar({
       {caption && (
         <Typography
           variant="subtitle1"
-          component="div"
+          component="h3"
           title={caption}
           sx={{
             minWidth: 0,
@@ -511,7 +511,7 @@ export default function CypherTable({
       <Box ref={containerRef} sx={fillSx}>
         <Typography
           variant="subtitle1"
-          component="div"
+          component="h3"
           sx={{ fontWeight: 500, mb: 0.5 }}
         >
           {caption}

@@ -5,7 +5,9 @@ import {
   Button,
   Divider,
   Drawer,
+  FormControlLabel,
   IconButton,
+  Switch,
   Tooltip,
   Typography,
   useMediaQuery,
@@ -15,7 +17,6 @@ import { memo, Fragment } from 'react';
 import CheckCircle from '@mui/icons-material/CheckCircle';
 import Close from '@mui/icons-material/Close';
 import GppMaybe from '@mui/icons-material/GppMaybe';
-import MenuOpen from '@mui/icons-material/MenuOpen';
 import Block from '@mui/icons-material/Block';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import {
@@ -23,6 +24,8 @@ import {
   isConfirmationExpired,
   type ActionConfirmation,
 } from 'src/hooks/useConfirmationsApi';
+import { fontFamilyMono, fontSizeMin } from 'src/theme/typography';
+import { SIDE_PANEL_RAIL_WIDTH } from 'src/components/SidePanelFrame';
 
 interface ChatConfirmationsPanelProps {
   confirmations: ActionConfirmation[];
@@ -35,6 +38,11 @@ interface ChatConfirmationsPanelProps {
     confirmation: ActionConfirmation,
     decision: 'approved' | 'denied',
   ) => void;
+  /** Whether the user may bypass confirmations at all; hides the setting
+   *  when false. Plain values, not a node, so the panel stays memoized. */
+  canBypassConfirmations?: boolean;
+  bypassConfirmations?: boolean;
+  onBypassConfirmationsChange?: (value: boolean) => void;
 }
 
 function ChatConfirmationsPanel({
@@ -45,6 +53,9 @@ function ChatConfirmationsPanel({
   decidingId,
   onToggle,
   onDecision,
+  canBypassConfirmations = false,
+  bypassConfirmations = false,
+  onBypassConfirmationsChange,
 }: ChatConfirmationsPanelProps) {
   const theme = useTheme();
   const narrow = useMediaQuery(theme.breakpoints.down('lg'));
@@ -61,10 +72,14 @@ function ChatConfirmationsPanel({
     ...deniedConfirmations,
   ];
   const pendingCount = pendingConfirmations.length;
-  const openLabel =
-    pendingCount > 0
-      ? `Open confirmations (${pendingCount} pending)`
-      : 'Open confirmations';
+  const bypassOn = canBypassConfirmations && bypassConfirmations;
+  const labelNotes = [
+    ...(pendingCount > 0 ? [`${pendingCount} pending`] : []),
+    ...(bypassOn ? ['bypass on'] : []),
+  ];
+  const openLabel = labelNotes.length
+    ? `Open confirmations (${labelNotes.join(', ')})`
+    : 'Open confirmations';
   const content = (
     <Box
       sx={{
@@ -99,6 +114,39 @@ function ChatConfirmationsPanel({
         </IconButton>
       </Box>
       <Divider />
+      {canBypassConfirmations ? (
+        <>
+          <Box sx={{ flexShrink: 0, px: 1.5, py: 1 }}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={bypassConfirmations}
+                  color="warning"
+                  onChange={(event) =>
+                    onBypassConfirmationsChange?.(event.target.checked)
+                  }
+                  size="small"
+                />
+              }
+              label={
+                <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                  Bypass confirmations
+                </Typography>
+              }
+              sx={{ ml: 0, mr: 0 }}
+            />
+            <Typography
+              color="text.secondary"
+              sx={{ display: 'block', mt: 0.25 }}
+              variant="caption"
+            >
+              Messages you send run their actions without asking here first.
+              Every bypassed action is audit-logged.
+            </Typography>
+          </Box>
+          <Divider />
+        </>
+      ) : null}
       <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', p: 1.5 }}>
         {loading ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
@@ -216,8 +264,8 @@ function ChatConfirmationsPanel({
                                   sx={{
                                     color: 'text.secondary',
                                     flexShrink: 0,
-                                    fontFamily: '"JetBrains Mono", monospace',
-                                    fontSize: '0.68rem',
+                                    fontFamily: fontFamilyMono,
+                                    fontSize: fontSizeMin,
                                     lineHeight: 1.5,
                                     minWidth: 72,
                                     wordBreak: 'break-all',
@@ -227,8 +275,8 @@ function ChatConfirmationsPanel({
                                 </Typography>
                                 <Typography
                                   sx={{
-                                    fontFamily: '"JetBrains Mono", monospace',
-                                    fontSize: '0.68rem',
+                                    fontFamily: fontFamilyMono,
+                                    fontSize: fontSizeMin,
                                     lineHeight: 1.5,
                                     wordBreak: 'break-all',
                                   }}
@@ -289,22 +337,59 @@ function ChatConfirmationsPanel({
     </Box>
   );
 
+  // Collapsed, the panel is a bar down the right edge at every width, so it
+  // folds away like the sessions rail on the left. Beside the chat it expands
+  // in place; below `lg` there is no room for that, so it opens as a drawer.
+  const rail = (
+    <Box
+      component="aside"
+      sx={{
+        borderLeft: 1,
+        borderColor: 'divider',
+        flexShrink: 0,
+        height: '100%',
+        width: SIDE_PANEL_RAIL_WIDTH,
+      }}
+    >
+      {/* Same header row as the sessions rail opposite. */}
+      <Box
+        sx={{
+          alignItems: 'center',
+          borderBottom: 1,
+          borderColor: 'divider',
+          display: 'flex',
+          justifyContent: 'center',
+          minHeight: 40,
+        }}
+      >
+        <Tooltip
+          title={bypassOn ? 'Confirmations — bypass on' : 'Confirmations'}
+          placement="left"
+        >
+          <IconButton aria-label={openLabel} onClick={onToggle} size="small">
+            <Badge
+              badgeContent={pendingCount}
+              color="error"
+              invisible={pendingCount === 0}
+              max={99}
+            >
+              {/* Amber while confirmations are bypassed, so the setting
+                  stays visible with the panel folded away. */}
+              <GppMaybe
+                fontSize="small"
+                sx={{ color: bypassOn ? 'warning.main' : 'inherit' }}
+              />
+            </Badge>
+          </IconButton>
+        </Tooltip>
+      </Box>
+    </Box>
+  );
+
   if (narrow) {
     return (
       <>
-        <Tooltip title="Confirmations">
-          <Badge
-            badgeContent={pendingCount}
-            color="error"
-            invisible={pendingCount === 0}
-            max={99}
-            sx={{ bottom: 16, position: 'fixed', right: 16, zIndex: 1200 }}
-          >
-            <IconButton aria-label={openLabel} onClick={onToggle}>
-              <MenuOpen />
-            </IconButton>
-          </Badge>
-        </Tooltip>
+        {rail}
         <Drawer anchor="right" open={open} onClose={onToggle}>
           {content}
         </Drawer>
@@ -312,38 +397,7 @@ function ChatConfirmationsPanel({
     );
   }
 
-  if (!open) {
-    return (
-      <Box
-        component="aside"
-        sx={{
-          alignItems: 'flex-start',
-          borderLeft: 1,
-          borderColor: 'divider',
-          display: 'flex',
-          flexShrink: 0,
-          height: '100%',
-          justifyContent: 'center',
-          px: 1,
-          py: 1,
-          width: 56,
-        }}
-      >
-        <Tooltip title="Confirmations">
-          <Badge
-            badgeContent={pendingCount}
-            color="error"
-            invisible={pendingCount === 0}
-            max={99}
-          >
-            <IconButton aria-label={openLabel} onClick={onToggle}>
-              <GppMaybe />
-            </IconButton>
-          </Badge>
-        </Tooltip>
-      </Box>
-    );
-  }
+  if (!open) return rail;
 
   return (
     <Box

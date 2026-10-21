@@ -243,7 +243,7 @@ reports:
             h: 4
             auto_height: true
             markdown: |-
-              ### Architecture map
+              ## Architecture map
 
               The graph below shows how Seizu separates data, configuration,
               runtimes, clients, and outputs. Neo4j remains the source for
@@ -276,7 +276,7 @@ reports:
             h: 4
             auto_height: true
             markdown: |-
-              ### Capability mix
+              ## Capability mix
 
               Seizu is meant to cover the full path from graph exploration to
               repeatable operational output. The bar chart counts concrete
@@ -310,7 +310,7 @@ reports:
             h: 8
             auto_height: true
             markdown: |-
-              ### What to try next
+              ## What to try next
 
               Use this overview as a map of the main workflows:
 
@@ -993,14 +993,14 @@ reports:
             auto_height: true
             markdown: |-
               {% if not($github_org) %}
-              ### Get started
+              ## Get started
               Pick an organization from the dropdown at the top of the page
               to populate the panels above. The graph must contain
               `GitHubOrganization` and `GitHubRepository` data — see the
               `cartography sync_github` make target if you have not synced
               GitHub yet.
               {% else /%}
-              ### Suggested follow-ups for {%$github_org%}
+              ## Suggested follow-ups for {%$github_org%}
 
               - Drill into **Top open vulnerabilities** above to triage by
                 severity, EPSS, and patch availability.

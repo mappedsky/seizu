@@ -139,7 +139,11 @@ function DashboardNavbar({
           </Box>
         )}
         <Hidden lgUp>
-          <IconButton color="inherit" onClick={onMobileNavOpen}>
+          <IconButton
+            aria-label="Open navigation"
+            color="inherit"
+            onClick={onMobileNavOpen}
+          >
             <MenuIcon />
           </IconButton>
         </Hidden>

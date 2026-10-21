@@ -327,11 +327,13 @@ function ReportView({
       {/* Row 1: title and actions. The title lives here rather than in a band
           of its own, so a report gets one header row instead of two, and it
           truncates rather than wrapping so a long name cannot push the actions
-          off the row. */}
+          off the row. On a phone that row may have no room for both, so the
+          actions wrap below the title, which may then take two lines. */}
       {hasHeaderRow && (
         <Box
           sx={{
             display: 'flex',
+            flexWrap: { xs: 'wrap', sm: 'nowrap' },
             alignItems: 'center',
             justifyContent: 'space-between',
             gap: 1.5,
@@ -346,11 +348,14 @@ function ReportView({
               title={displayTitle}
               sx={{
                 lineHeight: 1.25,
-                flex: '1 1 auto',
+                flex: { xs: '1 1 12rem', sm: '1 1 auto' },
                 minWidth: 0,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                whiteSpace: { xs: 'normal', sm: 'nowrap' },
+                display: { xs: '-webkit-box', sm: 'block' },
+                WebkitBoxOrient: 'vertical',
+                WebkitLineClamp: { xs: 2, sm: 'none' },
               }}
             >
               {displayTitle}
@@ -466,16 +471,20 @@ function ReportView({
       <Container
         key={row.name}
         maxWidth={false}
-        sx={{ ...contentContainerSx, pb: 1.5 }}
+        sx={{ ...contentContainerSx, pb: 2 }}
       >
-        <Paper
-          elevation={1}
+        {/* A row is a titled section, not a card: its panels are the cards,
+            and a card around them would nest one surface inside another. */}
+        <Box
+          component="section"
+          aria-label={hideHeader ? row.name : undefined}
+          aria-labelledby={hideHeader ? undefined : `report-row-${rowIndex}`}
           sx={{
-            p: 1.5,
-            // Remove top padding when header is hidden so the row is visually compact
-            pt: hideHeader ? 0 : 1.5,
+            pt: hideHeader ? 0 : 1,
             ...(effectiveCollapsible && {
-              '&:hover .row-collapse-btn': { opacity: 1 },
+              '&:hover .row-collapse-btn, &:focus-within .row-collapse-btn': {
+                opacity: 1,
+              },
             }),
           }}
         >
@@ -489,7 +498,11 @@ function ReportView({
           ) : (
             <>
               <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                <Typography variant="h2" sx={{ mb: 0, flex: 1 }}>
+                <Typography
+                  id={`report-row-${rowIndex}`}
+                  variant="h2"
+                  sx={{ mb: 0, flex: 1 }}
+                >
                   {row.name}
                 </Typography>
                 {collapseBtn}
@@ -504,7 +517,7 @@ function ReportView({
           ) : (
             panelArea
           )}
-        </Paper>
+        </Box>
       </Container>
     );
   });

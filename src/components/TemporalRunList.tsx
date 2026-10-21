@@ -22,6 +22,7 @@ import {
   WorkflowRunSummary,
 } from 'src/hooks/useWorkflowsApi';
 import { temporalStatusColor, temporalStatusLabel } from 'src/temporalStatus';
+import { fontFamilyMono } from 'src/theme/typography';
 
 function JsonDetailPre({ label, value }: { label: string; value: string }) {
   const muiTheme = useTheme();
@@ -51,7 +52,7 @@ function JsonDetailPre({ label, value }: { label: string; value: string }) {
             style={style}
             sx={{
               borderRadius: 1,
-              fontFamily: 'monospace',
+              fontFamily: fontFamilyMono,
               fontSize: 12,
               m: 0,
               maxHeight: 240,

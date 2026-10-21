@@ -192,6 +192,7 @@ To simply display a count of a particular query, use a ``count`` panel.
 | params | A list of parameters to pass into the query. See [the PanelParam schema](schema.html#panelparam) for more info. |
 | caption | The caption to show as the title of this panel. |
 | type | The type of panel. ``count``, for this panel type. |
+| thresholds | A list of ``{value, color}`` rules; the rule with the highest ``value`` at or below the metric colors it. Use a palette name for ``color`` — ``flare`` (red), ``ember`` (yellow), ``aurora`` (green), ``starlight``, ``beacon``, ``pulsar`` or ``night`` — so it reads in both light and dark mode; any CSS color also works. See [the PanelThreshold schema](schema.html#panelthreshold). |
 | w, h, x, y, min_h | Layout fields. See [Panel layout](#panel-layout). |
 
 #### Example
@@ -219,6 +220,7 @@ By default, this panel will color the progress data based on a threshold of <70%
 | caption | The caption to show as the title of this panel. |
 | type | The type of panel. ``progress``, for this panel type. |
 | threshold | The lower threshold percentage to consider this result an error. Set to `0` to disable threshold. Default: ``70`` |
+| thresholds | A list of ``{value, color}`` rules; the rule with the highest ``value`` at or below the metric colors it. Use a palette name for ``color`` — ``flare`` (red), ``ember`` (yellow), ``aurora`` (green), ``starlight``, ``beacon``, ``pulsar`` or ``night`` — so it reads in both light and dark mode; any CSS color also works. See [the PanelThreshold schema](schema.html#panelthreshold). |
 | w, h, x, y, min_h | Layout fields. See [Panel layout](#panel-layout). |
 
 #### Example

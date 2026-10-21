@@ -154,7 +154,28 @@ describe('CypherCount', () => {
     expect(container.querySelector('.panel-info-btn')).toBeInTheDocument();
   });
 
-  it('opens the details dialog when the info button is clicked', () => {
+  it('names the info button and marks the caption as a panel heading', () => {
+    useLazyCypherQuery.mockReturnValue([
+      mockRunQuery,
+      { ...defaultState, records: [{ total: 5 }], first: { total: 5 } },
+    ]);
+    render(
+      <Wrapper>
+        <CypherCount
+          cypher="MATCH (n) RETURN count(n) as total"
+          caption="Test Count"
+        />
+      </Wrapper>,
+    );
+    expect(
+      screen.getByRole('button', { name: 'Show query details' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { level: 3, name: 'Test Count' }),
+    ).toBeInTheDocument();
+  });
+
+  it('opens the details dialog when the info button is clicked', async () => {
     useLazyCypherQuery.mockReturnValue([
       mockRunQuery,
       { ...defaultState, records: [{ total: 5 }], first: { total: 5 } },
@@ -169,7 +190,8 @@ describe('CypherCount', () => {
       </Wrapper>,
     );
     fireEvent.click(container.querySelector('.panel-info-btn')!);
-    expect(screen.getByTestId('details-dialog')).toBeInTheDocument();
+    // The dialog is fetched on first open.
+    expect(await screen.findByTestId('details-dialog')).toBeInTheDocument();
   });
 
   it('shows validation error state when queryErrors are present', () => {

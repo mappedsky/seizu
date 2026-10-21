@@ -29,14 +29,16 @@ import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import { useFeature } from 'src/features.context';
 import type { ChatSession } from 'src/hooks/useChatSessions';
 import { chatConnectionsPath } from 'src/utils/chatPaths';
+import SidePanelFrame from 'src/components/SidePanelFrame';
 
-const PANEL_WIDTH = 260;
 // Tightened from the MUI default so the footer sits at the same rhythm as the
 // session rows above it, as the space panel's footer does.
 const footerActionIconSx = { minWidth: 32 } as const;
 
 interface ChatSessionsPanelProps {
   open: boolean;
+  /** Float over the chat instead of beside it (see `useSidePanel`). */
+  overlay?: boolean;
   onToggle: () => void;
   sessions: ChatSession[];
   loading: boolean;
@@ -49,6 +51,7 @@ interface ChatSessionsPanelProps {
 
 function ChatSessionsPanel({
   open,
+  overlay = false,
   onToggle,
   sessions,
   loading,
@@ -136,19 +139,7 @@ function ChatSessionsPanel({
 
   return (
     <>
-      <Box
-        sx={{
-          borderRight: 1,
-          borderColor: 'divider',
-          display: 'flex',
-          flexDirection: 'column',
-          flexShrink: 0,
-          height: '100%',
-          overflow: 'hidden',
-          transition: 'width 0.2s ease',
-          width: open ? PANEL_WIDTH : 40,
-        }}
-      >
+      <SidePanelFrame open={open} overlay={overlay} onClose={onToggle}>
         {/* Header */}
         <Box
           sx={{
@@ -225,6 +216,20 @@ function ChatSessionsPanel({
                   <ListItem
                     key={session.thread_id}
                     disablePadding
+                    sx={{
+                      // The row menu appears on the row being pointed at or
+                      // focused, and stays while it is open. Devices without
+                      // hover show it always.
+                      '& .MuiListItemSecondaryAction-root': {
+                        opacity: 0,
+                        transition: 'opacity 120ms ease',
+                      },
+                      '&:hover .MuiListItemSecondaryAction-root, &:focus-within .MuiListItemSecondaryAction-root, & .MuiListItemSecondaryAction-root:has([aria-expanded="true"])':
+                        { opacity: 1 },
+                      '@media (hover: none)': {
+                        '& .MuiListItemSecondaryAction-root': { opacity: 1 },
+                      },
+                    }}
                     secondaryAction={
                       <Box sx={{ pr: 0.5 }}>
                         <RowMenu
@@ -316,7 +321,7 @@ function ChatSessionsPanel({
             )}
           </Box>
         )}
-      </Box>
+      </SidePanelFrame>
 
       {/* Rename dialog */}
       <Dialog

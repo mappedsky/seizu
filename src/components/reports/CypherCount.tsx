@@ -5,18 +5,23 @@ import {
   CardContent,
   CardHeader,
   Divider,
-  IconButton,
   Grid,
   Typography,
 } from '@mui/material';
-import Info from '@mui/icons-material/Info';
 import Error from '@mui/icons-material/Error';
 import { useLazyCypherQuery } from 'src/hooks/useCypherQuery';
-import CypherDetails from 'src/components/reports/CypherDetails';
+import CypherDetails from 'src/components/reports/LazyCypherDetails';
 import { CountPanelSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
 import QueryValidationBadge from 'src/components/reports/QueryValidationBadge';
 import type { PanelThreshold } from 'src/config.context';
-import { resolveThresholdColor } from 'src/components/reports/thresholds';
+import {
+  resolveThresholdColor,
+  thresholdCss,
+} from 'src/components/reports/thresholds';
+import { useTheme } from '@mui/material/styles';
+import PanelInfoButton, {
+  panelInfoRevealSx,
+} from 'src/components/reports/PanelInfoButton';
 
 const fillCardSx = {
   height: '100%',
@@ -67,6 +72,7 @@ export default function CypherCount({
   refreshKey,
   onTokenExpired,
 }: CypherCountProps) {
+  const theme = useTheme();
   const [open, setOpen] = useState(false);
   const handleClickOpen = () => {
     setOpen(true);
@@ -137,7 +143,10 @@ export default function CypherCount({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -166,7 +175,10 @@ export default function CypherCount({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -207,7 +219,10 @@ export default function CypherCount({
               container
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -245,7 +260,10 @@ export default function CypherCount({
               spacing={0}
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>
@@ -266,7 +284,10 @@ export default function CypherCount({
   const total = first['total'] as number;
   // Pick the active color from the multi-threshold list when set, otherwise
   // fall back to the legacy single-threshold logic.
-  const thresholdColor = resolveThresholdColor(total, thresholds);
+  const thresholdColor = thresholdCss(
+    resolveThresholdColor(total, thresholds),
+    theme.palette.mode,
+  );
   let legacyColor: string | undefined;
   if (thresholdColor === undefined) {
     if (threshold !== undefined && total > threshold) {
@@ -281,30 +302,20 @@ export default function CypherCount({
         sx={{
           ...fillCardSx,
           position: 'relative',
-          '&:hover .panel-info-btn': { opacity: 1 },
+          ...panelInfoRevealSx,
         }}
       >
-        <IconButton
-          className="panel-info-btn"
-          size="small"
-          onClick={handleClickOpen}
-          sx={{
-            position: 'absolute',
-            top: 8,
-            right: 8,
-            opacity: 0,
-            transition: 'opacity 0.2s',
-          }}
-        >
-          <Info fontSize="small" />
-        </IconButton>
+        <PanelInfoButton onClick={handleClickOpen} />
         {caption && (
           <>
             <Grid
               container
               sx={{ flexDirection: 'column', alignItems: 'center' }}
             >
-              <CardHeader title={caption} />
+              <CardHeader
+                title={caption}
+                slotProps={{ title: { component: 'h3' } }}
+              />
             </Grid>
             <Divider />
           </>

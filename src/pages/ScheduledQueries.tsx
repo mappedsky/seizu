@@ -47,6 +47,7 @@ import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import type { BackState } from 'src/navigation';
 import { describeSchedule } from 'src/scheduleSpec';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 const actionsColumnSx = { width: '18%' };
 const statusColumnSx = { width: 128 };
@@ -249,7 +250,7 @@ function ScheduledQueries() {
             color="text.secondary"
             sx={{
               ...listTableTruncateSx,
-              fontFamily: 'monospace',
+              fontFamily: fontFamilyMono,
               display: 'block',
             }}
           >
