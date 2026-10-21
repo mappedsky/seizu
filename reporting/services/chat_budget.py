@@ -3,6 +3,7 @@
 import asyncio
 import math
 import uuid
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -811,7 +812,7 @@ def current_budget_scope() -> str:
     return _current_budget_scope.get()
 
 
-def budget_controller_from_config(config: dict[str, Any]) -> BudgetController | None:
+def budget_controller_from_config(config: Mapping[str, Any]) -> BudgetController | None:
     configurable = config.get("configurable")
     if not isinstance(configurable, dict):
         return None

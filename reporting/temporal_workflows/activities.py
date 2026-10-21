@@ -294,7 +294,7 @@ async def execute_configured_activity(input: ConfiguredActivityInput) -> Configu
         )
     input_annotation = getattr(module, "activity_input_type", lambda: list[dict[str, Any]])()
     try:
-        validated_input = TypeAdapter(input_annotation).validate_python(input_value)
+        validated_input: Any = TypeAdapter(input_annotation).validate_python(input_value)
     except ValidationError as exc:
         raise ApplicationError(
             f"Input for activity '{input.activity_type}' does not match its schema: {exc}",
@@ -311,7 +311,7 @@ async def execute_configured_activity(input: ConfiguredActivityInput) -> Configu
         value = await asyncio.to_thread(module.handle_results, input.workflow_id, action, validated_input)
     output_annotation = getattr(module, "activity_output_type", lambda: dict[str, Any])()
     try:
-        adapter = TypeAdapter(output_annotation)
+        adapter: TypeAdapter[Any] = TypeAdapter(output_annotation)
         value = adapter.dump_python(adapter.validate_python(value), mode="json")
     except ValidationError as exc:
         raise ApplicationError(
@@ -401,7 +401,7 @@ async def normalize_code_workflow_output(input: CodeWorkflowOutputRequest) -> Co
             non_retryable=True,
         )
     try:
-        adapter = TypeAdapter(spec.output_type)
+        adapter: TypeAdapter[Any] = TypeAdapter(spec.output_type)
         validated = adapter.validate_python(input.value)
         value = adapter.dump_python(validated, mode="json")
     except ValidationError as exc:

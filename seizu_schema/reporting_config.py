@@ -18,6 +18,9 @@ LOWER_SNAKE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 MCP_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*__[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 EXTERNAL_MCP_TOOL_NAME_RE = re.compile(r"^ext__[a-z][a-z0-9_-]{0,62}__[A-Za-z0-9_.-]{1,128}$")
 SelectableReasoningEffort = Literal["default", "none", "minimal", "low", "medium", "high", "xhigh"]
+# Copied per instance by the field's default_factory, so the shared list is
+# never the one a model holds.
+_DEFAULT_USER_REASONING_EFFORTS: list[SelectableReasoningEffort] = ["low", "medium", "high"]
 PROFILE_STAGES = frozenset(
     {
         "planner",
@@ -993,7 +996,7 @@ class ModelProfileDef(BaseModel):
     economy: EconomyModelChoiceDef
     stage_overrides: dict[str, StageModelOverrideDef] = Field(default_factory=dict)
     user_reasoning_efforts: list[SelectableReasoningEffort] = Field(
-        default_factory=lambda: ["low", "medium", "high"], min_length=1
+        default_factory=lambda: list(_DEFAULT_USER_REASONING_EFFORTS), min_length=1
     )
     default_reasoning_effort: SelectableReasoningEffort = "medium"
     run_cost_budget_usd: float = Field(gt=0, le=10_000)

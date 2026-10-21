@@ -61,11 +61,16 @@ def _profile_snapshot(
     profile: ModelProfileItem,
     reasoning_effort: SelectableReasoningEffort,
 ) -> ResolvedModelProfile:
-    provenance = {
-        "profile_id": profile.profile_id,
-        "profile_name": profile.name,
-        "profile_version": profile.current_version,
-    }
+    def with_provenance(spec: chat_models.ModelSpec) -> chat_models.ModelSpec:
+        # Stamped onto every stage's specs; carried into audit/telemetry and
+        # Temporal payloads without changing which client is built.
+        return replace(
+            spec,
+            profile_id=profile.profile_id,
+            profile_name=profile.name,
+            profile_version=profile.current_version,
+        )
+
     stages: dict[str, ResolvedStageModels] = {}
     for stage in RESOLVED_MODEL_STAGES:
         role = _RUNTIME_ROLE.get(stage, stage)
@@ -81,8 +86,8 @@ def _profile_snapshot(
             reasoning_effort=profile.economy.reasoning_effort,
         )
         stages[stage] = ResolvedStageModels(
-            primary=replace(normal, **provenance).to_payload(),
-            economy=replace(cheap, **provenance).to_payload(),
+            primary=with_provenance(normal).to_payload(),
+            economy=with_provenance(cheap).to_payload(),
         )
     return ResolvedModelProfile(
         source="profile",
