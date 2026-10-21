@@ -6,6 +6,7 @@ import CssBaseline from '@mui/material/CssBaseline';
 import GlobalStyles from 'src/components/GlobalStyles';
 import AuthProvider from 'src/components/AuthProvider';
 import shadows from 'src/theme/shadows';
+import { shape, surfaceComponents } from 'src/theme/surfaces';
 import typography from 'src/theme/typography';
 import { paletteFor } from 'src/theme/palette';
 import { contentContainerRootStyles } from 'src/theme/layout';
@@ -66,8 +67,10 @@ function App() {
       createTheme({
         palette: paletteFor(prefersDarkMode ? 'dark' : 'light'),
         shadows,
+        shape,
         typography,
         components: {
+          ...surfaceComponents,
           MuiContainer: {
             styleOverrides: {
               root: ({ ownerState, theme }) => ({

@@ -4,7 +4,6 @@ import {
   Card,
   CardContent,
   CardHeader,
-  Divider,
   Grid,
   Typography,
 } from '@mui/material';
@@ -180,19 +179,16 @@ export default function CypherBar({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -212,19 +208,16 @@ export default function CypherBar({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -253,18 +246,15 @@ export default function CypherBar({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         <Grid
@@ -293,19 +283,16 @@ export default function CypherBar({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -341,18 +328,15 @@ export default function CypherBar({
       >
         <PanelInfoButton onClick={() => setOpen(true)} />
         {caption && (
-          <>
-            <Grid
-              container
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <QueryValidationBadge errors={queryErrors} warnings={warnings} />
 

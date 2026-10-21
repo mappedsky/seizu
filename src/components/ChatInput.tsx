@@ -89,7 +89,7 @@ export default memo(function ChatInput({
         bgcolor: 'background.paper',
         border: 1,
         borderColor: 'divider',
-        borderRadius: 3,
+        borderRadius: 2,
         flexShrink: 0,
         mt: 1,
         pb: 0.75,

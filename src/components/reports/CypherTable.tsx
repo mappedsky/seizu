@@ -175,6 +175,9 @@ interface CypherTableProps {
   onTokenExpired?: () => void;
   /** When provided, skip fetching and render this data directly. Used by CypherGraph to share its already-fetched records across tab switches. */
   preloadedRecords?: QueryRecord[];
+  /** Drop the table's own frame so it sits flush inside a host card, such as
+   *  the graph panel's Table tab, whose card supplies the edge and corners. */
+  embedded?: boolean;
 }
 
 interface GridRow extends Record<string, unknown> {
@@ -403,6 +406,7 @@ export default function CypherTable({
   refreshKey,
   onTokenExpired,
   preloadedRecords,
+  embedded = false,
 }: CypherTableProps) {
   const cspNonce = getCspNonce();
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -583,7 +587,14 @@ export default function CypherTable({
   ) => (
     <Paper
       variant="outlined"
-      sx={{ minHeight: 0, display: 'flex', flexDirection: 'column', flex: 1 }}
+      square={embedded}
+      sx={{
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        flex: 1,
+        ...(embedded && { border: 0 }),
+      }}
     >
       <Box sx={{ height: tableBodyHeight, minHeight: MIN_TABLE_BODY_HEIGHT }}>
         <DataGrid
@@ -591,6 +602,7 @@ export default function CypherTable({
           columns={gridColumns}
           nonce={cspNonce}
           getRowId={(row) => row.__rowId}
+          sx={embedded ? { border: 0, borderRadius: 0 } : undefined}
           density={density}
           disableColumnMenu
           disableRowSelectionOnClick

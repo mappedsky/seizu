@@ -5,7 +5,6 @@ import {
   CardContent,
   CardHeader,
   CircularProgress,
-  Divider,
   Grid,
   Typography,
 } from '@mui/material';
@@ -152,19 +151,16 @@ export default function CypherProgress({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -184,19 +180,16 @@ export default function CypherProgress({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -229,18 +222,15 @@ export default function CypherProgress({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         <Grid
@@ -269,19 +259,16 @@ export default function CypherProgress({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -354,18 +341,15 @@ export default function CypherProgress({
       >
         <PanelInfoButton onClick={handleClickOpen} />
         {caption && (
-          <>
-            <Grid
-              container
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <QueryValidationBadge errors={queryErrors} warnings={warnings} />
 

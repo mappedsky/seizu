@@ -117,12 +117,7 @@ export function CountPanelSkeleton({
   }
   return (
     <Card data-testid="count-panel-loading-skeleton" sx={{ minHeight: 150 }}>
-      {caption && (
-        <>
-          <HeaderSkeleton caption={caption} />
-          <Divider />
-        </>
-      )}
+      {caption && <HeaderSkeleton caption={caption} />}
       <CardContent sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
         <Skeleton variant="text" width={96} height={56} />
       </CardContent>
@@ -161,12 +156,7 @@ export function ProgressPanelSkeleton({
         flexDirection: 'column',
       }}
     >
-      {caption && (
-        <>
-          <HeaderSkeleton caption={caption} />
-          <Divider />
-        </>
-      )}
+      {caption && <HeaderSkeleton caption={caption} />}
       <CardContent
         sx={{
           flex: 1,
@@ -270,12 +260,7 @@ export function ChartPanelSkeleton({
       data-testid={`${variant}-panel-loading-skeleton`}
       sx={{ minHeight: 410 }}
     >
-      {caption && (
-        <>
-          <HeaderSkeleton caption={caption} />
-          <Divider />
-        </>
-      )}
+      {caption && <HeaderSkeleton caption={caption} />}
       <Box
         sx={{
           height: 350,
@@ -664,12 +649,7 @@ export function MarkdownPanelSkeleton({
   }
   return (
     <Card sx={{ minHeight: 200 }}>
-      {caption && (
-        <>
-          <HeaderSkeleton caption={caption} />
-          <Divider />
-        </>
-      )}
+      {caption && <HeaderSkeleton caption={caption} />}
       <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
         <Skeleton variant="text" width="55%" height={24} sx={{ mb: 0.5 }} />
         <Skeleton variant="text" width="97%" height={16} />

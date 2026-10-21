@@ -1280,19 +1280,16 @@ function CypherGraph({
     return (
       <Card>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -1312,19 +1309,16 @@ function CypherGraph({
     return (
       <Card>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -1353,18 +1347,15 @@ function CypherGraph({
     return (
       <Card>
         {caption && (
-          <>
-            <Grid
-              container
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         <Grid
@@ -1393,19 +1384,16 @@ function CypherGraph({
     return (
       <Card>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader
-                title={caption}
-                slotProps={{ title: { component: 'h3' } }}
-              />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <CardContent>
           <Box
@@ -1517,6 +1505,7 @@ function CypherGraph({
             height={fillHeight ? '100%' : '400px'}
             reportQueryToken={reportQueryToken}
             preloadedRecords={records}
+            embedded
           />
         )}
 
