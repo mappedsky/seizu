@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Box,
-  Button,
   Card,
   CardContent,
-  TextField,
+  IconButton,
+  InputBase,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
@@ -26,10 +27,15 @@ type ConsoleRun =
   | { kind: 'query'; query: string; key: number }
   | { kind: 'history'; historyId: string; key: number };
 
-const QUERY_HEIGHT_MIN = 100;
-const QUERY_HEIGHT_MAX = 600;
-const clampQueryHeight = (h: number) =>
-  Math.max(QUERY_HEIGHT_MIN, Math.min(QUERY_HEIGHT_MAX, h));
+// The editor starts at one line and grows with the query up to this many
+// lines, then scrolls, so the graph keeps most of the page.
+const QUERY_MAX_ROWS = 12;
+
+// The modifier this platform's users reach for; either one runs the query.
+const RUN_SHORTCUT =
+  typeof navigator !== 'undefined' && /Mac|iP(hone|ad)/.test(navigator.platform)
+    ? '⌘+Enter'
+    : 'Ctrl+Enter';
 
 const QUERY_CONSOLE_SCHEMA_PANEL_STORAGE_KEY =
   'seizu:query-console:schema-panel-open';
@@ -65,9 +71,6 @@ export default function QueryConsole() {
   const { dismiss: dismissSchemaPanel, setOpen: setSchemaPanelShown } =
     schemaPanel;
   const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0);
-  const [queryHeight, setQueryHeight] = useState(220);
-  const dragStartY = useRef(0);
-  const dragStartHeight = useRef(0);
 
   const handleQueryComplete = useCallback(
     (historyId: string | null) => {
@@ -139,6 +142,7 @@ export default function QueryConsole() {
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
         handleRun();
       }
     },
@@ -193,47 +197,6 @@ export default function QueryConsole() {
       String(schemaPanelOpen),
     );
   }, [schemaPanelOpen]);
-
-  // Pointer events, so the handle drags by mouse, touch and pen alike;
-  // capture keeps the drag alive when the pointer leaves the handle.
-  const handleDragStart = useCallback(
-    (e: React.PointerEvent<HTMLElement>) => {
-      e.preventDefault();
-      const handle = e.currentTarget;
-      handle.setPointerCapture(e.pointerId);
-      dragStartY.current = e.clientY;
-      dragStartHeight.current = queryHeight;
-      document.body.style.userSelect = 'none';
-
-      const handlePointerMove = (ev: PointerEvent) => {
-        const delta = dragStartY.current - ev.clientY;
-        setQueryHeight(clampQueryHeight(dragStartHeight.current + delta));
-      };
-
-      const handlePointerUp = () => {
-        document.body.style.userSelect = '';
-        handle.removeEventListener('pointermove', handlePointerMove);
-        handle.removeEventListener('pointerup', handlePointerUp);
-        handle.removeEventListener('pointercancel', handlePointerUp);
-      };
-
-      handle.addEventListener('pointermove', handlePointerMove);
-      handle.addEventListener('pointerup', handlePointerUp);
-      handle.addEventListener('pointercancel', handlePointerUp);
-    },
-    [queryHeight],
-  );
-
-  const handleResizeKey = useCallback((e: React.KeyboardEvent) => {
-    const step = e.shiftKey ? 80 : 20;
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setQueryHeight((h) => clampQueryHeight(h + step));
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setQueryHeight((h) => clampQueryHeight(h - step));
-    }
-  }, []);
 
   if (permissionsLoading) {
     return (
@@ -310,100 +273,69 @@ export default function QueryConsole() {
           )}
         </Box>
 
-        {/* Resize handle */}
+        {/* Query editor: one surface holding the query and its run button. */}
         <Box
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Resize query editor"
-          aria-valuenow={queryHeight}
-          aria-valuemin={QUERY_HEIGHT_MIN}
-          aria-valuemax={QUERY_HEIGHT_MAX}
-          tabIndex={0}
-          onPointerDown={handleDragStart}
-          onKeyDown={handleResizeKey}
+          data-testid="query-composer"
           sx={{
-            // A 24px touch target around the 4px grip; the negative margin
-            // keeps the layout spacing it had at 8px.
-            height: 24,
-            my: -0.5,
-            touchAction: 'none',
-            flexShrink: 0,
-            cursor: 'ns-resize',
-            '&:focus-visible::after': { bgcolor: 'primary.main' },
+            alignItems: 'flex-end',
+            bgcolor: 'background.paper',
+            border: 1,
+            borderColor: 'divider',
+            borderRadius: 2,
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            '&::after': {
-              content: '""',
-              display: 'block',
-              width: 48,
-              height: 4,
-              borderRadius: 2,
-              bgcolor: 'divider',
-              transition: 'background-color 0.15s',
-            },
-            '&:hover::after': { bgcolor: 'primary.main' },
+            flexShrink: 0,
+            gap: 1,
+            mt: 1.5,
+            pl: 1.5,
+            pr: 0.75,
+            py: 0.75,
+            transition: 'border-color 120ms ease',
+            '&:focus-within': { borderColor: 'primary.main' },
           }}
-        />
-
-        {/* Query editor */}
-        <Box sx={{ height: queryHeight, flexShrink: 0 }}>
-          <Card sx={{ height: '100%' }}>
-            <CardContent
-              sx={{
-                height: '100%',
-                boxSizing: 'border-box',
-                display: 'flex',
-                flexDirection: 'column',
-                '&:last-child': { pb: 2 },
-              }}
-            >
-              <TextField
-                multiline
-                fullWidth
-                value={queryText}
-                onChange={(e) => setQueryText(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Enter a Cypher query... (Ctrl+Enter to run)"
-                variant="outlined"
+        >
+          <InputBase
+            multiline
+            fullWidth
+            minRows={1}
+            maxRows={QUERY_MAX_ROWS}
+            value={queryText}
+            onChange={(e) => setQueryText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={`MATCH (n) RETURN n LIMIT 25 · ${RUN_SHORTCUT} to run`}
+            inputProps={{ 'aria-label': 'Cypher query', spellCheck: false }}
+            sx={{
+              alignSelf: 'center',
+              fontFamily: fontFamilyMono,
+              fontSize: 13,
+              // Show the characters as typed: `->` stays two glyphs, not an arrow.
+              fontVariantLigatures: 'none',
+              lineHeight: 1.6,
+              py: 0.5,
+            }}
+          />
+          <Tooltip title={`Run query (${RUN_SHORTCUT})`}>
+            <span style={{ flexShrink: 0 }}>
+              <IconButton
+                aria-label="Run query"
+                onClick={handleRun}
+                disabled={!queryText.trim()}
+                size="small"
                 sx={{
-                  flex: 1,
-                  minHeight: 0,
-                  '& .MuiInputBase-root': {
-                    height: '100%',
-                    alignItems: 'flex-start',
+                  bgcolor: 'primary.main',
+                  color: 'primary.contrastText',
+                  height: 32,
+                  width: 32,
+                  '&:hover': { bgcolor: 'primary.dark' },
+                  '&.Mui-disabled': {
+                    bgcolor: 'action.disabledBackground',
+                    color: 'action.disabled',
                   },
-                  '& .MuiInputBase-input': {
-                    height: '100% !important',
-                    overflow: 'auto !important',
-                    boxSizing: 'border-box',
-                  },
-                }}
-                slotProps={{
-                  htmlInput: {
-                    style: { fontFamily: fontFamilyMono, fontSize: 13 },
-                  },
-                }}
-              />
-              <Box
-                sx={{
-                  mt: 1,
-                  display: 'flex',
-                  justifyContent: 'flex-end',
-                  flexShrink: 0,
                 }}
               >
-                <Button
-                  variant="contained"
-                  startIcon={<PlayArrow />}
-                  onClick={handleRun}
-                  disabled={!queryText.trim()}
-                >
-                  Run
-                </Button>
-              </Box>
-            </CardContent>
-          </Card>
+                <PlayArrow fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
         </Box>
       </Box>
     </Box>
