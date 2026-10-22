@@ -15,6 +15,8 @@ import {
 import Error from '@mui/icons-material/Error';
 
 import { useLazyCypherQuery, QueryRecord } from 'src/hooks/useCypherQuery';
+import SeverityLabel from 'src/components/SeverityLabel';
+import { isSeverityField, severityOf } from 'src/theme/severity';
 
 /**
  * Flatten a query record into a plain key→value map.
@@ -214,7 +216,16 @@ export default function CypherVerticalTable({
         cellData = makeTable(data[key] as Record<string, unknown>);
       } else {
         const item = data[key];
-        cellData = <Typography variant="body1">{String(item)}</Typography>;
+        const severity = isSeverityField(key) ? severityOf(item) : undefined;
+        cellData = (
+          <Typography variant="body1">
+            {severity ? (
+              <SeverityLabel severity={severity}>{String(item)}</SeverityLabel>
+            ) : (
+              String(item)
+            )}
+          </Typography>
+        );
       }
       cells.push(
         <TableCell
@@ -255,11 +266,15 @@ export default function CypherVerticalTable({
     const table = makeTable(mungedData);
     tables.push(
       <Box key={i} sx={{ position: 'relative', ...panelInfoRevealSx }}>
-        <PanelInfoButton onClick={handleClickOpen} inset={0} />
+        <PanelInfoButton
+          onClick={handleClickOpen}
+          inset={0}
+          panelName={caption}
+        />
         <Typography
           gutterBottom
           variant="h4"
-          component="div"
+          component="h3"
           className="panel-info-caption"
         >
           {caption}

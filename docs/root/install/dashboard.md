@@ -165,6 +165,22 @@ Choose **Delete** from the ⋮ menu in the Reports list and confirm. This perman
 Seizu supports various panel types that can be used to visualize graph data.
 See [the Panel schema](schema.html#panel) for more detailed info about specific fields.
 
+### Severity values
+
+Severity levels have fixed colors in every panel, so a level looks the same wherever it appears:
+
+| Level | Accepted values (any case) | Color |
+|-------|----------------------------|-------|
+| Critical | `critical` | Red (Flare) |
+| High | `high` | Amber (Ember) |
+| Medium | `medium`, `moderate` | Blue (Starlight) |
+| Low | `low` | Grey |
+| Info | `info`, `informational`, `none` | Grey |
+
+- **pie** and **bar** panels use these colors, ordered Critical to Info, when every category is a severity level. Otherwise they use the ordinary chart palette.
+- **graph** panels color nodes whose `node_color_by` value is a severity level. Other node groups in the same graph use colors no level uses.
+- **table** and **vertical-table** panels mark the values of a column or property whose name contains `severity` or `criticality` with a colored dot. A table sorts that column from Critical to Info.
+
 ### Panel layout
 
 Panels are positioned and sized on a 12-column grid (each row of the grid is 48 px tall). Every panel type accepts the same layout fields:

@@ -364,23 +364,17 @@ function ReportPane({
 
           return (
             <>
-              {displayedAccessScope && (
-                <Chip
-                  icon={
-                    displayedAccessScope === 'public' ? (
-                      <PublicIcon />
-                    ) : (
-                      <LockIcon />
-                    )
-                  }
-                  label={displayedAccessScope === 'public' ? 'Public' : 'Draft'}
-                  size="small"
-                  color={
-                    displayedAccessScope === 'public' ? 'success' : 'default'
-                  }
-                  variant="outlined"
-                  sx={{ alignSelf: 'center' }}
-                />
+              {/* Public is the normal state, so only a draft is labelled. */}
+              {displayedAccessScope === 'private' && (
+                <Tooltip title="Private to the owner">
+                  <Chip
+                    icon={<LockIcon />}
+                    label="Draft"
+                    size="small"
+                    variant="outlined"
+                    sx={{ alignSelf: 'center' }}
+                  />
+                </Tooltip>
               )}
               {canWriteReports && (
                 <Button

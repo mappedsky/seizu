@@ -34,6 +34,12 @@ import Download from '@mui/icons-material/Download';
 import { useLazyCypherQuery, QueryRecord } from 'src/hooks/useCypherQuery';
 import { TablePanelSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
 import { getCspNonce } from 'src/cspNonce';
+import SeverityLabel from 'src/components/SeverityLabel';
+import {
+  compareSeverity,
+  isSeverityField,
+  severityOf,
+} from 'src/theme/severity';
 
 /**
  * Format any value for display in a table cell.
@@ -187,28 +193,43 @@ interface GridRow extends Record<string, unknown> {
 function makeGridColumns(
   columns: Array<{ name: string; label: string }>,
 ): GridColDef[] {
-  return columns.map((column) => ({
-    field: column.name,
-    headerName: column.label,
-    minWidth: 160,
-    flex: 1,
-    renderCell: (params) => (
-      <Typography
-        variant="body2"
-        title={params.formattedValue ?? ''}
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          height: '100%',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {params.formattedValue}
-      </Typography>
-    ),
-  }));
+  return columns.map((column) => {
+    const holdsSeverity =
+      isSeverityField(column.name) || isSeverityField(column.label);
+    return {
+      field: column.name,
+      headerName: column.label,
+      minWidth: 160,
+      flex: 1,
+      // A severity column sorts by urgency rather than alphabetically.
+      ...(holdsSeverity && { sortComparator: compareSeverity }),
+      renderCell: (params) => {
+        const severity = holdsSeverity ? severityOf(params.value) : undefined;
+        return (
+          <Typography
+            variant="body2"
+            title={params.formattedValue ?? ''}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              height: '100%',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {severity ? (
+              <SeverityLabel severity={severity}>
+                {String(params.formattedValue)}
+              </SeverityLabel>
+            ) : (
+              params.formattedValue
+            )}
+          </Typography>
+        );
+      },
+    };
+  });
 }
 
 function EmptyOverlay({ message }: { message: string }) {
@@ -356,7 +377,15 @@ function GridActionToolbar({
       </Tooltip>
       {details !== undefined && (
         <Tooltip title="Show query details">
-          <IconButton size="small" onClick={onOpenDetails}>
+          <IconButton
+            aria-label={
+              caption
+                ? `Show query details for ${caption}`
+                : 'Show query details'
+            }
+            size="small"
+            onClick={onOpenDetails}
+          >
             <Info fontSize="small" />
           </IconButton>
         </Tooltip>

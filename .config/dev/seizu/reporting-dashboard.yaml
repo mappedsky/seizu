@@ -243,8 +243,6 @@ reports:
             h: 4
             auto_height: true
             markdown: |-
-              ## Architecture map
-
               The graph below shows how Seizu separates data, configuration,
               runtimes, clients, and outputs. Neo4j remains the source for
               security graph facts, while the report store keeps versioned
@@ -276,8 +274,6 @@ reports:
             h: 4
             auto_height: true
             markdown: |-
-              ## Capability mix
-
               Seizu is meant to cover the full path from graph exploration to
               repeatable operational output. The bar chart counts concrete
               capabilities represented in this overview, while the pie chart
@@ -310,8 +306,6 @@ reports:
             h: 8
             auto_height: true
             markdown: |-
-              ## What to try next
-
               Use this overview as a map of the main workflows:
 
               - Open **Panel Examples** to see the available visualization components and the query shapes they expect.
@@ -441,8 +435,6 @@ reports:
             h: 6
             auto_height: true
             markdown: |-
-              ## Panel Examples
-
               This report demonstrates all available panel types. Each section below
               showcases a different type using CVE data from the graph.
 

@@ -38,6 +38,23 @@ describe('MarkdocRenderer', () => {
     expect(heading.tagName).toBe('H2');
   });
 
+  it.each([
+    ['#', '##'],
+    ['##', '###'],
+  ])(
+    'starts %s at the requested level and keeps nesting under it',
+    (top, nested) => {
+      render(
+        <MarkdocRenderer
+          source={`${top} Top\n\n${nested} Nested`}
+          topHeadingLevel={3}
+        />,
+      );
+      expect(screen.getByText('Top').tagName).toBe('H3');
+      expect(screen.getByText('Nested').tagName).toBe('H4');
+    },
+  );
+
   it('renders tables wrapped in a TableContainer', () => {
     const md = '| h1 | h2 |\n|----|----|\n| a  | b  |\n';
     const { container } = render(<MarkdocRenderer source={md} />);

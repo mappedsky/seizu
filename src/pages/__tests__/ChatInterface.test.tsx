@@ -700,6 +700,66 @@ describe('ChatInterface', () => {
     );
   });
 
+  it('asks for a pending confirmation under the turn that is waiting', async () => {
+    const pending = {
+      confirmation_id: 'confirm-1',
+      source: 'chat' as const,
+      tool_name: 'reports__delete',
+      action: 'delete',
+      resource_type: 'report',
+      resource_id: 'report-1',
+      arguments: {},
+      status: 'pending' as const,
+      thread_id: 'thread-1',
+      created_at: '2026-01-01T00:00:00Z',
+      expires_at: '2099-01-01T00:00:00Z',
+    };
+    const decideConfirmation = jest
+      .fn()
+      .mockResolvedValue({ ...pending, status: 'approved' });
+    mockUseConfirmationsApi.mockReturnValue({
+      confirmations: [pending],
+      loading: false,
+      error: null,
+      fetchConfirmations: jest.fn().mockResolvedValue(undefined),
+      getConfirmation: jest.fn(),
+      getConfirmationsByBatchId: jest.fn(),
+      decideConfirmation,
+    });
+    mockUseChat.mockReturnValue({
+      id: 'thread-1',
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          parts: [{ type: 'text', text: 'Delete the old report' }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    const card = await screen.findByRole('region', {
+      name: 'Approval needed: delete report',
+    });
+    expect(within(card).getByText('Waiting for your approval')).toBeVisible();
+    fireEvent.click(within(card).getByRole('button', { name: 'Allow' }));
+
+    await waitFor(() =>
+      expect(decideConfirmation).toHaveBeenCalledWith('confirm-1', 'approved'),
+    );
+  });
+
   for (const status of ['pending', 'accepted'] as const) {
     it(`resumes a ${status} elicitation through an ID-only chat command`, async () => {
       const respond = jest.fn().mockResolvedValue(undefined);
@@ -2878,11 +2938,65 @@ describe('ChatInterface', () => {
       screen.getByPlaceholderText('Ask Seizu...').closest('form'),
     ).not.toBe(toggle.closest('form'));
 
+    // Turning it on asks first; declining leaves it off.
     fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep asking' }));
+    expect(toggle).not.toBeChecked();
+    expect(
+      screen.queryByRole('button', { name: /Turn off bypass/, hidden: true }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on bypass' }));
     expect(toggle).toBeChecked();
     expect(
-      screen.getByRole('button', { name: 'Collapse confirmations' }),
+      // hidden: the page is aria-hidden until the dialog finishes closing.
+      screen.getByRole('button', {
+        name: 'Collapse confirmations',
+        hidden: true,
+      }),
     ).toBeInTheDocument();
+  });
+
+  it('shows bypass in the composer, turns it off there, and asks only once', async () => {
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: (permission: string) =>
+        permission === 'chat:use' || permission === 'chat:bypass_permissions',
+      loading: false,
+      currentUser: null,
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /^Open confirmations/ }),
+    );
+    const toggle = screen.getByRole('switch', { name: 'Bypass confirmations' });
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole('button', { name: 'Turn on bypass' }));
+
+    const composer = screen
+      .getByPlaceholderText('Ask Seizu...')
+      .closest('form')!;
+    const chip = within(composer).getByRole('button', {
+      name: 'Bypass on. Turn off bypass',
+      hidden: true,
+    });
+    fireEvent.click(chip);
+    expect(toggle).not.toBeChecked();
+    expect(
+      within(composer).queryByRole('button', {
+        name: /Turn off bypass/,
+        hidden: true,
+      }),
+    ).not.toBeInTheDocument();
+
+    // Acknowledged once in this visit, so turning it back on does not ask:
+    // asking would leave the switch off until answered.
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
   });
 
   it('offers the bypass confirmations toggle on the new-session landing', async () => {

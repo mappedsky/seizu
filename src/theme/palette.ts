@@ -24,6 +24,8 @@ function tintedActions(
   [hover, selected, strong]: [number, number, number],
 ): PaletteOptions['action'] {
   return {
+    // Disabled controls stay legible as controls, just quieter.
+    disabled: alpha(hue, 0.55),
     hover: alpha(hue, hover),
     selected: alpha(hue, selected),
     focus: alpha(hue, strong),
@@ -55,7 +57,11 @@ export function paletteFor(mode: 'light' | 'dark'): PaletteOptions {
           primary: { main: brand.starlight, contrastText: brand.space },
           secondary: { main: brand.ember, contrastText: brand.space },
           background: { default: brand.space, paper: brand.spaceRaised },
-          text: { primary: brand.paper, secondary: brand.mist },
+          text: {
+            primary: brand.paper,
+            secondary: brand.mist,
+            disabled: alpha(brand.mist, 0.5),
+          },
           divider: alpha(brand.starlight, 0.15),
           action: tintedActions(brand.starlight, [0.08, 0.12, 0.12]),
         }
@@ -65,7 +71,11 @@ export function paletteFor(mode: 'light' | 'dark'): PaletteOptions {
           // White text on emberDark falls below AA; Space clears it.
           secondary: { main: brand.emberDark, contrastText: brand.space },
           background: { default: brand.paperCanvas, paper: '#fff' },
-          text: { primary: brand.space, secondary: brand.slate },
+          text: {
+            primary: brand.space,
+            secondary: brand.slate,
+            disabled: alpha(brand.slate, 0.5),
+          },
           divider: alpha(brand.starlightDark, 0.16),
           action: tintedActions(brand.starlightDark, [0.04, 0.08, 0.12]),
         }),

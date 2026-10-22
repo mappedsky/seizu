@@ -313,14 +313,9 @@ export function GraphPanelSkeleton({
   inline = false,
 }: CaptionProps & { fillHeight?: boolean; inline?: boolean }) {
   const theme = useTheme();
-  const nodeColor =
-    theme.palette.mode === 'dark'
-      ? 'rgba(255,255,255,0.13)'
-      : 'rgba(0,0,0,0.11)';
-  const edgeColor =
-    theme.palette.mode === 'dark'
-      ? 'rgba(255,255,255,0.07)'
-      : 'rgba(0,0,0,0.07)';
+  // The brand-tinted washes, so the placeholder has the canvas's hue.
+  const nodeColor = theme.palette.action.focus;
+  const edgeColor = theme.palette.action.hover;
 
   if (inline) {
     return (

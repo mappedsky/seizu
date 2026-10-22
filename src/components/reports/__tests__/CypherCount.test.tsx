@@ -168,7 +168,10 @@ describe('CypherCount', () => {
       </Wrapper>,
     );
     expect(
-      screen.getByRole('button', { name: 'Show query details' }),
+      // Named for its panel, so a page of them is not a list of twins.
+      screen.getByRole('button', {
+        name: 'Show query details for Test Count',
+      }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole('heading', { level: 3, name: 'Test Count' }),

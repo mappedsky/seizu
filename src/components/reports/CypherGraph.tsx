@@ -53,7 +53,12 @@ import GraphDetailPanel, {
   GraphSummaryPanel,
 } from 'src/components/reports/GraphDetailPanel';
 import { chartPalette } from 'src/theme/brand';
-import { fontFamilyMono } from 'src/theme/typography';
+import {
+  nonSeverityPalette,
+  severityColor,
+  severityOf,
+} from 'src/theme/severity';
+import { fontFamilyMono, fontSizeMin } from 'src/theme/typography';
 
 interface GraphSettings {
   node_label?: string;
@@ -258,6 +263,25 @@ export function colorForGroup(
     GROUP_INDEX_MAP.set(group, index);
   }
   return palette[index % palette.length];
+}
+
+/**
+ * A node's fill: a severity group takes that level's fixed color, so CRITICAL
+ * reads the same here as in every other panel; any other group takes the next
+ * palette slot, from the hues severity leaves free when the graph has any.
+ */
+export function nodeColor(
+  group: unknown,
+  palette: readonly string[],
+  mode: 'light' | 'dark',
+  severityGraph = false,
+): string {
+  const severity = severityOf(group);
+  if (severity) return severityColor(severity, mode);
+  return colorForGroup(
+    String(group ?? 'default'),
+    severityGraph ? nonSeverityPalette(mode) : palette,
+  );
 }
 
 // ─── Force layout ─────────────────────────────────────────────────────────────
@@ -567,7 +591,12 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
   const theme = useTheme();
   const palette =
     theme.palette.mode === 'dark' ? chartPalette.dark : chartPalette.light;
-  const color = colorForGroup(String(data['group'] ?? 'default'), palette);
+  const color = nodeColor(
+    data['group'],
+    palette,
+    theme.palette.mode,
+    Boolean(data['severityGraph']),
+  );
   const typeLabel = String(data['group'] ?? data['label'] ?? data['id'] ?? '');
   const hoverId = graphNodeHoverId(data as unknown as GraphNode);
   const title = typeLabel ? `${typeLabel}: ${hoverId}` : hoverId;
@@ -596,8 +625,10 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
         })}
         <div
           style={{
-            width: 64,
-            height: 64,
+            // Wide enough that a label at the type floor (a severity, a
+            // category) fits on a line rather than breaking mid-word.
+            width: NODE_DIAMETER,
+            height: NODE_DIAMETER,
             borderRadius: '50%',
             background: color,
             border: `2.5px solid ${selected ? theme.palette.primary.main : theme.palette.background.paper}`,
@@ -610,11 +641,11 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
             alignItems: 'center',
             justifyContent: 'center',
             fontFamily: theme.typography.fontFamily ?? 'sans-serif',
-            fontSize: 9,
+            fontSize: fontSizeMin,
             fontWeight: 600,
-            lineHeight: 1.1,
+            lineHeight: 1.15,
             overflow: 'hidden',
-            padding: 8,
+            padding: 6,
             textTransform: 'none',
           }}
         >
@@ -622,7 +653,7 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
             style={{
               display: '-webkit-box',
               WebkitBoxOrient: 'vertical',
-              WebkitLineClamp: 4,
+              WebkitLineClamp: 3,
               maxWidth: '100%',
               minWidth: 0,
               overflow: 'hidden',
@@ -656,7 +687,10 @@ const nodeTypes = { graphNode: GraphNodeComponent };
 
 const NODE_HOVER_ENTER_DELAY_MS = 150;
 
-const RELATIONSHIP_LABEL_FONT_SIZE = 9;
+const NODE_DIAMETER = 72;
+
+// The type floor (fontSizeMin), in px: the offset below is arithmetic on it.
+const RELATIONSHIP_LABEL_FONT_SIZE = 11;
 const RELATIONSHIP_LABEL_GAP = 2;
 const RELATIONSHIP_LABEL_OFFSET =
   RELATIONSHIP_LABEL_FONT_SIZE / 2 + RELATIONSHIP_LABEL_GAP;
@@ -701,13 +735,24 @@ function RelationshipEdge(
     style,
     label,
     labelStyle,
+    data,
+    selected,
   } = props;
-  const [edgePath, labelX, labelY] = getStraightPath({
+  // A label with no clear place waits for its edge, or a node on it, to be
+  // selected; everything else is dimmed by then, so it reads clearly.
+  const showLabel =
+    Boolean(label) && (!data?.labelHidden || data?.focused || selected);
+  const [edgePath] = getStraightPath({
     sourceX,
     sourceY,
     targetX,
     targetY,
   });
+  // Where along the edge the label sits, chosen by placeEdgeLabels so it
+  // clears its neighbours; the midpoint when nothing chose.
+  const labelT = typeof data?.labelT === 'number' ? data.labelT : 0.5;
+  const labelX = sourceX + (targetX - sourceX) * labelT;
+  const labelY = sourceY + (targetY - sourceY) * labelT;
   const labelColor =
     (labelStyle as React.CSSProperties | undefined)?.color ??
     (labelStyle as React.CSSProperties | undefined)?.fill ??
@@ -721,7 +766,7 @@ function RelationshipEdge(
   return (
     <>
       <BaseEdge path={edgePath} markerEnd={markerEnd} style={style} />
-      {label ? (
+      {showLabel ? (
         <EdgeLabelRenderer>
           <div
             style={{
@@ -782,6 +827,9 @@ function buildXyNodes(
   nodeLabelKey: string,
   nodeColorByKey: string,
 ): Node[] {
+  const severityGraph = graphNodes.some((n) =>
+    severityOf(readGraphValue(n, nodeColorByKey)),
+  );
   return graphNodes.map((n) => {
     const pos = positions.get(String(n.id)) ?? { x: 0, y: 0 };
     return {
@@ -792,10 +840,158 @@ function buildXyNodes(
         ...n,
         label: String(readGraphValue(n, nodeLabelKey) ?? n.id ?? ''),
         group: String(readGraphValue(n, nodeColorByKey) ?? 'default'),
+        severityGraph,
         original: n,
       },
     };
   });
+}
+
+/** Positions along an edge a label may take, best first. */
+const LABEL_POSITIONS = [0.5, 0.42, 0.58, 0.36, 0.64, 0.3, 0.7];
+/** Rough advance of one character of a relationship label, in px. */
+const LABEL_CHAR_WIDTH = RELATIONSHIP_LABEL_FONT_SIZE * 0.58;
+
+interface LabelBox {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+function boxOverlap(a: LabelBox, b: LabelBox): number {
+  const x = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+  const y = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+  return x > 0 && y > 0 ? x * y : 0;
+}
+
+/**
+ * The relationship label for each edge, where along it the label sits, and
+ * whether it waits for the edge to be selected.
+ *
+ * Edges between the same two nodes are drawn over each other, so only the
+ * first carries a label, naming every relationship between the pair (`REST ×2`,
+ * `reads · writes`). Labels are then placed shortest edge first, since a short
+ * edge has the fewest places to put one: each takes the first position along
+ * its edge that clears the labels already placed and the nodes. A label with
+ * no clear position is shown only while its edge is selected, rather than
+ * printed over another.
+ */
+export function placeEdgeLabels(
+  graphLinks: GraphLink[],
+  positions: Map<string, { x: number; y: number }>,
+): Array<{ label: string | undefined; labelT: number; labelHidden: boolean }> {
+  const endpoints = graphLinks.map((l) => [
+    String(
+      typeof l.source === 'object' ? (l.source as GraphNode).id : l.source,
+    ),
+    String(
+      typeof l.target === 'object' ? (l.target as GraphNode).id : l.target,
+    ),
+  ]);
+  const pairKey = ([a, b]: string[]) =>
+    a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
+
+  const pairLabels = new Map<string, string[]>();
+  const pairOwner = new Map<string, number>();
+  endpoints.forEach((ends, i) => {
+    const key = pairKey(ends);
+    if (!pairOwner.has(key)) pairOwner.set(key, i);
+    const type = graphLinks[i].type;
+    if (type) pairLabels.set(key, [...(pairLabels.get(key) ?? []), type]);
+  });
+  const labelFor = (i: number): string | undefined => {
+    const key = pairKey(endpoints[i]);
+    if (pairOwner.get(key) !== i) return undefined;
+    const counts = new Map<string, number>();
+    (pairLabels.get(key) ?? []).forEach((t) =>
+      counts.set(t, (counts.get(t) ?? 0) + 1),
+    );
+    if (counts.size === 0) return undefined;
+    return [...counts].map(([t, n]) => (n > 1 ? `${t} ×${n}` : t)).join(' · ');
+  };
+
+  const radius = NODE_DIAMETER / 2;
+  const centre = (id: string) => {
+    const p = positions.get(id);
+    return p ? { x: p.x + radius, y: p.y + radius } : undefined;
+  };
+  const nodeBoxes: LabelBox[] = [...positions.values()].map((p) => ({
+    left: p.x,
+    right: p.x + NODE_DIAMETER,
+    top: p.y,
+    bottom: p.y + NODE_DIAMETER,
+  }));
+
+  const results: Array<{
+    label: string | undefined;
+    labelT: number;
+    labelHidden: boolean;
+  }> = endpoints.map((_, i) => ({
+    label: labelFor(i),
+    labelT: 0.5,
+    labelHidden: false,
+  }));
+  const lengthOf = (i: number) => {
+    const from = centre(endpoints[i][0]);
+    const to = centre(endpoints[i][1]);
+    return from && to ? Math.hypot(to.x - from.x, to.y - from.y) : 0;
+  };
+  const order = results
+    .map((_, i) => i)
+    .filter((i) => results[i].label !== undefined)
+    .sort((a, b) => lengthOf(a) - lengthOf(b));
+
+  const placed: LabelBox[] = [];
+  for (const i of order) {
+    const label = results[i].label!;
+    const from = centre(endpoints[i][0]);
+    const to = centre(endpoints[i][1]);
+    if (!from || !to) continue;
+
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const length = Math.max(Math.hypot(dx, dy), 1);
+    const cos = Math.abs(dx / length);
+    const sin = Math.abs(dy / length);
+    const width = label.length * LABEL_CHAR_WIDTH + 4;
+    const height = RELATIONSHIP_LABEL_FONT_SIZE + 4;
+    // The label's footprint once rotated onto the edge, as an upright box.
+    const halfW = (width * cos + height * sin) / 2;
+    const halfH = (width * sin + height * cos) / 2;
+
+    let best:
+      | { t: number; labels: number; nodes: number; box: LabelBox }
+      | undefined;
+    for (const t of LABEL_POSITIONS) {
+      const x = from.x + dx * t;
+      const y = from.y + dy * t;
+      const box = {
+        left: x - halfW,
+        right: x + halfW,
+        top: y - halfH,
+        bottom: y + halfH,
+      };
+      const labels = placed.reduce((sum, o) => sum + boxOverlap(box, o), 0);
+      const nodes = nodeBoxes.reduce((sum, n) => sum + boxOverlap(box, n), 0);
+      if (
+        !best ||
+        labels < best.labels ||
+        (labels === best.labels && nodes < best.nodes)
+      ) {
+        best = { t, labels, nodes, box };
+      }
+      if (labels === 0 && nodes === 0) break;
+    }
+    if (!best) continue;
+    results[i].labelT = best.t;
+    if (best.labels > 0) {
+      results[i].labelHidden = true;
+    } else {
+      placed.push(best.box);
+    }
+  }
+  return results;
 }
 
 export function buildXyEdges(
@@ -803,6 +999,13 @@ export function buildXyEdges(
   edgeColor: string,
   positions?: Map<string, { x: number; y: number }>,
 ): Edge[] {
+  const labels = positions
+    ? placeEdgeLabels(graphLinks, positions)
+    : graphLinks.map((l) => ({
+        label: l.type ?? undefined,
+        labelT: 0.5,
+        labelHidden: false,
+      }));
   return graphLinks.map((l, i) => {
     const source = String(
       typeof l.source === 'object' ? (l.source as GraphNode).id : l.source,
@@ -820,7 +1023,7 @@ export function buildXyEdges(
       source,
       target,
       ...handles,
-      label: l.type ?? undefined,
+      label: labels[i].label,
       labelShowBg: false,
       labelStyle: {
         fontSize: RELATIONSHIP_LABEL_FONT_SIZE,
@@ -831,7 +1034,11 @@ export function buildXyEdges(
       },
       style: { stroke: edgeColor, strokeWidth: 1.4, opacity: FULL_OPACITY },
       markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
-      data: { original: l },
+      data: {
+        original: l,
+        labelT: labels[i].labelT,
+        labelHidden: labels[i].labelHidden,
+      },
     };
   });
 }
@@ -854,6 +1061,7 @@ export function applyFocusOpacity(
       })),
       edges: edges.map((e) => ({
         ...e,
+        data: { ...e.data, focused: false },
         style: {
           ...e.style,
           stroke: edgeColor,
@@ -888,6 +1096,7 @@ export function applyFocusOpacity(
       })),
       edges: edges.map((e) => ({
         ...e,
+        data: { ...e.data, focused: connectedEdgeIds.has(e.id) },
         style: {
           ...e.style,
           stroke: edgeColor,
@@ -921,6 +1130,7 @@ export function applyFocusOpacity(
     })),
     edges: edges.map((e) => ({
       ...e,
+      data: { ...e.data, focused: e.id === focusedId },
       style: {
         ...e.style,
         stroke: edgeColor,
@@ -1169,6 +1379,13 @@ function CypherGraph({
       ),
     [records, nodeLabelKey],
   );
+  const severityGraph = useMemo(
+    () =>
+      !!graphData?.nodes.some((n) =>
+        severityOf(readGraphValue(n, nodeColorByKey)),
+      ),
+    [graphData, nodeColorByKey],
+  );
 
   // Determine which tabs are available based on the current results.
   const availableTabs = useMemo<('graph' | 'table' | 'raw')[]>(() => {
@@ -1364,7 +1581,7 @@ function CypherGraph({
           sx={{ flexDirection: 'column', alignItems: 'center' }}
         >
           <CardContent>
-            <Typography variant="h4" align="center">
+            <Typography variant="h4" component="p" align="center">
               N/A
             </Typography>
             <Typography variant="body2" align="center">
@@ -1458,14 +1675,25 @@ function CypherGraph({
 
   return (
     <Card
-      sx={
-        fillHeight
+      sx={{
+        // The header lays out against the panel's own width, not the screen's.
+        containerType: 'inline-size',
+        ...(fillHeight
           ? { height: '100%', display: 'flex', flexDirection: 'column' }
-          : {}
-      }
+          : {}),
+      }}
     >
-      {/* Header row: tabs left, optional spread control, caption right */}
-      <Box sx={{ display: 'flex', alignItems: 'center', pl: 2, flexShrink: 0 }}>
+      {/* Header row: tabs left, caption right. In a narrow panel the caption
+          takes its own line above the tabs rather than running into them. */}
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          flexShrink: 0,
+          flexWrap: 'wrap',
+          pl: 2,
+        }}
+      >
         <Tabs
           value={activeTab}
           onChange={(_, v: 'graph' | 'table' | 'raw') => setPreferredTab(v)}
@@ -1485,7 +1713,25 @@ function CypherGraph({
           <Typography
             variant="subtitle1"
             component="h3"
-            sx={{ ml: 'auto', pr: 2, color: 'text.secondary' }}
+            title={caption}
+            sx={{
+              color: 'text.secondary',
+              minWidth: 0,
+              ml: 'auto',
+              overflow: 'hidden',
+              pl: 2,
+              pr: 2,
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              '@container (max-width: 560px)': {
+                order: -1,
+                ml: 0,
+                pl: 0,
+                pt: 1.25,
+                whiteSpace: 'normal',
+                width: '100%',
+              },
+            }}
           >
             {caption}
           </Typography>
@@ -1531,12 +1777,21 @@ function CypherGraph({
           <Box
             sx={{
               display: 'flex',
+              // Narrow, the details sit below the graph instead of beside or
+              // over it, so the node they describe stays in view.
+              flexDirection: narrow ? 'column' : 'row',
               position: 'relative',
               ...(fillHeight ? { flex: 1, minHeight: 0 } : { height: 450 }),
             }}
           >
             {/* Graph canvas */}
-            <Box sx={{ flex: 1, height: canvasHeight }}>
+            <Box
+              sx={
+                narrow
+                  ? { flex: 1, minHeight: 0 }
+                  : { flex: 1, height: canvasHeight }
+              }
+            >
               <ReactFlow
                 nodes={nodes}
                 edges={edges}
@@ -1572,18 +1827,30 @@ function CypherGraph({
             <Box
               sx={{
                 display: 'flex',
-                flexDirection: 'column',
                 alignItems: 'center',
-                justifyContent: 'flex-start',
-                pt: 1,
-                borderLeft: 1,
-                borderColor: 'divider',
-                width: 28,
                 flexShrink: 0,
+                ...(narrow
+                  ? {
+                      borderTop: 1,
+                      justifyContent: 'flex-end',
+                      px: 0.5,
+                      py: 0.25,
+                    }
+                  : {
+                      borderLeft: 1,
+                      flexDirection: 'column',
+                      justifyContent: 'flex-start',
+                      pt: 1,
+                      width: 28,
+                    }),
+                // After the border shorthand, which would reset it.
+                borderColor: 'divider',
               }}
             >
               <Tooltip title="Details" placement="left">
                 <IconButton
+                  aria-expanded={detailOpen}
+                  aria-label={detailOpen ? 'Hide details' : 'Show details'}
                   size="small"
                   onClick={() => setDetailOpen((v) => !v)}
                   sx={{ color: detailOpen ? 'primary.main' : 'text.secondary' }}
@@ -1601,23 +1868,13 @@ function CypherGraph({
             {detailOpen && (
               <Box
                 sx={{
-                  width: DETAIL_PANEL_WIDTH,
                   flexShrink: 0,
-                  borderLeft: 1,
-                  borderColor: 'divider',
                   overflow: 'auto',
                   p: 2,
-                  ...(narrow && {
-                    // Left of the toggle handle, which stays the way to close it.
-                    position: 'absolute',
-                    top: 0,
-                    bottom: 0,
-                    right: 28,
-                    width: `min(${DETAIL_PANEL_WIDTH}px, calc(100% - 56px))`,
-                    zIndex: 1,
-                    bgcolor: 'background.paper',
-                    boxShadow: 8,
-                  }),
+                  ...(narrow
+                    ? { borderTop: 1, height: '45%', pt: 1 }
+                    : { borderLeft: 1, width: DETAIL_PANEL_WIDTH }),
+                  borderColor: 'divider',
                 }}
               >
                 {selectedItem ? (
@@ -1631,11 +1888,13 @@ function CypherGraph({
                     links={graphData.links}
                     nodeGroupKey={nodeColorByKey}
                     getColor={(g) =>
-                      colorForGroup(
+                      nodeColor(
                         g,
                         theme.palette.mode === 'dark'
                           ? chartPalette.dark
                           : chartPalette.light,
+                        theme.palette.mode,
+                        severityGraph,
                       )
                     }
                   />

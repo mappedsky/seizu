@@ -39,11 +39,31 @@ const DashboardLayoutContainer = styled('div')({
   overflow: 'hidden',
 });
 
-const DashboardLayoutContent = styled('div')({
+const DashboardLayoutContent = styled('main')({
   flex: '1 1 auto',
   height: '100%',
   overflow: 'auto',
+  // Focused by the skip link, which is a jump rather than a control.
+  '&:focus': { outline: 'none' },
 });
+
+/** The first stop for the keyboard: hidden until focused, it jumps past the
+ *  app bar and sidebar to the page itself. */
+const SkipLink = styled('a')(({ theme }) => ({
+  ...theme.typography.body2,
+  backgroundColor: theme.palette.primary.main,
+  borderRadius: theme.shape.borderRadius,
+  color: theme.palette.primary.contrastText,
+  fontWeight: 600,
+  left: theme.spacing(2),
+  padding: theme.spacing(1, 2),
+  position: 'fixed',
+  textDecoration: 'none',
+  top: theme.spacing(1.5),
+  transform: 'translateY(-200%)',
+  zIndex: theme.zIndex.tooltip + 1,
+  '&:focus': { transform: 'none' },
+}));
 
 function getInitialSidebarCollapsed(): boolean {
   if (typeof window === 'undefined') return false;
@@ -92,6 +112,17 @@ function DashboardLayout() {
         { [DASHBOARD_SIDEBAR_WIDTH_VAR]: `${sidebarWidth}px` } as CSSProperties
       }
     >
+      <SkipLink
+        href="#content"
+        onClick={(event) => {
+          // Move focus without the anchor's scroll, which would tuck the top
+          // of the page under the pinned toolbar.
+          event.preventDefault();
+          document.getElementById('content')?.focus({ preventScroll: true });
+        }}
+      >
+        Skip to content
+      </SkipLink>
       <DashboardNavbar
         onMobileNavOpen={() => setMobileNavOpen(true)}
         onSidebarToggle={handleSidebarToggle}
@@ -104,7 +135,7 @@ function DashboardLayout() {
       />
       <DashboardLayoutWrapper>
         <DashboardLayoutContainer>
-          <DashboardLayoutContent>
+          <DashboardLayoutContent id="content" tabIndex={-1}>
             <Suspense fallback={<PageLoading />}>
               <Outlet />
             </Suspense>

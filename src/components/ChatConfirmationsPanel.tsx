@@ -2,7 +2,6 @@ import {
   Alert,
   Badge,
   Box,
-  Button,
   Divider,
   Drawer,
   FormControlLabel,
@@ -14,17 +13,15 @@ import {
   useTheme,
 } from '@mui/material';
 import { memo, Fragment } from 'react';
-import CheckCircle from '@mui/icons-material/CheckCircle';
 import Close from '@mui/icons-material/Close';
 import GppMaybe from '@mui/icons-material/GppMaybe';
-import Block from '@mui/icons-material/Block';
+import ChatConfirmationCard from 'src/components/ChatConfirmationCard';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import {
   effectiveConfirmationStatus,
   isConfirmationExpired,
   type ActionConfirmation,
 } from 'src/hooks/useConfirmationsApi';
-import { fontFamilyMono, fontSizeMin } from 'src/theme/typography';
 import { SIDE_PANEL_RAIL_WIDTH } from 'src/components/SidePanelFrame';
 
 interface ChatConfirmationsPanelProps {
@@ -174,163 +171,30 @@ function ChatConfirmationsPanel({
                 No confirmations pending.
               </Typography>
             ) : null}
-            {displayedConfirmations.map((confirmation, index) => {
-              const status = effectiveConfirmationStatus(confirmation);
-              const canReverseDenial =
-                status === 'denied' && !isConfirmationExpired(confirmation);
-              return (
-                <Fragment key={confirmation.confirmation_id}>
-                  {index === pendingCount && deniedConfirmations.length > 0 ? (
-                    <Typography
-                      component="h2"
-                      sx={{
-                        borderBottom: 1,
-                        borderColor: 'divider',
-                        fontWeight: 700,
-                        mb: 1.5,
-                        pb: 0.5,
-                      }}
-                      variant="subtitle2"
-                    >
-                      Previously denied
-                    </Typography>
-                  ) : null}
-                  <Box
+            {displayedConfirmations.map((confirmation, index) => (
+              <Fragment key={confirmation.confirmation_id}>
+                {index === pendingCount && deniedConfirmations.length > 0 ? (
+                  <Typography
+                    component="h2"
                     sx={{
-                      border: 1,
+                      borderBottom: 1,
                       borderColor: 'divider',
-                      borderRadius: 1,
-                      mb: 1.25,
-                      p: 1.25,
+                      fontWeight: 700,
+                      mb: 1.5,
+                      pb: 0.5,
                     }}
+                    variant="subtitle2"
                   >
-                    <Typography
-                      variant="subtitle2"
-                      sx={{
-                        textTransform: 'capitalize',
-                        wordBreak: 'break-word',
-                      }}
-                    >
-                      {confirmation.action} {confirmation.resource_type}
-                    </Typography>
-                    <Typography
-                      color="text.secondary"
-                      sx={{ display: 'block', wordBreak: 'break-word' }}
-                      variant="caption"
-                    >
-                      {confirmation.resource_id}
-                    </Typography>
-                    {Object.keys(confirmation.arguments).length > 0 && (
-                      <Box
-                        component="details"
-                        open
-                        sx={{
-                          border: 1,
-                          borderColor: 'divider',
-                          borderRadius: 1,
-                          mt: 1,
-                          overflow: 'hidden',
-                        }}
-                      >
-                        <Box
-                          component="summary"
-                          sx={{
-                            cursor: 'pointer',
-                            fontSize: '0.72rem',
-                            fontWeight: 600,
-                            listStyle: 'revert',
-                            px: 1,
-                            py: 0.75,
-                            userSelect: 'none',
-                          }}
-                        >
-                          Request details
-                        </Box>
-                        <Box
-                          sx={{ borderTop: 1, borderColor: 'divider', p: 1 }}
-                        >
-                          {Object.entries(confirmation.arguments).map(
-                            ([key, value]) => (
-                              <Box
-                                key={key}
-                                sx={{
-                                  alignItems: 'flex-start',
-                                  display: 'flex',
-                                  gap: 1,
-                                  '&:not(:last-child)': { mb: 0.5 },
-                                }}
-                              >
-                                <Typography
-                                  sx={{
-                                    color: 'text.secondary',
-                                    flexShrink: 0,
-                                    fontFamily: fontFamilyMono,
-                                    fontSize: fontSizeMin,
-                                    lineHeight: 1.5,
-                                    minWidth: 72,
-                                    wordBreak: 'break-all',
-                                  }}
-                                >
-                                  {key}
-                                </Typography>
-                                <Typography
-                                  sx={{
-                                    fontFamily: fontFamilyMono,
-                                    fontSize: fontSizeMin,
-                                    lineHeight: 1.5,
-                                    wordBreak: 'break-all',
-                                  }}
-                                >
-                                  {typeof value === 'object' && value !== null
-                                    ? JSON.stringify(value)
-                                    : String(value ?? '—')}
-                                </Typography>
-                              </Box>
-                            ),
-                          )}
-                        </Box>
-                      </Box>
-                    )}
-                    {status === 'pending' ? (
-                      <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-                        <Button
-                          disabled={decidingId === confirmation.confirmation_id}
-                          onClick={() => onDecision(confirmation, 'approved')}
-                          size="small"
-                          startIcon={<CheckCircle />}
-                          variant="contained"
-                        >
-                          Allow
-                        </Button>
-                        <Button
-                          color="error"
-                          disabled={decidingId === confirmation.confirmation_id}
-                          onClick={() => onDecision(confirmation, 'denied')}
-                          size="small"
-                          startIcon={<Block />}
-                          variant="outlined"
-                        >
-                          Deny
-                        </Button>
-                      </Box>
-                    ) : null}
-                    {canReverseDenial ? (
-                      <Box sx={{ mt: 1 }}>
-                        <Button
-                          color="error"
-                          disabled={decidingId === confirmation.confirmation_id}
-                          onClick={() => onDecision(confirmation, 'approved')}
-                          size="small"
-                          variant="outlined"
-                        >
-                          Accept
-                        </Button>
-                      </Box>
-                    ) : null}
-                  </Box>
-                </Fragment>
-              );
-            })}
+                    Previously denied
+                  </Typography>
+                ) : null}
+                <ChatConfirmationCard
+                  confirmation={confirmation}
+                  deciding={decidingId === confirmation.confirmation_id}
+                  onDecision={onDecision}
+                />
+              </Fragment>
+            ))}
           </>
         )}
       </Box>

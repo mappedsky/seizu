@@ -518,7 +518,7 @@ function QueryPanels({ query }: { query: ScheduledQueryItem }) {
                         <Typography
                           component="span"
                           variant="caption"
-                          color="text.disabled"
+                          color="text.secondary"
                           sx={{ ml: 0.5 }}
                         >
                           (list)

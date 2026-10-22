@@ -182,7 +182,7 @@ export default function CypherCount({
           sx={[fillBodySx, { flexDirection: 'column', alignItems: 'center' }]}
         >
           <CardContent>
-            <Typography variant="h4" align="center">
+            <Typography variant="h4" component="p" align="center">
               N/A
             </Typography>
             <Typography variant="body2" align="center">
@@ -224,7 +224,7 @@ export default function CypherCount({
           sx={[fillBodySx, { flexDirection: 'column', alignItems: 'center' }]}
         >
           <CardContent>
-            <Typography variant="h4" align="center">
+            <Typography variant="h4" component="p" align="center">
               N/A
             </Typography>
             <Typography variant="body2" align="center">
@@ -261,7 +261,9 @@ export default function CypherCount({
           sx={[fillBodySx, { flexDirection: 'column', alignItems: 'center' }]}
         >
           <CardContent>
-            <Typography variant="h4">N/A</Typography>
+            <Typography variant="h4" component="p">
+              N/A
+            </Typography>
           </CardContent>
         </Grid>
       </Card>
@@ -292,7 +294,7 @@ export default function CypherCount({
           ...panelInfoRevealSx,
         }}
       >
-        <PanelInfoButton onClick={handleClickOpen} />
+        <PanelInfoButton onClick={handleClickOpen} panelName={caption} />
         {caption && (
           <Grid
             container

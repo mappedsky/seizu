@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { Fragment, memo, useMemo, useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import {
   Alert,
@@ -13,6 +13,7 @@ import {
   ListItem,
   ListItemButton,
   ListItemIcon,
+  ListSubheader,
   TextField,
   Tooltip,
   Typography,
@@ -24,6 +25,8 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import Forum from '@mui/icons-material/Forum';
 import Hub from '@mui/icons-material/Hub';
+import SearchIcon from '@mui/icons-material/Search';
+import InputAdornment from '@mui/material/InputAdornment';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import { useFeature } from 'src/features.context';
@@ -34,6 +37,42 @@ import SidePanelFrame from 'src/components/SidePanelFrame';
 // Tightened from the MUI default so the footer sits at the same rhythm as the
 // session rows above it, as the space panel's footer does.
 const footerActionIconSx = { minWidth: 32 } as const;
+
+/** With fewer sessions than this, the list is short enough to scan. */
+const FILTER_THRESHOLD = 8;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Sessions grouped by when they were last active (Today, Yesterday,
+ * Previous 7 days, Previous 30 days, Earlier), keeping their order within each group. Empty
+ * groups are left out.
+ */
+export function groupSessionsByRecency(
+  sessions: ChatSession[],
+  now: Date = new Date(),
+): Array<{ label: string; sessions: ChatSession[] }> {
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const today = startOfToday.getTime();
+  const groups = [
+    { label: 'Today', from: today },
+    { label: 'Yesterday', from: today - DAY_MS },
+    { label: 'Previous 7 days', from: today - 7 * DAY_MS },
+    { label: 'Previous 30 days', from: today - 30 * DAY_MS },
+    { label: 'Earlier', from: Number.NEGATIVE_INFINITY },
+  ].map((group) => ({ ...group, sessions: [] as ChatSession[] }));
+  for (const session of sessions) {
+    const at = new Date(session.updated_at).getTime();
+    const group =
+      groups.find((candidate) => at >= candidate.from) ??
+      groups[groups.length - 1];
+    group.sessions.push(session);
+  }
+  return groups
+    .filter((group) => group.sessions.length > 0)
+    .map(({ label, sessions: grouped }) => ({ label, sessions: grouped }));
+}
 
 interface ChatSessionsPanelProps {
   open: boolean;
@@ -78,6 +117,20 @@ function ChatSessionsPanel({
   const connectionsPath = chatConnectionsPath(activeThreadId);
 
   const sessionToDelete = sessions.find((s) => s.thread_id === deleteThreadId);
+  const [filter, setFilter] = useState('');
+  const showFilter = sessions.length >= FILTER_THRESHOLD;
+  const query = showFilter ? filter.trim().toLowerCase() : '';
+  const groups = useMemo(
+    () =>
+      groupSessionsByRecency(
+        query
+          ? sessions.filter((session) =>
+              (session.title || 'New session').toLowerCase().includes(query),
+            )
+          : sessions,
+      ),
+    [query, sessions],
+  );
 
   const handleOpenRename = (session: ChatSession) => {
     setRenameThreadId(session.thread_id);
@@ -155,15 +208,8 @@ function ChatSessionsPanel({
         >
           {open ? (
             <>
-              <Typography
-                variant="caption"
-                sx={{
-                  color: 'text.secondary',
-                  fontWeight: 700,
-                  letterSpacing: 0.8,
-                }}
-              >
-                SESSIONS
+              <Typography component="h2" variant="subtitle2">
+                Sessions
               </Typography>
               <Box sx={{ alignItems: 'center', display: 'flex' }}>
                 <Tooltip title="New session" placement="right">
@@ -200,6 +246,29 @@ function ChatSessionsPanel({
         </Box>
 
         {/* Sessions list */}
+        {open && showFilter && (
+          <Box sx={{ flexShrink: 0, px: 1, pt: 1 }}>
+            <TextField
+              fullWidth
+              size="small"
+              placeholder="Filter sessions"
+              value={filter}
+              // The rows' size, so the field reads as part of the list.
+              sx={{ '& input': { typography: 'body2' } }}
+              onChange={(event) => setFilter(event.target.value)}
+              slotProps={{
+                htmlInput: { 'aria-label': 'Filter sessions' },
+                input: {
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      <SearchIcon fontSize="small" />
+                    </InputAdornment>
+                  ),
+                },
+              }}
+            />
+          </Box>
+        )}
         {open && (
           <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             {loading ? (
@@ -212,65 +281,93 @@ function ChatSessionsPanel({
               </Box>
             ) : (
               <List dense disablePadding>
-                {sessions.map((session) => (
-                  <ListItem
-                    key={session.thread_id}
-                    disablePadding
-                    sx={{
-                      // The row menu appears on the row being pointed at or
-                      // focused, and stays while it is open. Devices without
-                      // hover show it always.
-                      '& .MuiListItemSecondaryAction-root': {
-                        opacity: 0,
-                        transition: 'opacity 120ms ease',
-                      },
-                      '&:hover .MuiListItemSecondaryAction-root, &:focus-within .MuiListItemSecondaryAction-root, & .MuiListItemSecondaryAction-root:has([aria-expanded="true"])':
-                        { opacity: 1 },
-                      '@media (hover: none)': {
-                        '& .MuiListItemSecondaryAction-root': { opacity: 1 },
-                      },
-                    }}
-                    secondaryAction={
-                      <Box sx={{ pr: 0.5 }}>
-                        <RowMenu
-                          actions={rowActions(session)}
-                          menuMinWidth={140}
-                        />
-                      </Box>
-                    }
-                  >
-                    <ListItemButton
-                      selected={session.thread_id === activeThreadId}
-                      onClick={() => onSelectSession(session.thread_id)}
-                      sx={{ pr: 5 }}
+                {groups.length === 0 ? (
+                  <Box sx={{ color: 'text.secondary', px: 1.5, py: 1 }}>
+                    <Typography variant="caption">
+                      No sessions match.
+                    </Typography>
+                  </Box>
+                ) : null}
+                {groups.map((group) => (
+                  <Fragment key={group.label}>
+                    <ListSubheader
+                      disableSticky
+                      sx={{
+                        bgcolor: 'transparent',
+                        color: 'text.secondary',
+                        fontSize: '0.75rem',
+                        fontWeight: 600,
+                        lineHeight: 1,
+                        pb: 0.75,
+                        pt: 1.5,
+                        px: 1.5,
+                      }}
                     >
-                      {/* MUI tooltip rather than a native `title`: the browser
-                          waits a second or more before showing one. */}
-                      <Tooltip
-                        title={
-                          <>
-                            <Box component="div">
-                              {session.title || 'New session'}
-                            </Box>
-                            <Box component="div">
-                              {`Last activity ${new Date(session.updated_at).toLocaleString()}`}
-                            </Box>
-                          </>
+                      {group.label}
+                    </ListSubheader>
+                    {group.sessions.map((session) => (
+                      <ListItem
+                        key={session.thread_id}
+                        disablePadding
+                        sx={{
+                          // The row menu appears on the row being pointed at or
+                          // focused, and stays while it is open. Devices without
+                          // hover show it always.
+                          '& .MuiListItemSecondaryAction-root': {
+                            opacity: 0,
+                            transition: 'opacity 120ms ease',
+                          },
+                          '&:hover .MuiListItemSecondaryAction-root, &:focus-within .MuiListItemSecondaryAction-root, & .MuiListItemSecondaryAction-root:has([aria-expanded="true"])':
+                            { opacity: 1 },
+                          '@media (hover: none)': {
+                            '& .MuiListItemSecondaryAction-root': {
+                              opacity: 1,
+                            },
+                          },
+                        }}
+                        secondaryAction={
+                          <Box sx={{ pr: 0.5 }}>
+                            <RowMenu
+                              actions={rowActions(session)}
+                              menuMinWidth={140}
+                            />
+                          </Box>
                         }
-                        placement="top"
-                        arrow
-                        disableInteractive
                       >
-                        <Typography
-                          variant="body2"
-                          noWrap
-                          sx={{ minWidth: 0, width: '100%' }}
+                        <ListItemButton
+                          selected={session.thread_id === activeThreadId}
+                          onClick={() => onSelectSession(session.thread_id)}
+                          sx={{ pr: 5 }}
                         >
-                          {session.title || 'New session'}
-                        </Typography>
-                      </Tooltip>
-                    </ListItemButton>
-                  </ListItem>
+                          {/* MUI tooltip rather than a native `title`: the browser
+                              waits a second or more before showing one. */}
+                          <Tooltip
+                            title={
+                              <>
+                                <Box component="div">
+                                  {session.title || 'New session'}
+                                </Box>
+                                <Box component="div">
+                                  {`Last activity ${new Date(session.updated_at).toLocaleString()}`}
+                                </Box>
+                              </>
+                            }
+                            placement="top"
+                            arrow
+                            disableInteractive
+                          >
+                            <Typography
+                              variant="body2"
+                              noWrap
+                              sx={{ minWidth: 0, width: '100%' }}
+                            >
+                              {session.title || 'New session'}
+                            </Typography>
+                          </Tooltip>
+                        </ListItemButton>
+                      </ListItem>
+                    ))}
+                  </Fragment>
                 ))}
               </List>
             )}

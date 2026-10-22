@@ -6,11 +6,18 @@ import {
   CardHeader,
   Grid,
   Typography,
+  useMediaQuery,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import Error from '@mui/icons-material/Error';
 import { BarChart } from '@mui/x-charts/BarChart';
 import { chartColorsFor } from 'src/theme/brand';
+import {
+  compareSeverity,
+  isSeverityScale,
+  severityColor,
+  severityOf,
+} from 'src/theme/severity';
 import { useLazyCypherQuery, QueryRecord } from 'src/hooks/useCypherQuery';
 import CypherDetails from 'src/components/reports/LazyCypherDetails';
 import { ChartPanelSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
@@ -148,6 +155,11 @@ export default function CypherBar({
   onTokenExpired,
 }: CypherBarProps) {
   const theme = useTheme();
+  // A side legend takes a fixed strip of the panel; on a phone that strip is
+  // most of it, so the legend goes below the chart instead.
+  const phone = useMediaQuery(theme.breakpoints.down('sm'), { noSsr: true });
+  const legend =
+    phone && barSettings?.legend === 'column' ? 'row' : barSettings?.legend;
   const [open, setOpen] = useState(false);
 
   const [
@@ -263,7 +275,7 @@ export default function CypherBar({
           sx={{ flexDirection: 'column', alignItems: 'center' }}
         >
           <CardContent>
-            <Typography variant="h4" align="center">
+            <Typography variant="h4" component="p" align="center">
               N/A
             </Typography>
             <Typography variant="body2" align="center">
@@ -300,7 +312,9 @@ export default function CypherBar({
           sx={{ flexDirection: 'column', alignItems: 'center' }}
         >
           <CardContent>
-            <Typography variant="h4">N/A</Typography>
+            <Typography variant="h4" component="p">
+              N/A
+            </Typography>
           </CardContent>
         </Grid>
       </Card>
@@ -308,8 +322,12 @@ export default function CypherBar({
   }
 
   const mungedRecords = buildBarDataset(records);
+  const severityBars = isSeverityScale(mungedRecords.map((row) => row.id));
+  if (severityBars) {
+    mungedRecords.sort((a, b) => compareSeverity(a.id, b.id));
+  }
 
-  const hasLegend = !!barSettings?.legend;
+  const hasLegend = !!legend;
   // Object literal without explicit React.CSSProperties type — ChartsTextStyle is stricter
   const tickLabelStyle = {
     fill: theme.palette.text.secondary,
@@ -326,7 +344,7 @@ export default function CypherBar({
           ...panelInfoRevealSx,
         }}
       >
-        <PanelInfoButton onClick={() => setOpen(true)} />
+        <PanelInfoButton onClick={() => setOpen(true)} panelName={caption} />
         {caption && (
           <Grid
             container
@@ -354,6 +372,16 @@ export default function CypherBar({
                 tickLabelMinGap: 2,
                 valueFormatter: (value) => wrapAxisLabel(String(value)),
                 tickLabelStyle,
+                // A severity breakdown colors each bar by its level.
+                ...(severityBars && {
+                  colorMap: {
+                    type: 'ordinal' as const,
+                    values: mungedRecords.map((row) => row.id),
+                    colors: mungedRecords.map((row) =>
+                      severityColor(severityOf(row.id)!, theme.palette.mode),
+                    ),
+                  },
+                }),
               },
             ]}
             yAxis={[
@@ -374,9 +402,9 @@ export default function CypherBar({
             grid={{ horizontal: true }}
             hideLegend={!hasLegend}
             margin={
-              barSettings?.legend === 'column'
+              legend === 'column'
                 ? { top: 16, right: 150, bottom: 56, left: 48 }
-                : barSettings?.legend === 'row'
+                : legend === 'row'
                   ? { top: 16, right: 16, bottom: 88, left: 48 }
                   : { top: 16, right: 16, bottom: 56, left: 48 }
             }
@@ -385,13 +413,11 @@ export default function CypherBar({
                 ? {
                     legend: {
                       position:
-                        barSettings?.legend === 'column'
+                        legend === 'column'
                           ? { vertical: 'middle', horizontal: 'end' }
                           : { vertical: 'bottom', horizontal: 'center' },
                       direction:
-                        barSettings?.legend === 'column'
-                          ? 'vertical'
-                          : 'horizontal',
+                        legend === 'column' ? 'vertical' : 'horizontal',
                     },
                   }
                 : undefined

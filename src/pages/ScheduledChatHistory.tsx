@@ -81,6 +81,7 @@ function ScheduledChatHistory() {
   const columns: ListTableColumn<ScheduledChatVersion>[] = [
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       cellSx: { width: 120 },
       render: (version) => {
@@ -117,6 +118,7 @@ function ScheduledChatHistory() {
     },
     {
       key: 'saved',
+      stacked: 'meta',
       label: 'Saved',
       hideBelow: 'sm',
       cellSx: savedColumnSx,
@@ -124,6 +126,7 @@ function ScheduledChatHistory() {
     },
     {
       key: 'created_by',
+      stacked: 'meta',
       label: 'Created by',
       hideBelow: 'md',
       cellSx: authorColumnSx,

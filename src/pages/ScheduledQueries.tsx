@@ -332,6 +332,7 @@ function ScheduledQueries() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'sm',
       cellSx: { ...listTableSecondaryCellSx, width: 96 },
@@ -339,6 +340,7 @@ function ScheduledQueries() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Last updated',
       hideBelow: 'xl',
       cellSx: { ...listTableSecondaryCellSx, width: 180 },
@@ -346,6 +348,7 @@ function ScheduledQueries() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated by',
       hideBelow: 'lg',
       cellSx: { ...listTableSecondaryCellSx, width: 150 },

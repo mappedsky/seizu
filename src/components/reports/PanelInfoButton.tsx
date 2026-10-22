@@ -27,6 +27,8 @@ export const panelInfoRevealSx = {
 
 interface PanelInfoButtonProps {
   onClick: () => void;
+  /** The panel's caption, so each button names the panel it opens. */
+  panelName?: string;
   /** Distance from the panel's top-right corner, in px. */
   inset?: number;
 }
@@ -38,6 +40,7 @@ interface PanelInfoButtonProps {
  */
 export default function PanelInfoButton({
   onClick,
+  panelName,
   inset = 8,
 }: PanelInfoButtonProps) {
   const sx: SxProps<Theme> = {
@@ -55,7 +58,11 @@ export default function PanelInfoButton({
         className="panel-info-btn"
         size="small"
         onClick={onClick}
-        aria-label="Show query details"
+        aria-label={
+          panelName
+            ? `Show query details for ${panelName}`
+            : 'Show query details'
+        }
         sx={sx}
       >
         <Info fontSize="small" />

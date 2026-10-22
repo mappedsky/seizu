@@ -2,6 +2,7 @@ import { type Edge, type Node } from '@xyflow/react';
 import {
   applyFocusOpacity,
   buildXyEdges,
+  placeEdgeLabels,
   closestEdgeHandles,
   computeLayout,
   extractGraphData,
@@ -251,7 +252,7 @@ describe('buildXyEdges', () => {
     expect(result[0].labelShowBg).toBe(false);
     expect(result[0].labelStyle).toMatchObject({
       color: EDGE_COLOR,
-      fontSize: 9,
+      fontSize: 11,
       fontWeight: 500,
       opacity: 1,
     });
@@ -358,13 +359,13 @@ describe('relationshipLabelTransform', () => {
 
   it('offsets relationship labels above the edge line', () => {
     expect(relationshipLabelTransform(0, 0, 10, 0, 5, 0)).toBe(
-      'translate(-50%, -50%) translate(5px, -6.5px) rotate(0deg)',
+      'translate(-50%, -50%) translate(5px, -7.5px) rotate(0deg)',
     );
   });
 
   it('keeps labels readable on right-to-left edges', () => {
     expect(relationshipLabelTransform(10, 0, 0, 0, 5, 0)).toBe(
-      'translate(-50%, -50%) translate(5px, -6.5px) rotate(0deg)',
+      'translate(-50%, -50%) translate(5px, -7.5px) rotate(0deg)',
     );
   });
 });
@@ -560,5 +561,67 @@ describe('applyFocusOpacity', () => {
       expect(x.style?.background).toBe('red');
       expect(x.style?.opacity).toBe(0.35);
     });
+  });
+});
+
+describe('placeEdgeLabels', () => {
+  const at = (entries: Array<[string, number, number]>) =>
+    new Map(entries.map(([id, x, y]) => [id, { x, y }]));
+
+  it('gives edges between the same two nodes one label naming them all', () => {
+    const placed = placeEdgeLabels(
+      [
+        { source: 'a', target: 'b', type: 'REST' },
+        { source: 'b', target: 'a', type: 'REST' },
+        { source: 'a', target: 'b', type: 'tools' },
+      ],
+      at([
+        ['a', 0, 0],
+        ['b', 400, 0],
+      ]),
+    );
+
+    expect(placed.map((p) => p.label)).toEqual([
+      'REST ×2 · tools',
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('moves a label along its edge to clear one already placed', () => {
+    // Two long edges crossing at their midpoints.
+    const placed = placeEdgeLabels(
+      [
+        { source: 'a', target: 'b', type: 'first' },
+        { source: 'c', target: 'd', type: 'second' },
+      ],
+      at([
+        ['a', 0, 0],
+        ['b', 600, 600],
+        ['c', 600, 0],
+        ['d', 0, 600],
+      ]),
+    );
+
+    expect(placed.every((p) => !p.labelHidden)).toBe(true);
+    expect(placed[0].labelT).not.toBe(placed[1].labelT);
+  });
+
+  it('holds back a label with no clear place rather than overprinting', () => {
+    // Two short edges crossing between nodes that leave no room to move.
+    const placed = placeEdgeLabels(
+      [
+        { source: 'a', target: 'b', type: 'schedules' },
+        { source: 'c', target: 'd', type: 'queries' },
+      ],
+      at([
+        ['a', 0, 0],
+        ['b', 110, 110],
+        ['c', 110, 0],
+        ['d', 0, 110],
+      ]),
+    );
+
+    expect(placed.filter((p) => p.labelHidden)).toHaveLength(1);
   });
 });

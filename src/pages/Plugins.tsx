@@ -382,6 +382,7 @@ export default function Plugins() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'sm',
       cellSx: versionColumnSx,
@@ -403,6 +404,7 @@ export default function Plugins() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Last updated',
       hideBelow: 'xl',
       cellSx: updatedAtColumnSx,
@@ -410,6 +412,7 @@ export default function Plugins() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated by',
       hideBelow: 'lg',
       cellSx: updatedByColumnSx,

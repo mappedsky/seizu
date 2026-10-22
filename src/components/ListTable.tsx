@@ -1,6 +1,9 @@
 import {
+  Fragment,
   isValidElement,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   ReactNode,
   useCallback,
   useEffect,
@@ -62,6 +65,12 @@ export interface ListTableColumn<T> {
    * truncation tooltip, which would otherwise repeat the control's own.
    */
   textual?: boolean;
+  /**
+   * How the column shows on a phone, where each row becomes a list item:
+   * `field` (the default) as a labelled value, `meta` in the item's closing
+   * line of bookkeeping (version, who and when), joined by dots.
+   */
+  stacked?: 'field' | 'meta';
   render: (row: T) => ReactNode;
 }
 
@@ -152,6 +161,25 @@ function isVisibleAt(
   return (
     BREAKPOINT_ORDER.indexOf(breakpoint) >= BREAKPOINT_ORDER.indexOf(hideBelow)
   );
+}
+
+/** The column of row controls (an overflow menu) rather than row data. */
+function isActionColumn<T>(column: ListTableColumn<T>): boolean {
+  return column.textual === false || column.key === 'actions';
+}
+
+/** Whether a cell has something to show, rather than nothing or a dash. */
+function hasValue(content: ReactNode): boolean {
+  if (content === null || content === undefined || content === false) {
+    return false;
+  }
+  const text = getNodeTextContent(content).trim();
+  // An element with no text of its own (a user name resolved by a
+  // component) still renders something; a bare dash is a placeholder.
+  if (typeof content !== 'string' && typeof content !== 'number') {
+    return text !== '—' && text !== '-';
+  }
+  return text !== '' && text !== '—' && text !== '-';
 }
 
 function isPixelWidth(width: ColumnWidth | undefined): boolean {
@@ -351,7 +379,7 @@ export default function ListTable<T>({
     baseWidths: Record<string, number>;
   } | null>(null);
   const resizeListenersRef = useRef<{
-    handleMouseMove: (event: MouseEvent) => void;
+    handleMouseMove: (event: PointerEvent) => void;
     handleMouseUp: () => void;
   } | null>(null);
 
@@ -372,8 +400,9 @@ export default function ListTable<T>({
     () => () => {
       if (resizeListenersRef.current) {
         const { handleMouseMove, handleMouseUp } = resizeListenersRef.current;
-        window.removeEventListener('mousemove', handleMouseMove);
-        window.removeEventListener('mouseup', handleMouseUp);
+        window.removeEventListener('pointermove', handleMouseMove);
+        window.removeEventListener('pointerup', handleMouseUp);
+        window.removeEventListener('pointercancel', handleMouseUp);
         resizeListenersRef.current = null;
       }
       resizeDragRef.current = null;
@@ -382,6 +411,17 @@ export default function ListTable<T>({
   );
 
   const breakpoint = useCurrentBreakpoint();
+  // Asked directly rather than read off `breakpoint`, which falls to `xs`
+  // wherever media queries cannot be evaluated.
+  const theme = useTheme();
+  const stacked = useMediaQuery(theme.breakpoints.down('sm'), { noSsr: true });
+  const actionColumns = columns.filter(isActionColumn);
+  const primaryColumn = columns.find((column) => !isActionColumn(column));
+  const dataColumns = columns.filter(
+    (column) => column !== primaryColumn && !isActionColumn(column),
+  );
+  const detailColumns = dataColumns.filter((c) => c.stacked !== 'meta');
+  const metaColumns = dataColumns.filter((c) => c.stacked === 'meta');
   const emptyRowSpan =
     columns.filter((column) => isVisibleAt(column.hideBelow, breakpoint))
       .length + (selectable ? 1 : 0);
@@ -666,9 +706,32 @@ export default function ListTable<T>({
     return nextWidths;
   };
 
+  // Arrow keys move a column edge by a step; Shift takes a bigger one.
+  const resizeByKey = (
+    column: ListTableColumn<T>,
+    event: ReactKeyboardEvent<HTMLSpanElement>,
+  ) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    if (isResizingDisabled(column)) return;
+    const targetIndex = columns.findIndex(
+      (candidate) => candidate.key === column.key,
+    );
+    if (targetIndex < 0) return;
+    const step = event.shiftKey ? 48 : 16;
+    setColumnWidths(
+      redistributeWidths(
+        snapshotColumnWidths(),
+        targetIndex,
+        event.key === 'ArrowRight' ? step : -step,
+      ),
+    );
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
   const startResize = (
     column: ListTableColumn<T>,
-    event: ReactMouseEvent<HTMLSpanElement>,
+    event: ReactPointerEvent<HTMLSpanElement>,
   ) => {
     if (isResizingDisabled(column)) return;
     if (resizeDragRef.current) return;
@@ -683,7 +746,7 @@ export default function ListTable<T>({
       baseWidths,
     };
 
-    const handleMouseMove = (moveEvent: MouseEvent) => {
+    const handleMouseMove = (moveEvent: PointerEvent) => {
       const drag = resizeDragRef.current;
       if (!drag) return;
       const delta = moveEvent.clientX - drag.startX;
@@ -697,15 +760,19 @@ export default function ListTable<T>({
       resizeListenersRef.current = null;
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('pointermove', handleMouseMove);
+      window.removeEventListener('pointerup', handleMouseUp);
+      window.removeEventListener('pointercancel', handleMouseUp);
     };
 
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'col-resize';
     resizeListenersRef.current = { handleMouseMove, handleMouseUp };
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+    // Pointer events, so a finger or pen drags the edge as a mouse does; a
+    // cancelled gesture ends the drag rather than leaving it stuck.
+    window.addEventListener('pointermove', handleMouseMove);
+    window.addEventListener('pointerup', handleMouseUp);
+    window.addEventListener('pointercancel', handleMouseUp);
     event.preventDefault();
     event.stopPropagation();
   };
@@ -948,168 +1015,346 @@ export default function ListTable<T>({
           )}
         </Stack>
       </Box>
-      <TableContainer sx={{ overflowX: 'auto' }}>
-        <Table
-          sx={{ tableLayout: 'fixed', width: '100%', minWidth: tableMinWidth }}
-        >
-          <TableHead>
-            <TableRow>
-              {selectable && (
-                <TableCell padding="checkbox" sx={selectionColumnSx}>
+      {stacked ? (
+        // On a phone each row is an item rather than a table row: its name
+        // leads, its actions sit beside it, and every other column follows as
+        // a labelled value, so nothing is dropped to make the row fit.
+        <Box component="ul" sx={{ listStyle: 'none', m: 0, p: 0 }}>
+          {filteredRows.length === 0 && (
+            <Box component="li" sx={{ px: 2, py: 1.5 }}>
+              <Typography color="text.secondary">
+                {hasSearch || hasActiveFilters
+                  ? 'No rows match your filters.'
+                  : emptyMessage}
+              </Typography>
+            </Box>
+          )}
+          {visibleRows.map((row) => {
+            const rowKey = getRowKey(row);
+            const fields = detailColumns
+              .map((column) => ({ column, content: column.render(row) }))
+              .filter(({ content }) => hasValue(content));
+            const meta = metaColumns
+              .map((column) => ({ column, content: column.render(row) }))
+              .filter(({ content }) => hasValue(content));
+            return (
+              <Box
+                component="li"
+                key={rowKey}
+                sx={{
+                  alignItems: 'start',
+                  containerType: 'inline-size',
+                  borderBottom: 1,
+                  borderColor: 'divider',
+                  columnGap: 1,
+                  display: 'grid',
+                  gridTemplateColumns: selectable
+                    ? 'auto minmax(0, 1fr) auto'
+                    : 'minmax(0, 1fr) auto',
+                  px: 2,
+                  py: 1.25,
+                  '&:last-of-type': { borderBottom: 0 },
+                  ...(selectable && selectedKeySet.has(rowKey)
+                    ? { bgcolor: 'action.selected' }
+                    : {}),
+                }}
+              >
+                {selectable && (
                   <Checkbox
                     size="small"
-                    checked={allPageSelected}
-                    indeterminate={somePageSelected}
-                    onChange={togglePageSelection}
-                    disabled={pageKeys.length === 0}
-                    slotProps={{
-                      input: {
-                        'aria-label': 'Select all rows on this page',
-                      },
-                    }}
+                    checked={selectedKeySet.has(rowKey)}
+                    onChange={() => toggleRowSelection(row)}
+                    slotProps={{ input: { 'aria-label': 'Select row' } }}
+                    sx={{ ml: -1, mt: -0.5 }}
                   />
-                </TableCell>
-              )}
-              {columns.map((column) => (
-                <TableCell
-                  key={column.key}
-                  align={column.align}
-                  ref={(node) => {
-                    headerCellRefs.current[column.key] =
-                      node as HTMLElement | null;
+                )}
+                <Box
+                  sx={{
+                    alignSelf: 'center',
+                    fontWeight: 600,
+                    minWidth: 0,
+                    overflowWrap: 'anywhere',
+                    // The name column's cell styles assume a table cell.
+                    '& *': { whiteSpace: 'normal' },
                   }}
-                  sx={mergeSx(
-                    hideBelowSx(column.hideBelow),
-                    column.cellSx,
-                    column.headerSx,
-                    getWidthStyle(column),
-                    {
-                      position: 'relative',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      '&:hover .list-table-resize-handle': {
-                        opacity: 1,
-                      },
-                    },
-                  )}
                 >
-                  <Box sx={{ ...listTableHeaderContentSx, pr: 1.5 }}>
-                    <TableCellHoverTooltip content={column.label}>
-                      <Box
-                        component="span"
-                        sx={{ ...listTableCellContentSx, flex: '1 1 auto' }}
-                      >
-                        {column.label}
+                  {primaryColumn?.render(row)}
+                </Box>
+                <Box sx={{ display: 'flex', mr: -1, mt: -0.25 }}>
+                  {actionColumns.map((column) => (
+                    <Box key={column.key}>{column.render(row)}</Box>
+                  ))}
+                </Box>
+                {fields.length > 0 && (
+                  <Box
+                    component="dl"
+                    sx={{
+                      columnGap: 1.5,
+                      display: 'grid',
+                      gridColumn: selectable ? '2 / -1' : '1 / -1',
+                      // A fixed label column, so values line up from one
+                      // item to the next.
+                      gridTemplateColumns: '7.5rem minmax(0, 1fr)',
+                      // When the text is large for the item, as with browser
+                      // text zoom, each label sits above its value instead.
+                      '@container (max-width: 18rem)': {
+                        gridTemplateColumns: 'minmax(0, 1fr)',
+                        rowGap: 0,
+                        '& dd': { mb: 0.75 },
+                      },
+                      m: 0,
+                      mt: 0.75,
+                      rowGap: 0.5,
+                    }}
+                  >
+                    {fields.map(({ column, content }) => (
+                      <Fragment key={column.key}>
+                        <Typography
+                          component="dt"
+                          color="text.secondary"
+                          variant="body2"
+                        >
+                          {column.label}
+                        </Typography>
+                        <Typography
+                          component="dd"
+                          variant="body2"
+                          sx={{
+                            m: 0,
+                            minWidth: 0,
+                            overflowWrap: 'anywhere',
+                            '& *': { whiteSpace: 'normal' },
+                          }}
+                        >
+                          {content}
+                        </Typography>
+                      </Fragment>
+                    ))}
+                  </Box>
+                )}
+                {meta.length > 0 && (
+                  <Typography
+                    color="text.secondary"
+                    variant="caption"
+                    sx={{
+                      display: 'block',
+                      gridColumn: selectable ? '2 / -1' : '1 / -1',
+                      mt: 0.75,
+                      '& > *': { display: 'inline' },
+                      '& > * + *::before': { content: '" · "' },
+                    }}
+                  >
+                    {meta.map(({ column, content }) => (
+                      <Box component="span" key={column.key}>
+                        {/* A bare number (a version) needs its label to mean
+                            anything outside its column. */}
+                        {/^\d+$/.test(getNodeTextContent(content).trim()) &&
+                        typeof column.label === 'string'
+                          ? `${column.label} `
+                          : null}
+                        {content}
                       </Box>
-                    </TableCellHoverTooltip>
-                    {!isResizingDisabled(column) && (
-                      <Box
-                        component="span"
-                        onMouseDown={(event) => startResize(column, event)}
-                        className="list-table-resize-handle"
-                        sx={{
-                          position: 'absolute',
-                          top: 0,
-                          right: 0,
-                          bottom: 0,
-                          width: 6,
-                          cursor: 'col-resize',
-                          opacity: 0,
-                          transition: 'opacity 120ms ease',
-                          '&::after': {
-                            content: '""',
-                            position: 'absolute',
-                            top: 0,
-                            bottom: 0,
-                            left: '50%',
-                            width: 1,
-                            transform: 'translateX(-50%)',
-                            bgcolor: 'divider',
-                          },
-                          '&:hover::after': {
-                            bgcolor: 'primary.main',
-                          },
-                          '&:hover': {
-                            opacity: 1,
-                          },
-                        }}
-                      />
-                    )}
-                  </Box>
-                </TableCell>
-              ))}
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {filteredRows.length === 0 && (
+                    ))}
+                  </Typography>
+                )}
+              </Box>
+            );
+          })}
+        </Box>
+      ) : (
+        <TableContainer sx={{ overflowX: 'auto' }}>
+          <Table
+            sx={{
+              tableLayout: 'fixed',
+              width: '100%',
+              minWidth: tableMinWidth,
+            }}
+          >
+            <TableHead>
               <TableRow>
-                {/* Only the columns shown at this width: spanning hidden
-                    ones leaves phantom columns that take width from the
-                    visible headers. */}
-                <TableCell colSpan={emptyRowSpan}>
-                  <Box component="div" sx={listTableCellContentSx}>
-                    <Typography color="text.secondary" sx={{ py: 1 }}>
-                      {hasSearch || hasActiveFilters
-                        ? 'No rows match your filters.'
-                        : emptyMessage}
-                    </Typography>
-                  </Box>
-                </TableCell>
-              </TableRow>
-            )}
-            {visibleRows.map((row) => (
-              <TableRow
-                key={getRowKey(row)}
-                hover
-                selected={selectable && selectedKeySet.has(getRowKey(row))}
-              >
                 {selectable && (
                   <TableCell padding="checkbox" sx={selectionColumnSx}>
                     <Checkbox
                       size="small"
-                      checked={selectedKeySet.has(getRowKey(row))}
-                      onChange={() => toggleRowSelection(row)}
-                      slotProps={{ input: { 'aria-label': 'Select row' } }}
+                      checked={allPageSelected}
+                      indeterminate={somePageSelected}
+                      onChange={togglePageSelection}
+                      disabled={pageKeys.length === 0}
+                      slotProps={{
+                        input: {
+                          'aria-label': 'Select all rows on this page',
+                        },
+                      }}
                     />
                   </TableCell>
                 )}
-                {columns.map((column) => {
-                  const cellContent = column.render(row);
-                  return (
-                    <TableCell
-                      key={column.key}
-                      align={column.align}
-                      sx={mergeSx(
-                        hideBelowSx(column.hideBelow),
-                        column.cellSx,
-                        getWidthStyle(column),
-                        {
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
+                {columns.map((column) => (
+                  <TableCell
+                    key={column.key}
+                    align={column.align}
+                    ref={(node) => {
+                      headerCellRefs.current[column.key] =
+                        node as HTMLElement | null;
+                    }}
+                    sx={mergeSx(
+                      hideBelowSx(column.hideBelow),
+                      column.cellSx,
+                      column.headerSx,
+                      getWidthStyle(column),
+                      {
+                        position: 'relative',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        '&:hover .list-table-resize-handle': {
+                          opacity: 1,
                         },
-                      )}
-                    >
-                      <TableCellHoverTooltip
-                        content={column.textual === false ? null : cellContent}
-                      >
-                        <Box component="div" sx={listTableCellContentSx}>
-                          {cellContent}
+                      },
+                    )}
+                  >
+                    <Box sx={{ ...listTableHeaderContentSx, pr: 1.5 }}>
+                      <TableCellHoverTooltip content={column.label}>
+                        <Box
+                          component="span"
+                          sx={{ ...listTableCellContentSx, flex: '1 1 auto' }}
+                        >
+                          {column.label}
                         </Box>
                       </TableCellHoverTooltip>
-                    </TableCell>
-                  );
-                })}
+                      {!isResizingDisabled(column) && (
+                        <Box
+                          component="span"
+                          onPointerDown={(event) => startResize(column, event)}
+                          onKeyDown={(event) => resizeByKey(column, event)}
+                          role="separator"
+                          aria-orientation="vertical"
+                          aria-label={
+                            typeof column.label === 'string'
+                              ? `Resize ${column.label} column`
+                              : 'Resize column'
+                          }
+                          tabIndex={0}
+                          className="list-table-resize-handle"
+                          sx={{
+                            position: 'absolute',
+                            top: 0,
+                            right: 0,
+                            bottom: 0,
+                            width: 6,
+                            cursor: 'col-resize',
+                            opacity: 0,
+                            transition: 'opacity 120ms ease',
+                            '&::after': {
+                              content: '""',
+                              position: 'absolute',
+                              top: 0,
+                              bottom: 0,
+                              left: '50%',
+                              width: 1,
+                              transform: 'translateX(-50%)',
+                              bgcolor: 'divider',
+                            },
+                            '&:hover::after': {
+                              bgcolor: 'primary.main',
+                            },
+                            touchAction: 'none',
+                            '&:hover, &:focus-visible': {
+                              opacity: 1,
+                              outline: 'none',
+                            },
+                            '&:focus-visible::after': {
+                              bgcolor: 'primary.main',
+                              width: 2,
+                            },
+                          }}
+                        />
+                      )}
+                    </Box>
+                  </TableCell>
+                ))}
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </TableContainer>
+            </TableHead>
+            <TableBody>
+              {filteredRows.length === 0 && (
+                <TableRow>
+                  {/* Only the columns shown at this width: spanning hidden
+                    ones leaves phantom columns that take width from the
+                    visible headers. */}
+                  <TableCell colSpan={emptyRowSpan}>
+                    <Box component="div" sx={listTableCellContentSx}>
+                      <Typography color="text.secondary" sx={{ py: 1 }}>
+                        {hasSearch || hasActiveFilters
+                          ? 'No rows match your filters.'
+                          : emptyMessage}
+                      </Typography>
+                    </Box>
+                  </TableCell>
+                </TableRow>
+              )}
+              {visibleRows.map((row) => (
+                <TableRow
+                  key={getRowKey(row)}
+                  hover
+                  selected={selectable && selectedKeySet.has(getRowKey(row))}
+                >
+                  {selectable && (
+                    <TableCell padding="checkbox" sx={selectionColumnSx}>
+                      <Checkbox
+                        size="small"
+                        checked={selectedKeySet.has(getRowKey(row))}
+                        onChange={() => toggleRowSelection(row)}
+                        slotProps={{ input: { 'aria-label': 'Select row' } }}
+                      />
+                    </TableCell>
+                  )}
+                  {columns.map((column) => {
+                    const cellContent = column.render(row);
+                    return (
+                      <TableCell
+                        key={column.key}
+                        align={column.align}
+                        sx={mergeSx(
+                          hideBelowSx(column.hideBelow),
+                          column.cellSx,
+                          getWidthStyle(column),
+                          {
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          },
+                        )}
+                      >
+                        <TableCellHoverTooltip
+                          content={
+                            column.textual === false ? null : cellContent
+                          }
+                        >
+                          <Box component="div" sx={listTableCellContentSx}>
+                            {cellContent}
+                          </Box>
+                        </TableCellHoverTooltip>
+                      </TableCell>
+                    );
+                  })}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      )}
       {paginationEnabled && filteredRows.length > 0 && (
         <Box sx={{ borderTop: 1, borderColor: 'divider' }}>
           <TablePagination
             component="div"
+            // Wraps rather than running off the edge at narrow widths or
+            // large text sizes.
+            sx={{
+              '& .MuiTablePagination-toolbar': {
+                flexWrap: 'wrap',
+                justifyContent: 'flex-end',
+                rowGap: 0.5,
+              },
+            }}
             count={filteredRows.length}
             page={page}
             rowsPerPage={rowsPerPage}

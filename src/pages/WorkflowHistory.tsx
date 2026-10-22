@@ -98,6 +98,7 @@ function WorkflowHistory() {
   const columns: ListTableColumn<WorkflowVersion>[] = [
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       cellSx: versionColumnSx,
       render: (version) => {
@@ -138,6 +139,7 @@ function WorkflowHistory() {
     },
     {
       key: 'saved',
+      stacked: 'meta',
       label: 'Saved',
       hideBelow: 'sm',
       cellSx: savedColumnSx,
@@ -145,6 +147,7 @@ function WorkflowHistory() {
     },
     {
       key: 'created_by',
+      stacked: 'meta',
       label: 'Created By',
       hideBelow: 'md',
       cellSx: authorColumnSx,

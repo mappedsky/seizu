@@ -437,7 +437,7 @@ function QueryConsoleSchemaPanel({
                           variant="caption"
                           sx={{
                             display: 'block',
-                            color: 'text.disabled',
+                            color: 'text.secondary',
                             whiteSpace: 'normal',
                             overflowWrap: 'anywhere',
                           }}

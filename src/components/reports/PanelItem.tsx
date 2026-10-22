@@ -231,7 +231,16 @@ const PanelItem = memo(
               ? { height: 'auto' }
               : { height: '100%', minHeight: 0, overflow: 'auto' }),
             '& p': { mb: 1 },
-            '& h2, & h3, & h4, & h5, & h6': { mb: 1 },
+            // Prose keeps a readable measure, about 75 characters of Inter,
+            // in a full-width panel; tables and code keep the panel's width.
+            '& p, & ul, & ol, & blockquote, & h3, & h4, & h5, & h6': {
+              maxWidth: '60ch',
+            },
+            // A panel sits under its row's h2, so its own headings start at
+            // h3 and stay below the row title in size.
+            '& h3': { typography: 'h4', mt: 0, mb: 1 },
+            '& h4': { typography: 'h5', mt: 2, mb: 1 },
+            '& h5, & h6': { typography: 'h6', mt: 2, mb: 0.5 },
             '& ul, & ol': { mb: 1 },
             '& hr': { my: 2 },
             '& li:has(> input[type="checkbox"])': {
@@ -244,7 +253,11 @@ const PanelItem = memo(
             },
           }}
         >
-          <MarkdocRenderer source={item.markdown ?? ''} variables={flatVars} />
+          <MarkdocRenderer
+            source={item.markdown ?? ''}
+            topHeadingLevel={3}
+            variables={flatVars}
+          />
         </Box>
       );
     }

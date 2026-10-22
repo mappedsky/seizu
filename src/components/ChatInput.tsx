@@ -22,6 +22,8 @@ interface ChatInputProps {
   /** Optional controls shown on the left of the composer's control row. Keep
    *  the node referentially stable while streaming so this stays memoized. */
   footerControls?: ReactNode;
+  /** Edges the composer in amber while what it sends runs without asking. */
+  warning?: boolean;
 }
 
 // One line to start; the field grows with its text up to this many lines and
@@ -39,6 +41,7 @@ export default memo(function ChatInput({
   onSubmit,
   onStop,
   footerControls,
+  warning = false,
 }: ChatInputProps) {
   const [input, setInput] = useState('');
 
@@ -88,7 +91,7 @@ export default memo(function ChatInput({
       sx={{
         bgcolor: 'background.paper',
         border: 1,
-        borderColor: 'divider',
+        borderColor: warning ? 'warning.main' : 'divider',
         borderRadius: 2,
         flexShrink: 0,
         mt: 1,
@@ -96,7 +99,9 @@ export default memo(function ChatInput({
         pt: 1,
         px: 1.5,
         transition: 'border-color 120ms ease',
-        '&:focus-within': { borderColor: 'primary.main' },
+        '&:focus-within': {
+          borderColor: warning ? 'warning.main' : 'primary.main',
+        },
       }}
     >
       <InputBase

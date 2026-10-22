@@ -19,9 +19,14 @@ import MenuOpenIcon from '@mui/icons-material/MenuOpen';
 import { logout } from 'src/api/authClient';
 import { AuthConfigContext } from 'src/authConfig.context';
 import { useCurrentUser } from 'src/hooks/useCurrentUser';
-import { DASHBOARD_SIDEBAR_WIDTH_VAR } from 'src/components/dashboardLayoutConstants';
+import {
+  DASHBOARD_NAVBAR_HEIGHT,
+  DASHBOARD_SIDEBAR_WIDTH_VAR,
+} from 'src/components/dashboardLayoutConstants';
 import { getUserAvatarSeed, getUserDisplayName } from 'src/utils/userDisplay';
+import { Link as RouterLink } from 'react-router-dom';
 import Hidden from './Hidden';
+import Logo from './Logo';
 import UserAvatar from './UserAvatar';
 
 interface DashboardNavbarProps extends Omit<AppBarProps, 'children'> {
@@ -77,7 +82,28 @@ function DashboardNavbar({
       ]}
       {...rest}
     >
-      <Toolbar>
+      {/* The page reserves DASHBOARD_NAVBAR_HEIGHT at every width; MUI's
+          toolbar is shorter on phones, which left a strip of canvas under it. */}
+      <Toolbar sx={{ minHeight: { xs: DASHBOARD_NAVBAR_HEIGHT } }}>
+        {/* Below lg the sidebar is a drawer, so the bar carries the way to
+            open it and the wordmark, at the start where both are expected. */}
+        <Hidden lgUp>
+          <IconButton
+            aria-label="Open navigation"
+            color="inherit"
+            edge="start"
+            onClick={onMobileNavOpen}
+          >
+            <MenuIcon />
+          </IconButton>
+          <Box
+            component={RouterLink}
+            to="/app/dashboard"
+            sx={{ display: 'flex', ml: 1 }}
+          >
+            <Logo height={28} />
+          </Box>
+        </Hidden>
         {onSidebarToggle && (
           <Hidden>
             <Tooltip
@@ -99,7 +125,11 @@ function DashboardNavbar({
         <Box sx={{ flexGrow: 1 }} />
         {currentUser && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, ml: 1 }}>
-            <Typography variant="body2" color="inherit">
+            <Typography
+              variant="body2"
+              color="inherit"
+              sx={{ display: { xs: 'none', sm: 'block' } }}
+            >
               {userName}
             </Typography>
             <Tooltip title="User menu">
@@ -136,15 +166,6 @@ function DashboardNavbar({
             </Menu>
           </Box>
         )}
-        <Hidden lgUp>
-          <IconButton
-            aria-label="Open navigation"
-            color="inherit"
-            onClick={onMobileNavOpen}
-          >
-            <MenuIcon />
-          </IconButton>
-        </Hidden>
       </Toolbar>
     </AppBar>
   );

@@ -197,7 +197,7 @@ export default function CypherProgress({
           sx={[fillBodySx, { flexDirection: 'column', alignItems: 'center' }]}
         >
           <CardContent>
-            <Typography variant="h4" align="center">
+            <Typography variant="h4" component="p" align="center">
               N/A
             </Typography>
             <Typography variant="body2" align="center">
@@ -239,7 +239,7 @@ export default function CypherProgress({
           sx={[fillBodySx, { flexDirection: 'column', alignItems: 'center' }]}
         >
           <CardContent>
-            <Typography variant="h4" align="center">
+            <Typography variant="h4" component="p" align="center">
               N/A
             </Typography>
             <Typography variant="body2" align="center">
@@ -276,7 +276,9 @@ export default function CypherProgress({
           sx={[fillBodySx, { flexDirection: 'column', alignItems: 'center' }]}
         >
           <CardContent>
-            <Typography variant="h4">N/A</Typography>
+            <Typography variant="h4" component="p">
+              N/A
+            </Typography>
           </CardContent>
         </Grid>
       </Card>
@@ -330,6 +332,19 @@ export default function CypherProgress({
     textColor = hexColor;
   }
 
+  const showLabel = progressSettings?.show_label !== false;
+  // When the label is shown the wheel is a secondary element and stays at
+  // most MAX_WHEEL to avoid dwarfing the text. When the label is hidden the
+  // wheel IS the panel, so it fills the available space.
+  const wheelSize = Math.max(
+    MIN_WHEEL,
+    Math.min(
+      showLabel ? MAX_WHEEL : Number.POSITIVE_INFINITY,
+      bodySize.w - BODY_PADDING,
+      bodySize.h - BODY_PADDING - (showLabel ? TEXT_RESERVE : 0),
+    ),
+  );
+
   return (
     <>
       <Card
@@ -339,7 +354,7 @@ export default function CypherProgress({
           ...panelInfoRevealSx,
         }}
       >
-        <PanelInfoButton onClick={handleClickOpen} />
+        <PanelInfoButton onClick={handleClickOpen} panelName={caption} />
         {caption && (
           <Grid
             container
@@ -367,7 +382,7 @@ export default function CypherProgress({
             overflow: 'hidden',
           }}
         >
-          {progressSettings?.show_label !== false && (
+          {showLabel && (
             <Typography
               component="div"
               variant="h5"
@@ -388,23 +403,20 @@ export default function CypherProgress({
               ...(hexColor ? { color: hexColor } : {}),
             }}
           >
+            {/* The full circle, faintly, so a small share reads as a share
+                of something rather than a stray arc. */}
+            <CircularProgress
+              aria-hidden
+              variant="determinate"
+              value={100}
+              size={wheelSize}
+              sx={{ color: 'action.selected', left: 0, position: 'absolute' }}
+            />
             <CircularProgress
               variant="determinate"
               value={percent}
               color={circleColor}
-              size={(() => {
-                const showLabel = progressSettings?.show_label !== false;
-                const wAvail = bodySize.w - BODY_PADDING;
-                const hAvail =
-                  bodySize.h - BODY_PADDING - (showLabel ? TEXT_RESERVE : 0);
-                const fit = Math.min(wAvail, hAvail);
-                // When the label is shown the wheel is a secondary element
-                // and stays at most 100 px to avoid dwarfing the text. When
-                // the label is hidden the wheel IS the panel, so let it
-                // fill the available space.
-                const cap = showLabel ? MAX_WHEEL : Number.POSITIVE_INFINITY;
-                return Math.max(MIN_WHEEL, Math.min(cap, fit));
-              })()}
+              size={wheelSize}
             />
             <Box
               sx={{

@@ -12,7 +12,7 @@
 //      source content is rendered as escaped text, not executed. Don't enable
 //      `html: true` on the renderer.
 import * as React from 'react';
-import Markdoc, { Tag, nodes } from '@markdoc/markdoc';
+import Markdoc, { Tag, nodes, type Node } from '@markdoc/markdoc';
 import Box from '@mui/material/Box';
 import Link from '@mui/material/Link';
 import Paper from '@mui/material/Paper';
@@ -455,16 +455,39 @@ export interface MarkdocRendererProps {
   source: string;
   variables?: Record<string, string>;
   untrustedUrls?: boolean;
+  /**
+   * The element the document's highest heading renders as, with the rest
+   * shifted to keep their relative depth. Where the page already has headings
+   * above the document, this keeps its outline unbroken whether the author
+   * started at `#` or `##`. Without it, `#` renders as `h2`.
+   */
+  topHeadingLevel?: number;
+}
+
+/** Shifts every heading so the shallowest renders as `h{topLevel}`. */
+function rebaseHeadings(ast: Node, topLevel: number) {
+  const headings = [...ast.walk()].filter((node) => node.type === 'heading');
+  if (headings.length === 0) return;
+  const shallowest = Math.min(
+    ...headings.map((node) => Number(node.attributes.level ?? 1)),
+  );
+  // headingNode adds one to the level it renders.
+  const shift = topLevel - 1 - shallowest;
+  for (const node of headings) {
+    node.attributes.level = Number(node.attributes.level ?? 1) + shift;
+  }
 }
 
 export function MarkdocRenderer({
   source,
   variables,
   untrustedUrls = false,
+  topHeadingLevel,
 }: MarkdocRendererProps) {
   const rendered = React.useMemo(() => {
     const processedSource = preprocessDetailsBlocks(source ?? '');
     const ast = Markdoc.parse(processedSource);
+    if (topHeadingLevel !== undefined) rebaseHeadings(ast, topHeadingLevel);
     const content = Markdoc.transform(ast, {
       variables: variables ?? {},
       nodes: markdocNodes,
@@ -474,7 +497,7 @@ export function MarkdocRenderer({
     return Markdoc.renderers.react(content, React, {
       components: markdocComponents,
     });
-  }, [source, variables, untrustedUrls]);
+  }, [source, variables, untrustedUrls, topHeadingLevel]);
 
   return <>{rendered}</>;
 }

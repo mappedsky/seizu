@@ -56,6 +56,7 @@ import {
 } from 'src/hooks/useModelProfilesApi';
 import {
   type ActionConfirmation,
+  effectiveConfirmationStatus,
   useConfirmationsApi,
 } from 'src/hooks/useConfirmationsApi';
 import { useFeature } from 'src/features.context';
@@ -63,6 +64,8 @@ import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import ChatInput from 'src/components/ChatInput';
 import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
+import ChatConfirmationCard from 'src/components/ChatConfirmationCard';
+import { BypassChip, BypassConfirmDialog } from 'src/components/ChatBypass';
 import ChatElicitationCard from 'src/components/ChatElicitationCard';
 import { reconcileElicitationDetail } from 'src/utils/elicitationDetails';
 import { useChatElicitations } from 'src/hooks/useChatElicitations';
@@ -687,10 +690,13 @@ function DetailRow({ detail }: { detail: SeizuChatDetail }) {
             <DetailPre label="Arguments" value={detail.arguments} />
           ) : null}
           {detail.body ? (
-            <DetailPre
-              label={detail.kind === 'thinking' ? 'Thinking' : 'Output'}
-              value={detail.body}
-            />
+            // The row already says Thinking; a thought needs no second label,
+            // and reads as prose rather than as tool output.
+            detail.kind === 'thinking' ? (
+              <DetailPre prose value={detail.body} />
+            ) : (
+              <DetailPre label="Output" value={detail.body} />
+            )
           ) : null}
         </AccordionDetails>
       ) : null}
@@ -849,12 +855,22 @@ const ChatMessageDetails = memo(
     detailsEqual(previous.details, next.details),
 );
 
-function DetailPre({ label, value }: { label: string; value: string }) {
+function DetailPre({
+  label,
+  value,
+  prose = false,
+}: {
+  label?: string;
+  value: string;
+  prose?: boolean;
+}) {
   return (
-    <Box sx={{ mt: 0.75 }}>
-      <Typography color="text.secondary" variant="caption">
-        {label}
-      </Typography>
+    <Box sx={{ mt: label ? 0.75 : 0.25 }}>
+      {label ? (
+        <Typography color="text.secondary" variant="caption">
+          {label}
+        </Typography>
+      ) : null}
       <Box
         component="pre"
         sx={(theme) => ({
@@ -864,11 +880,11 @@ function DetailPre({ label, value }: { label: string; value: string }) {
             theme.palette.mode === 'dark' ? 0.08 : 0.05,
           ),
           borderRadius: 1,
-          fontFamily: fontFamilyMono,
-          fontSize: '0.75rem',
-          lineHeight: 1.55,
+          fontFamily: prose ? 'inherit' : fontFamilyMono,
+          fontSize: prose ? '0.8125rem' : '0.75rem',
+          lineHeight: prose ? 1.6 : 1.55,
           m: 0,
-          mt: 0.25,
+          mt: label ? 0.25 : 0,
           overflowX: 'auto',
           px: 1,
           py: 0.75,
@@ -1212,6 +1228,9 @@ const ChatTranscript = memo(function ChatTranscript({
   onElicitationAnswered,
   onElicitationResume,
   onLoadMore,
+  confirmations,
+  decidingConfirmationId,
+  onConfirmationDecision,
   scrollRef,
 }: {
   chat: Chat<SeizuChatMessage>;
@@ -1232,6 +1251,13 @@ const ChatTranscript = memo(function ChatTranscript({
   onElicitationAnswered: (item: ChatElicitation) => void;
   onElicitationResume: (item: ChatElicitation) => void;
   onLoadMore: (message: SeizuChatMessage) => void;
+  /** Pending confirmations, shown under the turn that is waiting on them. */
+  confirmations: ActionConfirmation[];
+  decidingConfirmationId: string | null;
+  onConfirmationDecision: (
+    confirmation: ActionConfirmation,
+    decision: 'approved' | 'denied',
+  ) => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const { messages, status } = useChat<SeizuChatMessage>({
@@ -1291,7 +1317,7 @@ const ChatTranscript = memo(function ChatTranscript({
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ block: 'end' });
-  }, [historyPolling, messages, scrollRef]);
+  }, [confirmations.length, historyPolling, messages, scrollRef]);
 
   return (
     <Box
@@ -1358,6 +1384,15 @@ const ChatTranscript = memo(function ChatTranscript({
               }
               onAnswered={() => onElicitationAnswered(item)}
               onResume={() => onElicitationResume(item)}
+            />
+          ))}
+          {confirmations.map((confirmation) => (
+            <ChatConfirmationCard
+              key={confirmation.confirmation_id}
+              confirmation={confirmation}
+              deciding={decidingConfirmationId === confirmation.confirmation_id}
+              inline
+              onDecision={onConfirmationDecision}
             />
           ))}
           {elicitationError && (
@@ -1541,6 +1576,24 @@ export default function ChatInterface() {
   // per-session opt-in for users holding chat:bypass_permissions.
   const [bypassConfirmations, setBypassConfirmations] = useState(false);
   const bypassConfirmationsRef = useRef(false);
+  // Turning bypass on is acknowledged once per visit, in a dialog that says
+  // what it changes; turning it off never asks.
+  const [bypassDialogOpen, setBypassDialogOpen] = useState(false);
+  const bypassAcknowledgedRef = useRef(false);
+  const requestBypassChange = useCallback((value: boolean) => {
+    if (!value || bypassAcknowledgedRef.current) {
+      setBypassConfirmations(value);
+      return;
+    }
+    setBypassDialogOpen(true);
+  }, []);
+  const confirmBypass = useCallback(() => {
+    bypassAcknowledgedRef.current = true;
+    setBypassDialogOpen(false);
+    setBypassConfirmations(true);
+  }, []);
+  const cancelBypass = useCallback(() => setBypassDialogOpen(false), []);
+  const turnOffBypass = useCallback(() => setBypassConfirmations(false), []);
   const [decidingConfirmationId, setDecidingConfirmationId] = useState<
     string | null
   >(null);
@@ -2358,6 +2411,39 @@ export default function ChatInterface() {
     ],
   );
 
+  // While bypass is on the composer says so, beside the model it applies to.
+  const bypassOn = canBypassConfirmations && bypassConfirmations;
+  const bypassChip = useMemo(
+    () => (bypassOn ? <BypassChip onTurnOff={turnOffBypass} /> : null),
+    [bypassOn, turnOffBypass],
+  );
+  const landingComposerControls = useMemo(
+    () => (
+      <>
+        {landingProfileControl}
+        {bypassChip}
+      </>
+    ),
+    [bypassChip, landingProfileControl],
+  );
+  const activeComposerControls = useMemo(
+    () => (
+      <>
+        {activeProfileControl}
+        {bypassChip}
+      </>
+    ),
+    [activeProfileControl, bypassChip],
+  );
+  const pendingConfirmations = useMemo(
+    () =>
+      confirmations.filter(
+        (confirmation) =>
+          effectiveConfirmationStatus(confirmation) === 'pending',
+      ),
+    [confirmations],
+  );
+
   // On the landing as well as in a conversation: it holds the bypass setting,
   // which applies to the first message as much as to any later one.
   const confirmationsPanel = (
@@ -2371,7 +2457,14 @@ export default function ChatInterface() {
       onDecision={handleConfirmationDecisionSync}
       canBypassConfirmations={canBypassConfirmations}
       bypassConfirmations={bypassConfirmations}
-      onBypassConfirmationsChange={setBypassConfirmations}
+      onBypassConfirmationsChange={requestBypassChange}
+    />
+  );
+  const bypassDialog = (
+    <BypassConfirmDialog
+      open={bypassDialogOpen}
+      onCancel={cancelBypass}
+      onConfirm={confirmBypass}
     />
   );
 
@@ -2517,13 +2610,15 @@ export default function ChatInterface() {
               // here to stop.
               busy={false}
               disabled={creatingSession}
-              footerControls={landingProfileControl}
+              footerControls={landingComposerControls}
               onSubmit={(text) => void handleStartSession(text)}
               onStop={() => {}}
+              warning={bypassOn}
             />
           </Box>
         </Box>
         {confirmationsPanel}
+        {bypassDialog}
       </Box>
     );
   }
@@ -2596,6 +2691,9 @@ export default function ChatInterface() {
               onElicitationRespond={elicitations.respond}
               onElicitationResume={resumeElicitation}
               onLoadMore={handleLoadMore}
+              confirmations={pendingConfirmations}
+              decidingConfirmationId={decidingConfirmationId}
+              onConfirmationDecision={handleConfirmationDecisionSync}
               pendingContinuationTargetMessageId={
                 pendingContinuationTargetMessageId
               }
@@ -2695,13 +2793,15 @@ export default function ChatInterface() {
           <ChatInput
             busy={busy}
             disabled={disabled}
-            footerControls={activeProfileControl}
+            footerControls={activeComposerControls}
             onStop={handleStop}
             onSubmit={handleSubmit}
+            warning={bypassOn}
           />
         </Box>
       </Box>
       {confirmationsPanel}
+      {bypassDialog}
     </Box>
   );
 }
