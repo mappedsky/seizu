@@ -1192,6 +1192,13 @@ export default function ListTable<T>({
                   <TableCell
                     key={column.key}
                     align={column.align}
+                    // Named by its label alone: the resize handle inside is a
+                    // focusable widget, and would otherwise join the name.
+                    aria-label={
+                      typeof column.label === 'string'
+                        ? column.label
+                        : undefined
+                    }
                     ref={(node) => {
                       headerCellRefs.current[column.key] =
                         node as HTMLElement | null;
