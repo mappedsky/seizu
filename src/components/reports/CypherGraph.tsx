@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box,
   Card,
@@ -37,10 +37,13 @@ import {
   NodeProps,
   Panel,
   Position,
+  type ReactFlowState,
   getStraightPath,
   useEdgesState,
+  useNodesInitialized,
   useNodesState,
   useReactFlow,
+  useStore,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
@@ -49,16 +52,14 @@ import {
 } from 'src/hooks/useCypherQuery';
 import QueryValidationBadge from 'src/components/reports/QueryValidationBadge';
 import { GraphPanelSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
-import GraphDetailPanel, {
-  GraphSummaryPanel,
-} from 'src/components/reports/GraphDetailPanel';
+import GraphDetailPanel from 'src/components/reports/GraphDetailPanel';
 import { chartPalette } from 'src/theme/brand';
 import {
   nonSeverityPalette,
   severityColor,
   severityOf,
 } from 'src/theme/severity';
-import { fontFamilyMono, fontSizeMin } from 'src/theme/typography';
+import { fontFamilyMono } from 'src/theme/typography';
 
 interface GraphSettings {
   node_label?: string;
@@ -236,8 +237,6 @@ interface CypherGraphProps {
   needInputs?: string[];
   reportQueryToken?: string;
   queryHistoryId?: string;
-  /** Whether the details panel starts open. Default false (collapsed). */
-  defaultDetailOpen?: boolean;
   /** Called after a query completes successfully (results received). */
   onQueryComplete?: (historyId: string | null) => void;
   /** When true, the card fills 100% of its parent height instead of using a fixed 450px canvas. */
@@ -337,12 +336,12 @@ export function computeLayout(
 
   // SPRING_LEN scales linearly with repulsion; the many-body force scales
   // quadratically so that equilibrium pairwise distances scale roughly linearly.
-  const SPRING_LEN = 140 * repulsion;
+  const SPRING_LEN = 110 * repulsion;
   const SPRING_K = 0.06;
   const REPULSION = 3000 * repulsion * repulsion;
-  const MIN_NODE_DISTANCE = 96 * repulsion;
+  const MIN_NODE_DISTANCE = 72 * repulsion;
   const COLLISION_K = 0.18;
-  const EDGE_AVOID_DISTANCE = 54;
+  const EDGE_AVOID_DISTANCE = 40;
   const EDGE_AVOID_K = 0.2;
   const DAMPING = 0.82;
 
@@ -428,8 +427,8 @@ export function computeLayout(
         const repulsionMultiplier = directlyConnected
           ? 1
           : sameComponent
-            ? 2.4
-            : 5.5;
+            ? 1.8
+            : 3;
         const collisionForce =
           d < MIN_NODE_DISTANCE
             ? (MIN_NODE_DISTANCE - d) * COLLISION_K * alpha
@@ -589,6 +588,8 @@ const hiddenHandleStyle: React.CSSProperties = {
 
 function GraphNodeComponent({ data, selected }: NodeProps) {
   const theme = useTheme();
+  const zoom = useStore(zoomSelector);
+  const [hovered, setHovered] = useState(false);
   const palette =
     theme.palette.mode === 'dark' ? chartPalette.dark : chartPalette.light;
   const color = nodeColor(
@@ -597,81 +598,102 @@ function GraphNodeComponent({ data, selected }: NodeProps) {
     theme.palette.mode,
     Boolean(data['severityGraph']),
   );
-  const typeLabel = String(data['group'] ?? data['label'] ?? data['id'] ?? '');
+  const diameter = Number(data['diameter'] ?? DOT_MIN);
+  const name = String(data['label'] ?? data['id'] ?? '');
+  const group = String(data['group'] ?? '');
   const hoverId = graphNodeHoverId(data as unknown as GraphNode);
-  const title = typeLabel ? `${typeLabel}: ${hoverId}` : hoverId;
+  const labelSide = (data['labelSide'] as LabelSide | null) ?? null;
+  // A name that had no room at the overview comes back when there is room
+  // (zoomed in) or when the node is the subject (hovered, focused, selected).
+  const showName =
+    labelSide !== null ||
+    zoom >= LABEL_REVEAL_ZOOM ||
+    hovered ||
+    selected ||
+    Boolean(data['focused']);
+  const side = labelSide ?? 'right';
+  const paper = theme.palette.background.paper;
 
   return (
     <Tooltip
-      title={title}
+      title={
+        <>
+          <Box component="div" sx={{ fontWeight: 600 }}>
+            {name}
+          </Box>
+          <Box component="div">
+            {group}
+            {hoverId !== name ? ` · ${hoverId}` : ''}
+          </Box>
+        </>
+      }
       arrow
       disableInteractive
       enterDelay={NODE_HOVER_ENTER_DELAY_MS}
       enterNextDelay={0}
       placement="top"
     >
-      <div style={{ cursor: 'pointer' }}>
-        {HANDLE_SIDES.map((side) => {
-          const handle = HANDLE_DEFINITIONS[side];
+      <div
+        style={{ cursor: 'pointer', position: 'relative' }}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+        {HANDLE_SIDES.map((handleSide) => {
+          const handle = HANDLE_DEFINITIONS[handleSide];
           return (
             <Handle
-              key={`target-${side}`}
-              id={`target-${side}`}
+              key={`target-${handleSide}`}
+              id={`target-${handleSide}`}
               type="target"
               position={handle.position}
               style={{ ...hiddenHandleStyle, ...handle.style }}
             />
           );
         })}
+        {/* The star: its colour is its group, its size how connected it is. */}
         <div
           style={{
-            // Wide enough that a label at the type floor (a severity, a
-            // category) fits on a line rather than breaking mid-word.
-            width: NODE_DIAMETER,
-            height: NODE_DIAMETER,
+            width: diameter,
+            height: diameter,
             borderRadius: '50%',
             background: color,
-            border: `2.5px solid ${selected ? theme.palette.primary.main : theme.palette.background.paper}`,
+            border: `2px solid ${paper}`,
             boxSizing: 'border-box',
             boxShadow: selected
               ? `0 0 0 2px ${theme.palette.primary.main}`
               : 'none',
-            color: theme.palette.getContrastText(color),
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontFamily: theme.typography.fontFamily ?? 'sans-serif',
-            fontSize: fontSizeMin,
-            fontWeight: 600,
-            lineHeight: 1.15,
-            overflow: 'hidden',
-            padding: 6,
-            textTransform: 'none',
           }}
-        >
+        />
+        {showName ? (
           <span
             style={{
-              display: '-webkit-box',
-              WebkitBoxOrient: 'vertical',
-              WebkitLineClamp: 3,
-              maxWidth: '100%',
-              minWidth: 0,
-              overflow: 'hidden',
-              overflowWrap: 'anywhere',
-              textAlign: 'center',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'normal',
+              color: theme.palette.text.primary,
+              fontFamily: theme.typography.fontFamily ?? 'sans-serif',
+              fontSize: NODE_LABEL_FONT_SIZE,
+              fontWeight: selected || hovered ? 600 : 500,
+              lineHeight: 1,
+              pointerEvents: 'none',
+              position: 'absolute',
+              top: '50%',
+              transform: 'translateY(-50%)',
+              whiteSpace: 'nowrap',
+              // A halo of the canvas colour, so the name reads over the
+              // edges that pass behind it.
+              textShadow: `0 0 2px ${paper}, 0 0 3px ${paper}, 0 0 4px ${paper}`,
+              ...(side === 'right'
+                ? { left: diameter + NODE_LABEL_GAP }
+                : { right: diameter + NODE_LABEL_GAP }),
             }}
           >
-            {typeLabel}
+            {shortNodeLabel(name)}
           </span>
-        </div>
-        {HANDLE_SIDES.map((side) => {
-          const handle = HANDLE_DEFINITIONS[side];
+        ) : null}
+        {HANDLE_SIDES.map((handleSide) => {
+          const handle = HANDLE_DEFINITIONS[handleSide];
           return (
             <Handle
-              key={`source-${side}`}
-              id={`source-${side}`}
+              key={`source-${handleSide}`}
+              id={`source-${handleSide}`}
               type="source"
               position={handle.position}
               style={{ ...hiddenHandleStyle, ...handle.style }}
@@ -687,13 +709,147 @@ const nodeTypes = { graphNode: GraphNodeComponent };
 
 const NODE_HOVER_ENTER_DELAY_MS = 150;
 
-const NODE_DIAMETER = 72;
+// ─── Star sizing and names ───────────────────────────────────────────────────
+
+/** A node's dot: the smallest a leaf can be and still be a target. */
+const DOT_MIN = 14;
+/** The largest a hub grows, so it never crowds the names around it. */
+const DOT_MAX = 40;
+const NODE_LABEL_FONT_SIZE = 12;
+const NODE_LABEL_GAP = 6;
+const NODE_LABEL_MAX_CHARS = 22;
+/** Rough advance of one character of a node name, in px. */
+const NODE_LABEL_CHAR_WIDTH = NODE_LABEL_FONT_SIZE * 0.56;
+/** Zoom at which every name shows, whatever had room at the overview. */
+const LABEL_REVEAL_ZOOM = 1.35;
+/** Above this many relationships, their names wait for focus. */
+const EDGE_LABEL_LIMIT = 24;
+/** The closest an automatic fit zooms in. */
+const FIT_MAX_ZOOM = 1.25;
+/** The furthest a fit zooms out to keep every name in frame. */
+const FIT_MIN_ZOOM = 0.8;
+/** How strongly an edge draws at rest; focus brings it to full. */
+const EDGE_REST_OPACITY = 0.5;
+/** Room a relationship label leaves at each end of its edge, past the dots. */
+const EDGE_LABEL_CLEARANCE = 4;
+/** Length of the arrowhead at an edge's target, in px. */
+const EDGE_ARROW_LENGTH = 8;
+/** Most relationships a focused node labels on plates; a hub labels none. */
+const FOCUS_LABEL_LIMIT = 12;
+/**
+ * Stroke patterns that tell relationship types apart, in the order types are
+ * listed (most common first): colour already belongs to the node groups.
+ */
+const RELATIONSHIP_DASHES = [undefined, '6 3', '1.5 3', '8 3 1.5 3', '3 3'];
+
+type LabelSide = 'right' | 'left';
+
+const zoomSelector = (state: ReactFlowState) => state.transform[2];
+
+/** A dot's diameter from its degree: hubs grow, by square root so a hub of
+ *  forty is not ten times a node of four. */
+export function dotDiameter(degree: number): number {
+  return Math.round(Math.min(DOT_MAX, DOT_MIN + 4 * Math.sqrt(degree)));
+}
+
+function shortNodeLabel(name: string): string {
+  return name.length > NODE_LABEL_MAX_CHARS
+    ? `${name.slice(0, NODE_LABEL_MAX_CHARS - 1)}…`
+    : name;
+}
+
+/**
+ * Which side of each dot its name goes on, or null when neither side is clear
+ * at the overview. Names are placed most-connected first, so a hub keeps its
+ * name and a leaf in a crowd gives way; a name may not cover another name or
+ * another dot.
+ */
+export function placeNodeLabels(
+  nodes: Array<{ id: string; label: string; degree: number }>,
+  centres: Map<string, { x: number; y: number }>,
+  diameters: Map<string, number>,
+): Map<string, { side: LabelSide | null; box?: LabelBox }> {
+  const dots: Array<{ id: string; box: LabelBox }> = nodes.flatMap((n) => {
+    const c = centres.get(n.id);
+    const r = (diameters.get(n.id) ?? DOT_MIN) / 2;
+    return c
+      ? [
+          {
+            id: n.id,
+            box: {
+              left: c.x - r,
+              right: c.x + r,
+              top: c.y - r,
+              bottom: c.y + r,
+            },
+          },
+        ]
+      : [];
+  });
+  const placed: LabelBox[] = [];
+  const result = new Map<string, { side: LabelSide | null; box?: LabelBox }>();
+  const order = [...nodes].sort(
+    (a, b) => b.degree - a.degree || a.label.length - b.label.length,
+  );
+  for (const node of order) {
+    const c = centres.get(node.id);
+    if (!c) {
+      result.set(node.id, { side: null });
+      continue;
+    }
+    const r = (diameters.get(node.id) ?? DOT_MIN) / 2;
+    const width = shortNodeLabel(node.label).length * NODE_LABEL_CHAR_WIDTH + 4;
+    const half = NODE_LABEL_FONT_SIZE / 2 + 2;
+    const candidates: Array<[LabelSide, LabelBox]> = [
+      [
+        'right',
+        {
+          left: c.x + r + NODE_LABEL_GAP,
+          right: c.x + r + NODE_LABEL_GAP + width,
+          top: c.y - half,
+          bottom: c.y + half,
+        },
+      ],
+      [
+        'left',
+        {
+          left: c.x - r - NODE_LABEL_GAP - width,
+          right: c.x - r - NODE_LABEL_GAP,
+          top: c.y - half,
+          bottom: c.y + half,
+        },
+      ],
+    ];
+    let chosen: { side: LabelSide | null; box?: LabelBox } = { side: null };
+    for (const [side, box] of candidates) {
+      const clear =
+        placed.every((other) => boxOverlap(box, other) === 0) &&
+        dots.every(
+          (dot) => dot.id === node.id || boxOverlap(box, dot.box) === 0,
+        );
+      if (clear) {
+        chosen = { side, box };
+        placed.push(box);
+        break;
+      }
+    }
+    result.set(node.id, chosen);
+  }
+  return result;
+}
 
 // The type floor (fontSizeMin), in px: the offset below is arithmetic on it.
 const RELATIONSHIP_LABEL_FONT_SIZE = 11;
 const RELATIONSHIP_LABEL_GAP = 2;
 const RELATIONSHIP_LABEL_OFFSET =
   RELATIONSHIP_LABEL_FONT_SIZE / 2 + RELATIONSHIP_LABEL_GAP;
+const PLATE_OFFSET = RELATIONSHIP_LABEL_OFFSET + 8;
+/**
+ * Plates draw above the stars and names they may cross, except those in
+ * focus: a lit star's name outranks any relationship label.
+ */
+const PLATE_Z = 1001;
+const NAME_Z = PLATE_Z + 1;
 
 export function relationshipLabelTransform(
   sourceX: number,
@@ -702,6 +858,7 @@ export function relationshipLabelTransform(
   targetY: number,
   labelX: number,
   labelY: number,
+  offset = RELATIONSHIP_LABEL_OFFSET,
 ): string {
   const rawAngle =
     (Math.atan2(targetY - sourceY, targetX - sourceX) * 180) / Math.PI;
@@ -713,8 +870,8 @@ export function relationshipLabelTransform(
   const dx = targetX - sourceX;
   const dy = targetY - sourceY;
   const distance = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-  let offsetX = (dy / distance) * RELATIONSHIP_LABEL_OFFSET;
-  let offsetY = (-dx / distance) * RELATIONSHIP_LABEL_OFFSET;
+  let offsetX = (dy / distance) * offset;
+  let offsetY = (-dx / distance) * offset;
   if (offsetY > 0) {
     offsetX *= -1;
     offsetY *= -1;
@@ -738,10 +895,14 @@ function RelationshipEdge(
     data,
     selected,
   } = props;
+  const theme = useTheme();
   // A label with no clear place waits for its edge, or a node on it, to be
-  // selected; everything else is dimmed by then, so it reads clearly.
+  // focused; it then sits on a plate, since it may cross a dot or a name.
   const showLabel =
-    Boolean(label) && (!data?.labelHidden || data?.focused || selected);
+    Boolean(label) &&
+    !data?.labelMuted &&
+    (!data?.labelHidden || data?.focused || selected);
+  const plated = Boolean(data?.labelHidden);
   const [edgePath] = getStraightPath({
     sourceX,
     sourceY,
@@ -758,14 +919,23 @@ function RelationshipEdge(
     (labelStyle as React.CSSProperties | undefined)?.fill ??
     style?.stroke ??
     'currentColor';
+  // At rest an edge draws faintly so the stars carry the picture; a focused
+  // edge, or one in a focused neighbourhood, draws at full strength.
+  const rest = data?.focused ? 1 : EDGE_REST_OPACITY;
   const labelOpacity =
-    (labelStyle as React.CSSProperties | undefined)?.opacity ??
-    style?.opacity ??
-    1;
+    Number(
+      (labelStyle as React.CSSProperties | undefined)?.opacity ??
+        style?.opacity ??
+        1,
+    ) * (data?.focused ? 1 : 0.8);
+  const edgeStyle = {
+    ...style,
+    opacity: Number(style?.opacity ?? 1) * rest,
+  };
 
   return (
     <>
-      <BaseEdge path={edgePath} markerEnd={markerEnd} style={style} />
+      <BaseEdge path={edgePath} markerEnd={markerEnd} style={edgeStyle} />
       {showLabel ? (
         <EdgeLabelRenderer>
           <div
@@ -778,17 +948,31 @@ function RelationshipEdge(
                 targetY,
                 labelX,
                 labelY,
+                // A plate stands further off its line, clear of the names
+                // that sit level with their dots.
+                plated ? PLATE_OFFSET : RELATIONSHIP_LABEL_OFFSET,
               ),
               transformOrigin: 'center',
               pointerEvents: 'none',
+              // A plate may cross a dot or a name, so it draws above them.
+              zIndex: plated ? PLATE_Z : undefined,
               color: String(labelColor),
               opacity: Number(labelOpacity),
               fontSize: RELATIONSHIP_LABEL_FONT_SIZE,
-              fontWeight: 500,
+              fontWeight: 400,
+              letterSpacing: '0.01em',
               lineHeight: 1,
               whiteSpace: 'nowrap',
-              textShadow:
-                '0 0 2px var(--xy-edge-label-background-color, transparent)',
+              ...(plated
+                ? {
+                    background: theme.palette.background.paper,
+                    border: `1px solid ${theme.palette.divider}`,
+                    borderRadius: 3,
+                    padding: '2px 4px',
+                  }
+                : {
+                    textShadow: `0 0 3px ${theme.palette.background.paper}, 0 0 3px ${theme.palette.background.paper}`,
+                  }),
             }}
           >
             {label}
@@ -821,26 +1005,93 @@ export function closestEdgeHandles(
   };
 }
 
+/** How many relationships touch each node. */
+function nodeDegrees(graphLinks: GraphLink[]): Map<string, number> {
+  const degrees = new Map<string, number>();
+  for (const l of graphLinks) {
+    for (const end of [l.source, l.target]) {
+      const id = String(typeof end === 'object' ? (end as GraphNode).id : end);
+      degrees.set(id, (degrees.get(id) ?? 0) + 1);
+    }
+  }
+  return degrees;
+}
+
+/** Each node's dot diameter, from its degree. */
+export function nodeDiameters(
+  graphNodes: GraphNode[],
+  graphLinks: GraphLink[],
+): Map<string, number> {
+  const degrees = nodeDegrees(graphLinks);
+  return new Map(
+    graphNodes.map((n) => [
+      String(n.id),
+      dotDiameter(degrees.get(String(n.id)) ?? 0),
+    ]),
+  );
+}
+
+/** Where the names drawn at the overview sit, for edge labels to avoid. */
+export function nodeLabelBoxes(
+  graphNodes: GraphNode[],
+  graphLinks: GraphLink[],
+  centres: Map<string, { x: number; y: number }>,
+  nodeLabelKey: string,
+): LabelBox[] {
+  const degrees = nodeDegrees(graphLinks);
+  const sides = placeNodeLabels(
+    graphNodes.map((n) => ({
+      id: String(n.id),
+      label: String(readGraphValue(n, nodeLabelKey) ?? n.id ?? ''),
+      degree: degrees.get(String(n.id)) ?? 0,
+    })),
+    centres,
+    nodeDiameters(graphNodes, graphLinks),
+  );
+  return [...sides.values()].flatMap((placed) =>
+    placed.box ? [placed.box] : [],
+  );
+}
+
 function buildXyNodes(
   graphNodes: GraphNode[],
-  positions: Map<string, { x: number; y: number }>,
+  graphLinks: GraphLink[],
+  centres: Map<string, { x: number; y: number }>,
   nodeLabelKey: string,
   nodeColorByKey: string,
 ): Node[] {
   const severityGraph = graphNodes.some((n) =>
     severityOf(readGraphValue(n, nodeColorByKey)),
   );
-  return graphNodes.map((n) => {
-    const pos = positions.get(String(n.id)) ?? { x: 0, y: 0 };
-    return {
+  const degrees = nodeDegrees(graphLinks);
+  const diameters = nodeDiameters(graphNodes, graphLinks);
+  const labelOf = (n: GraphNode) =>
+    String(readGraphValue(n, nodeLabelKey) ?? n.id ?? '');
+  const sides = placeNodeLabels(
+    graphNodes.map((n) => ({
       id: String(n.id),
+      label: labelOf(n),
+      degree: degrees.get(String(n.id)) ?? 0,
+    })),
+    centres,
+    diameters,
+  );
+  return graphNodes.map((n) => {
+    const id = String(n.id);
+    const centre = centres.get(id) ?? { x: 0, y: 0 };
+    const diameter = diameters.get(id) ?? DOT_MIN;
+    return {
+      id,
       type: 'graphNode',
-      position: pos,
+      // Layout positions are centres; React Flow places a node by its corner.
+      position: { x: centre.x - diameter / 2, y: centre.y - diameter / 2 },
       data: {
         ...n,
-        label: String(readGraphValue(n, nodeLabelKey) ?? n.id ?? ''),
+        label: labelOf(n),
         group: String(readGraphValue(n, nodeColorByKey) ?? 'default'),
         severityGraph,
+        diameter,
+        labelSide: sides.get(id)?.side ?? null,
         original: n,
       },
     };
@@ -879,7 +1130,9 @@ function boxOverlap(a: LabelBox, b: LabelBox): number {
  */
 export function placeEdgeLabels(
   graphLinks: GraphLink[],
-  positions: Map<string, { x: number; y: number }>,
+  centres: Map<string, { x: number; y: number }>,
+  diameters: Map<string, number> = new Map(),
+  obstacles: LabelBox[] = [],
 ): Array<{ label: string | undefined; labelT: number; labelHidden: boolean }> {
   const endpoints = graphLinks.map((l) => [
     String(
@@ -911,17 +1164,13 @@ export function placeEdgeLabels(
     return [...counts].map(([t, n]) => (n > 1 ? `${t} ×${n}` : t)).join(' · ');
   };
 
-  const radius = NODE_DIAMETER / 2;
-  const centre = (id: string) => {
-    const p = positions.get(id);
-    return p ? { x: p.x + radius, y: p.y + radius } : undefined;
-  };
-  const nodeBoxes: LabelBox[] = [...positions.values()].map((p) => ({
-    left: p.x,
-    right: p.x + NODE_DIAMETER,
-    top: p.y,
-    bottom: p.y + NODE_DIAMETER,
-  }));
+  const centre = (id: string) => centres.get(id);
+  const nodeBoxes: LabelBox[] = [
+    ...[...centres.entries()].map(([id, c]) => {
+      const r = (diameters.get(id) ?? DOT_MIN) / 2;
+      return { left: c.x - r, right: c.x + r, top: c.y - r, bottom: c.y + r };
+    }),
+  ];
 
   const results: Array<{
     label: string | undefined;
@@ -942,7 +1191,8 @@ export function placeEdgeLabels(
     .filter((i) => results[i].label !== undefined)
     .sort((a, b) => lengthOf(a) - lengthOf(b));
 
-  const placed: LabelBox[] = [];
+  // The node names already drawn: a relationship label may not cover one.
+  const placed: LabelBox[] = [...obstacles];
   for (const i of order) {
     const label = results[i].label!;
     const from = centre(endpoints[i][0]);
@@ -960,9 +1210,24 @@ export function placeEdgeLabels(
     const halfW = (width * cos + height * sin) / 2;
     const halfH = (width * sin + height * cos) / 2;
 
-    let best:
-      | { t: number; labels: number; nodes: number; box: LabelBox }
-      | undefined;
+    // A label sits on the stretch of line between the dots, clear of the
+    // arrowhead; a label longer than that stretch waits for focus.
+    const start = (diameters.get(endpoints[i][0]) ?? DOT_MIN) / 2;
+    const end =
+      length -
+      (diameters.get(endpoints[i][1]) ?? DOT_MIN) / 2 -
+      EDGE_ARROW_LENGTH;
+    const fits = (t: number) =>
+      t * length - width / 2 >= start + EDGE_LABEL_CLEARANCE &&
+      t * length + width / 2 <= end - EDGE_LABEL_CLEARANCE;
+
+    // The best position on the clear stretch, and the least crowded one
+    // anywhere: a held-back label takes the latter when focus shows it.
+    type Spot = { t: number; labels: number; nodes: number; box: LabelBox };
+    const better = (a: Spot, b: Spot | undefined) =>
+      !b || a.labels < b.labels || (a.labels === b.labels && a.nodes < b.nodes);
+    let best: Spot | undefined;
+    let fallback: Spot | undefined;
     for (const t of LABEL_POSITIONS) {
       const x = from.x + dx * t;
       const y = from.y + dy * t;
@@ -972,40 +1237,75 @@ export function placeEdgeLabels(
         top: y - halfH,
         bottom: y + halfH,
       };
-      const labels = placed.reduce((sum, o) => sum + boxOverlap(box, o), 0);
-      const nodes = nodeBoxes.reduce((sum, n) => sum + boxOverlap(box, n), 0);
-      if (
-        !best ||
-        labels < best.labels ||
-        (labels === best.labels && nodes < best.nodes)
-      ) {
-        best = { t, labels, nodes, box };
-      }
-      if (labels === 0 && nodes === 0) break;
+      const spot = {
+        t,
+        box,
+        labels: placed.reduce((sum, o) => sum + boxOverlap(box, o), 0),
+        nodes: nodeBoxes.reduce((sum, n) => sum + boxOverlap(box, n), 0),
+      };
+      if (better(spot, fallback)) fallback = spot;
+      if (fits(t) && better(spot, best)) best = spot;
+      if (best && best.labels === 0 && best.nodes === 0) break;
     }
-    if (!best) continue;
-    results[i].labelT = best.t;
-    if (best.labels > 0) {
-      results[i].labelHidden = true;
-    } else {
+    if (best && best.labels === 0) {
+      results[i].labelT = best.t;
       placed.push(best.box);
+    } else {
+      results[i].labelT = (best ?? fallback)?.t ?? 0.5;
+      results[i].labelHidden = true;
     }
   }
   return results;
+}
+
+/**
+ * The relationship types in a graph, most common first (ties by name), with
+ * how many relationships of each there are and the stroke that draws them.
+ */
+export function relationshipTypes(
+  graphLinks: GraphLink[],
+): Array<{ type: string; count: number; dash: string | undefined }> {
+  const counts = new Map<string, number>();
+  for (const l of graphLinks) {
+    if (l.type) counts.set(l.type, (counts.get(l.type) ?? 0) + 1);
+  }
+  const single = counts.size < 2;
+  return [...counts]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([type, count], i) => ({
+      type,
+      count,
+      dash: single
+        ? undefined
+        : RELATIONSHIP_DASHES[i % RELATIONSHIP_DASHES.length],
+    }));
 }
 
 export function buildXyEdges(
   graphLinks: GraphLink[],
   edgeColor: string,
   positions?: Map<string, { x: number; y: number }>,
+  diameters?: Map<string, number>,
+  obstacles?: LabelBox[],
 ): Edge[] {
+  // A dense graph keeps its relationship names for focus; drawn all at once
+  // they are a texture, not information.
+  const quietLabels = graphLinks.length > EDGE_LABEL_LIMIT;
   const labels = positions
-    ? placeEdgeLabels(graphLinks, positions)
+    ? placeEdgeLabels(graphLinks, positions, diameters, obstacles).map(
+        (placed) => ({
+          ...placed,
+          labelHidden: placed.labelHidden || quietLabels,
+        }),
+      )
     : graphLinks.map((l) => ({
         label: l.type ?? undefined,
         labelT: 0.5,
         labelHidden: false,
       }));
+  const dashes = new Map(
+    relationshipTypes(graphLinks).map(({ type, dash }) => [type, dash]),
+  );
   return graphLinks.map((l, i) => {
     const source = String(
       typeof l.source === 'object' ? (l.source as GraphNode).id : l.source,
@@ -1032,10 +1332,18 @@ export function buildXyEdges(
         fontWeight: 500,
         opacity: FULL_OPACITY,
       },
-      style: { stroke: edgeColor, strokeWidth: 1.4, opacity: FULL_OPACITY },
+      style: {
+        stroke: edgeColor,
+        strokeWidth: 1.2,
+        opacity: FULL_OPACITY,
+        ...(l.type && dashes.get(l.type)
+          ? { strokeDasharray: dashes.get(l.type) }
+          : {}),
+      },
       markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor },
       data: {
         original: l,
+        relType: l.type ?? null,
         labelT: labels[i].labelT,
         labelHidden: labels[i].labelHidden,
       },
@@ -1057,11 +1365,13 @@ export function applyFocusOpacity(
     return {
       nodes: nodes.map((n) => ({
         ...n,
+        zIndex: 0,
+        data: { ...n.data, focused: false },
         style: { ...n.style, opacity: FULL_OPACITY, transition },
       })),
       edges: edges.map((e) => ({
         ...e,
-        data: { ...e.data, focused: false },
+        data: { ...e.data, labelMuted: false, focused: false },
         style: {
           ...e.style,
           stroke: edgeColor,
@@ -1085,9 +1395,14 @@ export function applyFocusOpacity(
         neighborNodeIds.add(e.source === focusedId ? e.target : e.source);
       }
     }
+    // A hub's relationships would stack their labels over each other; it
+    // keeps only those already drawn, and the legend names the rest.
+    const quietFocus = connectedEdgeIds.size > FOCUS_LABEL_LIMIT;
     return {
       nodes: nodes.map((n) => ({
         ...n,
+        zIndex: neighborNodeIds.has(n.id) ? NAME_Z : 0,
+        data: { ...n.data, focused: neighborNodeIds.has(n.id) },
         style: {
           ...n.style,
           opacity: neighborNodeIds.has(n.id) ? FULL_OPACITY : DIM_OPACITY,
@@ -1096,7 +1411,11 @@ export function applyFocusOpacity(
       })),
       edges: edges.map((e) => ({
         ...e,
-        data: { ...e.data, focused: connectedEdgeIds.has(e.id) },
+        data: {
+          ...e.data,
+          labelMuted: quietFocus && Boolean(e.data?.['labelHidden']),
+          focused: connectedEdgeIds.has(e.id),
+        },
         style: {
           ...e.style,
           stroke: edgeColor,
@@ -1122,6 +1441,8 @@ export function applyFocusOpacity(
   return {
     nodes: nodes.map((n) => ({
       ...n,
+      zIndex: litNodeIds.has(n.id) ? NAME_Z : 0,
+      data: { ...n.data, focused: litNodeIds.has(n.id) },
       style: {
         ...n.style,
         opacity: litNodeIds.has(n.id) ? FULL_OPACITY : DIM_OPACITY,
@@ -1130,7 +1451,7 @@ export function applyFocusOpacity(
     })),
     edges: edges.map((e) => ({
       ...e,
-      data: { ...e.data, focused: e.id === focusedId },
+      data: { ...e.data, labelMuted: false, focused: e.id === focusedId },
       style: {
         ...e.style,
         stroke: edgeColor,
@@ -1149,6 +1470,334 @@ export function applyFocusOpacity(
   };
 }
 
+/**
+ * Light one group: its nodes and the relationships between them stay at full
+ * strength and show their names; everything else dims. A null group clears.
+ */
+export function applyGroupFocus(
+  nodes: Node[],
+  edges: Edge[],
+  group: string | null,
+  edgeColor: string,
+): { nodes: Node[]; edges: Edge[] } {
+  if (group === null) return applyFocusOpacity(nodes, edges, null, edgeColor);
+  const transition = 'opacity 0.2s';
+  const inGroup = new Set(
+    nodes.filter((n) => n.data?.['group'] === group).map((n) => n.id),
+  );
+  const lit = (e: Edge) => inGroup.has(e.source) && inGroup.has(e.target);
+  return {
+    nodes: nodes.map((n) => ({
+      ...n,
+      zIndex: inGroup.has(n.id) ? NAME_Z : 0,
+      data: { ...n.data, focused: inGroup.has(n.id) },
+      style: {
+        ...n.style,
+        opacity: inGroup.has(n.id) ? FULL_OPACITY : DIM_OPACITY,
+        transition,
+      },
+    })),
+    edges: edges.map((e) => ({
+      ...e,
+      data: { ...e.data, labelMuted: false, focused: lit(e) },
+      style: {
+        ...e.style,
+        stroke: edgeColor,
+        opacity: lit(e) ? FULL_OPACITY : DIM_OPACITY,
+        transition,
+      },
+      labelStyle: {
+        ...e.labelStyle,
+        opacity: lit(e) ? FULL_OPACITY : DIM_OPACITY,
+      },
+    })),
+  };
+}
+
+/**
+ * Light one relationship type: its relationships and the nodes they join stay
+ * at full strength, and the nodes show their names; everything else dims. The
+ * relationships keep their labels quiet, since the legend already names them.
+ */
+export function applyTypeFocus(
+  nodes: Node[],
+  edges: Edge[],
+  type: string | null,
+  edgeColor: string,
+): { nodes: Node[]; edges: Edge[] } {
+  if (type === null) return applyFocusOpacity(nodes, edges, null, edgeColor);
+  const transition = 'opacity 0.2s';
+  const lit = (e: Edge) => e.data?.['relType'] === type;
+  const ends = new Set(edges.filter(lit).flatMap((e) => [e.source, e.target]));
+  return {
+    nodes: nodes.map((n) => ({
+      ...n,
+      zIndex: ends.has(n.id) ? NAME_Z : 0,
+      data: { ...n.data, focused: ends.has(n.id) },
+      style: {
+        ...n.style,
+        opacity: ends.has(n.id) ? FULL_OPACITY : DIM_OPACITY,
+        transition,
+      },
+    })),
+    edges: edges.map((e) => ({
+      ...e,
+      data: { ...e.data, labelMuted: true, focused: lit(e) },
+      style: {
+        ...e.style,
+        stroke: edgeColor,
+        opacity: lit(e) ? FULL_OPACITY : DIM_OPACITY,
+        transition,
+      },
+      labelStyle: {
+        ...e.labelStyle,
+        opacity: lit(e) ? FULL_OPACITY : DIM_OPACITY,
+      },
+    })),
+  };
+}
+
+// ─── Legend ──────────────────────────────────────────────────────────────────
+
+interface LegendGroup {
+  group: string;
+  count: number;
+  color: string;
+}
+
+/** What the legend has lit: a node group or a relationship type. */
+export type LegendFocus = { kind: 'group' | 'type'; value: string };
+
+/** How many entries a legend row lists before folding the rest into a count. */
+const LEGEND_MAX_ENTRIES = 8;
+
+const legendChipSx = {
+  alignItems: 'center',
+  bgcolor: 'transparent',
+  border: 1,
+  borderColor: 'transparent',
+  borderRadius: 999,
+  color: 'text.primary',
+  display: 'inline-flex',
+  font: 'inherit',
+  fontSize: '0.75rem',
+  gap: 0.75,
+  lineHeight: 1,
+  px: 0.875,
+  py: 0.5,
+} as const;
+
+function LegendChip({
+  swatch,
+  name,
+  count,
+  active,
+  onToggle,
+}: {
+  swatch: React.ReactNode;
+  name: string;
+  count: number;
+  active: boolean;
+  /** Absent when the row has one entry: lighting it would light everything. */
+  onToggle?: () => void;
+}) {
+  const content = (
+    <>
+      {swatch}
+      <span>{name}</span>
+      <Box
+        component="span"
+        sx={{ color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}
+      >
+        {count}
+      </Box>
+    </>
+  );
+  if (!onToggle) {
+    return (
+      <Box component="span" sx={legendChipSx}>
+        {content}
+      </Box>
+    );
+  }
+  return (
+    <Box
+      component="button"
+      type="button"
+      aria-pressed={active}
+      onClick={onToggle}
+      sx={{
+        ...legendChipSx,
+        cursor: 'pointer',
+        ...(active && {
+          bgcolor: 'action.selected',
+          borderColor: 'primary.main',
+        }),
+        '&:hover': { bgcolor: active ? 'action.selected' : 'action.hover' },
+        '&:focus-visible': { outline: 2, outlineColor: 'primary.main' },
+      }}
+    >
+      {content}
+    </Box>
+  );
+}
+
+function LegendRow({
+  title,
+  label,
+  children,
+  folded,
+}: {
+  title: string;
+  label: string;
+  children: React.ReactNode;
+  folded: number;
+}) {
+  return (
+    <>
+      <Typography
+        component="p"
+        variant="caption"
+        sx={{ color: 'text.secondary', py: 0.5, whiteSpace: 'nowrap' }}
+      >
+        {title}
+      </Typography>
+      <Box
+        role="group"
+        aria-label={label}
+        sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, minWidth: 0 }}
+      >
+        {children}
+        {folded > 0 ? (
+          <Typography
+            variant="caption"
+            sx={{ alignSelf: 'center', color: 'text.secondary', px: 0.5 }}
+          >
+            +{folded} more
+          </Typography>
+        ) : null}
+      </Box>
+    </>
+  );
+}
+
+/**
+ * The key to the chart, in a strip above it so it never covers a star: one
+ * row for the node groups (colour) and one for the relationship types (stroke),
+ * each entry with its count. An entry is a button that lights it.
+ */
+function GraphLegend({
+  groups,
+  types,
+  nodeCount,
+  linkCount,
+  edgeColor,
+  active,
+  onToggle,
+}: {
+  groups: LegendGroup[];
+  types: Array<{ type: string; count: number; dash: string | undefined }>;
+  nodeCount: number;
+  linkCount: number;
+  edgeColor: string;
+  active: LegendFocus | null;
+  onToggle: (focus: LegendFocus) => void;
+}) {
+  const shownGroups = groups.slice(0, LEGEND_MAX_ENTRIES);
+  const shownTypes = types.slice(0, LEGEND_MAX_ENTRIES);
+  const isActive = (kind: LegendFocus['kind'], value: string) =>
+    active?.kind === kind && active.value === value;
+  return (
+    <Box
+      sx={{
+        alignItems: 'start',
+        borderBottom: 1,
+        borderColor: 'divider',
+        columnGap: 1.5,
+        display: 'grid',
+        flexShrink: 0,
+        gridTemplateColumns: 'auto minmax(0, 1fr)',
+        px: 2,
+        py: 0.5,
+        rowGap: 0.25,
+      }}
+    >
+      <LegendRow
+        title={`${nodeCount} ${nodeCount === 1 ? 'node' : 'nodes'}`}
+        label="Node groups"
+        folded={groups.length - shownGroups.length}
+      >
+        {shownGroups.map(({ group, count, color }) => (
+          <LegendChip
+            key={group}
+            name={group}
+            count={count}
+            active={isActive('group', group)}
+            onToggle={
+              groups.length > 1
+                ? () => onToggle({ kind: 'group', value: group })
+                : undefined
+            }
+            swatch={
+              <Box
+                component="span"
+                aria-hidden
+                sx={{
+                  bgcolor: color,
+                  borderRadius: '50%',
+                  flexShrink: 0,
+                  height: 8,
+                  width: 8,
+                }}
+              />
+            }
+          />
+        ))}
+      </LegendRow>
+      {linkCount > 0 ? (
+        <LegendRow
+          title={`${linkCount} ${linkCount === 1 ? 'relationship' : 'relationships'}`}
+          label="Relationship types"
+          folded={types.length - shownTypes.length}
+        >
+          {shownTypes.map(({ type, count, dash }) => (
+            <LegendChip
+              key={type}
+              name={type}
+              count={count}
+              active={isActive('type', type)}
+              onToggle={
+                types.length > 1
+                  ? () => onToggle({ kind: 'type', value: type })
+                  : undefined
+              }
+              swatch={
+                <Box
+                  component="svg"
+                  aria-hidden
+                  viewBox="0 0 18 8"
+                  sx={{ flexShrink: 0, height: 8, width: 18 }}
+                >
+                  <line
+                    x1="0"
+                    y1="4"
+                    x2="13"
+                    y2="4"
+                    stroke={edgeColor}
+                    strokeWidth="1.5"
+                    strokeDasharray={dash}
+                  />
+                  <path d="M12 1 L18 4 L12 7 Z" fill={edgeColor} />
+                </Box>
+              }
+            />
+          ))}
+        </LegendRow>
+      ) : null}
+    </Box>
+  );
+}
+
 // ─── Auto-fit helper ─────────────────────────────────────────────────────────
 // Rendered inside <ReactFlow> so useReactFlow() is in context.
 
@@ -1156,16 +1805,93 @@ export function applyFocusOpacity(
  * Fits the view with a smooth transition whenever `trigger` changes identity —
  * every layout rebuild — skipping the initial mount.
  */
+/**
+ * Fits the chart to its stars *and* the names beside them, which React Flow's
+ * own fit does not see, so a name at the edge is not cut off. A small graph
+ * stops at FIT_MAX_ZOOM rather than filling the panel with outsized type.
+ */
+function useFitWithNames() {
+  const { getNodes, setViewport } = useReactFlow();
+  const width = useStore((state) => state.width);
+  const height = useStore((state) => state.height);
+  return useCallback(
+    (duration = 0) => {
+      const placed = getNodes();
+      if (placed.length === 0 || width === 0 || height === 0) return;
+      let left = Infinity;
+      let right = -Infinity;
+      let dotsLeft = Infinity;
+      let dotsRight = -Infinity;
+      let top = Infinity;
+      let bottom = -Infinity;
+      for (const node of placed) {
+        const d = Number(node.data?.['diameter'] ?? DOT_MIN);
+        const name = shortNodeLabel(String(node.data?.['label'] ?? ''));
+        const nameWidth = name.length * NODE_LABEL_CHAR_WIDTH;
+        const side = node.data?.['labelSide'] as LabelSide | null;
+        const x = node.position.x;
+        const y = node.position.y;
+        left = Math.min(
+          left,
+          side === 'left' ? x - NODE_LABEL_GAP - nameWidth : x,
+        );
+        right = Math.max(
+          right,
+          side === 'right' ? x + d + NODE_LABEL_GAP + nameWidth : x + d,
+        );
+        dotsLeft = Math.min(dotsLeft, x);
+        dotsRight = Math.max(dotsRight, x + d);
+        top = Math.min(top, y);
+        bottom = Math.max(bottom, y + d);
+      }
+      const margin = 24;
+      // The zoom and spread controls sit over the left edge; the chart is
+      // framed to their right so no star lands under them.
+      const controlsGutter = 48;
+      const usableWidth = width - 2 * margin - controlsGutter;
+      const zoomFor = (w: number, h: number) =>
+        Math.min(
+          FIT_MAX_ZOOM,
+          usableWidth / Math.max(w, 1),
+          (height - 2 * margin) / Math.max(h, 1),
+        );
+      // Fitting every name can shrink a wide graph past reading; below
+      // FIT_MIN_ZOOM, the stars are fitted and an outer name may run off,
+      // to be read by panning or hovering.
+      let zoom = zoomFor(right - left, bottom - top);
+      if (zoom < FIT_MIN_ZOOM) {
+        zoom = Math.max(
+          zoom,
+          Math.min(FIT_MIN_ZOOM, zoomFor(dotsRight - dotsLeft, bottom - top)),
+        );
+        left = dotsLeft;
+        right = dotsRight;
+      }
+      setViewport(
+        {
+          x:
+            controlsGutter +
+            (width - controlsGutter) / 2 -
+            ((left + right) / 2) * zoom,
+          y: height / 2 - ((top + bottom) / 2) * zoom,
+          zoom,
+        },
+        { duration },
+      );
+    },
+    [getNodes, setViewport, width, height],
+  );
+}
+
 function AutoFitEffect({ trigger }: { trigger: unknown }) {
-  const { fitView } = useReactFlow();
-  const isFirstRun = useRef(true);
+  const fit = useFitWithNames();
+  const initialized = useNodesInitialized();
   useEffect(() => {
-    if (isFirstRun.current) {
-      isFirstRun.current = false;
-      return;
-    }
-    fitView({ padding: 0.2, duration: 200 });
-  }, [trigger, fitView]);
+    if (!initialized) return undefined;
+    // After the frame that places the rebuilt nodes.
+    const id = requestAnimationFrame(() => fit(200));
+    return () => cancelAnimationFrame(id);
+  }, [trigger, fit, initialized]);
   return null;
 }
 
@@ -1228,7 +1954,8 @@ interface GraphControlsProps {
 }
 
 function GraphControls({ repulsion, onRepulsionChange }: GraphControlsProps) {
-  const { zoomIn, zoomOut, fitView } = useReactFlow();
+  const { zoomIn, zoomOut } = useReactFlow();
+  const fit = useFitWithNames();
 
   return (
     <Panel position="bottom-left">
@@ -1248,7 +1975,7 @@ function GraphControls({ repulsion, onRepulsionChange }: GraphControlsProps) {
         <CtrlBtn title="Zoom out" onClick={() => zoomOut()}>
           <Remove style={{ width: ICON_SIZE, height: ICON_SIZE }} />
         </CtrlBtn>
-        <CtrlBtn title="Fit view" onClick={() => fitView({ padding: 0.2 })}>
+        <CtrlBtn title="Fit view" onClick={() => fit(200)}>
           <Adjust style={{ width: ICON_SIZE, height: ICON_SIZE }} />
         </CtrlBtn>
         <Box sx={{ height: '2px', bgcolor: 'divider' }} />
@@ -1291,7 +2018,6 @@ function CypherGraph({
   needInputs,
   reportQueryToken,
   queryHistoryId,
-  defaultDetailOpen = false,
   onQueryComplete,
   fillHeight = false,
   refreshKey,
@@ -1358,10 +2084,11 @@ function CypherGraph({
       tab,
     }));
 
-  // Below `md` the detail panel would leave the graph a sliver, so it starts
-  // closed there and opens over the canvas rather than beside it.
+  // Below `md` the detail panel would leave the graph a sliver, so it opens
+  // below the canvas rather than beside it. It starts closed and opens on a
+  // selection.
   const narrow = useMediaQuery(theme.breakpoints.down('md'), { noSsr: true });
-  const [detailOpen, setDetailOpen] = useState(defaultDetailOpen && !narrow);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [repulsion, setRepulsion] = useState(1);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -1448,9 +2175,28 @@ function CypherGraph({
       repulsion,
     );
     setNodes(
-      buildXyNodes(graphData.nodes, positions, nodeLabelKey, nodeColorByKey),
+      buildXyNodes(
+        graphData.nodes,
+        graphData.links,
+        positions,
+        nodeLabelKey,
+        nodeColorByKey,
+      ),
     );
-    setEdges(buildXyEdges(graphData.links, edgeColor, positions));
+    setEdges(
+      buildXyEdges(
+        graphData.links,
+        edgeColor,
+        positions,
+        nodeDiameters(graphData.nodes, graphData.links),
+        nodeLabelBoxes(
+          graphData.nodes,
+          graphData.links,
+          positions,
+          nodeLabelKey,
+        ),
+      ),
+    );
   }, [
     graphData,
     nodeLabelKey,
@@ -1461,7 +2207,67 @@ function CypherGraph({
     repulsion,
   ]);
 
+  // The group or relationship type lit from the legend, for the query it
+  // was lit on.
+  const [legendFocus, setLegendFocus] = useState<{
+    query: string;
+    focus: LegendFocus;
+  } | null>(null);
+  const activeFocus =
+    legendFocus && legendFocus.query === querySignature
+      ? legendFocus.focus
+      : null;
+  const legendTypes = useMemo(
+    () => (graphData ? relationshipTypes(graphData.links) : []),
+    [graphData],
+  );
+  const legendGroups = useMemo<LegendGroup[]>(() => {
+    if (!graphData) return [];
+    const palette =
+      theme.palette.mode === 'dark' ? chartPalette.dark : chartPalette.light;
+    const counts = new Map<string, number>();
+    for (const n of graphData.nodes) {
+      const group = String(readGraphValue(n, nodeColorByKey) ?? 'default');
+      counts.set(group, (counts.get(group) ?? 0) + 1);
+    }
+    return [...counts]
+      .sort((a, b) => b[1] - a[1])
+      .map(([group, count]) => ({
+        group,
+        count,
+        color: nodeColor(group, palette, theme.palette.mode, severityGraph),
+      }));
+  }, [graphData, nodeColorByKey, severityGraph, theme.palette.mode]);
+
+  const handleToggleLegend = (focus: LegendFocus) => {
+    const same =
+      activeFocus?.kind === focus.kind && activeFocus.value === focus.value;
+    setLegendFocus(same ? null : { query: querySignature, focus });
+    setSelectedItem(null);
+    const apply = focus.kind === 'group' ? applyGroupFocus : applyTypeFocus;
+    const updated = apply(nodes, edges, same ? null : focus.value, edgeColor);
+    setNodes(updated.nodes);
+    setEdges(updated.edges);
+  };
+
+  // Hovering a star previews its neighbourhood, unless a selection or a lit
+  // legend entry already holds the view.
+  const previewing = selectedItem === null && activeFocus === null;
+  const handleNodeMouseEnter = (_: React.MouseEvent, node: Node) => {
+    if (!previewing) return;
+    const updated = applyFocusOpacity(nodes, edges, node.id, edgeColor);
+    setNodes(updated.nodes);
+    setEdges(updated.edges);
+  };
+  const handleNodeMouseLeave = () => {
+    if (!previewing) return;
+    const updated = applyFocusOpacity(nodes, edges, null, edgeColor);
+    setNodes(updated.nodes);
+    setEdges(updated.edges);
+  };
+
   const handleNodeClick = (_: React.MouseEvent, node: Node) => {
+    setLegendFocus(null);
     const original =
       (node.data?.['original'] as GraphNode) ??
       (node.data as unknown as GraphNode);
@@ -1473,6 +2279,7 @@ function CypherGraph({
   };
 
   const handleEdgeClick = (_: React.MouseEvent, edge: Edge) => {
+    setLegendFocus(null);
     const original = (edge.data?.['original'] as GraphLink) ?? {
       source: edge.source,
       target: edge.target,
@@ -1485,6 +2292,7 @@ function CypherGraph({
   };
 
   const handlePaneClick = () => {
+    setLegendFocus(null);
     setSelectedItem(null);
     const updated = applyFocusOpacity(nodes, edges, null, edgeColor);
     setNodes(updated.nodes);
@@ -1774,6 +2582,17 @@ function CypherGraph({
 
         {/* ── Graph tab ─────────────────────────────────────────────── */}
         {activeTab === 'graph' && graphData && (
+          <GraphLegend
+            groups={legendGroups}
+            types={legendTypes}
+            nodeCount={graphData.nodes.length}
+            linkCount={graphData.links.length}
+            edgeColor={edgeColor}
+            active={activeFocus}
+            onToggle={handleToggleLegend}
+          />
+        )}
+        {activeTab === 'graph' && graphData && (
           <Box
             sx={{
               display: 'flex',
@@ -1798,13 +2617,13 @@ function CypherGraph({
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onNodeClick={handleNodeClick}
+                onNodeMouseEnter={handleNodeMouseEnter}
+                onNodeMouseLeave={handleNodeMouseLeave}
                 onEdgeClick={handleEdgeClick}
                 onPaneClick={handlePaneClick}
                 nodeTypes={nodeTypes}
                 edgeTypes={edgeTypes}
                 proOptions={{ hideAttribution: true }}
-                fitView
-                fitViewOptions={{ padding: 0.2 }}
                 minZoom={0.1}
                 maxZoom={4}
                 style={{ background: theme.palette.background.paper }}
@@ -1864,7 +2683,7 @@ function CypherGraph({
               </Tooltip>
             </Box>
 
-            {/* Detail panel — summary when nothing selected, item details when selected */}
+            {/* Detail panel — the selected item's properties */}
             {detailOpen && (
               <Box
                 sx={{
@@ -1883,21 +2702,9 @@ function CypherGraph({
                     data={selectedItem.data}
                   />
                 ) : (
-                  <GraphSummaryPanel
-                    nodes={graphData.nodes}
-                    links={graphData.links}
-                    nodeGroupKey={nodeColorByKey}
-                    getColor={(g) =>
-                      nodeColor(
-                        g,
-                        theme.palette.mode === 'dark'
-                          ? chartPalette.dark
-                          : chartPalette.light,
-                        theme.palette.mode,
-                        severityGraph,
-                      )
-                    }
-                  />
+                  <Typography variant="body2" color="text.secondary">
+                    Select a node or relationship to see its properties.
+                  </Typography>
                 )}
               </Box>
             )}

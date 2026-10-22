@@ -240,13 +240,12 @@ export default function QueryConsole() {
           overflow: 'hidden',
         }}
       >
-        {/* Graph panel — detail panel open by default in the console */}
+        {/* Graph panel */}
         <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
           {submittedQuery || submittedHistoryId ? (
             <CypherGraph
               cypher={submittedHistoryId ? undefined : submittedQuery}
               queryHistoryId={submittedHistoryId}
-              defaultDetailOpen
               fillHeight
               refreshKey={runKey}
               onQueryComplete={handleQueryComplete}
