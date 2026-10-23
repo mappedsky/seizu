@@ -1,31 +1,22 @@
 import { useEffect, useState } from 'react';
 import PageTitle from 'src/components/PageTitle';
 import { useNavigate, useParams } from 'react-router-dom';
-import {
-  Accordion,
-  AccordionDetails,
-  AccordionSummary,
-  Alert,
-  Box,
-  Button,
-  Card,
-  CardContent,
-  Chip,
-  Stack,
-  Typography,
-} from '@mui/material';
+import { Alert, Box, Button, Stack, Typography } from '@mui/material';
 import AccountTreeIcon from '@mui/icons-material/AccountTree';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import EditIcon from '@mui/icons-material/Edit';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExtensionIcon from '@mui/icons-material/Extension';
 import HistoryIcon from '@mui/icons-material/History';
 import ManageSearchIcon from '@mui/icons-material/ManageSearch';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
-import ListPageHeader from 'src/components/ListPageHeader';
+import ListViewState from 'src/components/ListViewState';
 import TemporalRunList from 'src/components/TemporalRunList';
 import UserDisplay from 'src/components/UserDisplay';
 import WorkflowDialog from 'src/components/WorkflowDialog';
+import WorkflowStageLanes, {
+  LaneTile,
+  StatusMark,
+} from 'src/components/WorkflowStageLanes';
 import {
   ActionConfigFieldDef,
   SeizuConfig,
@@ -45,7 +36,6 @@ import {
 } from 'src/hooks/useWorkflowsApi';
 import type { BackState } from 'src/navigation';
 import { describeSchedule } from 'src/scheduleSpec';
-import { temporalStatusColor, temporalStatusLabel } from 'src/temporalStatus';
 import { pageContentSx } from 'src/theme/layout';
 import { fontFamilyMono } from 'src/theme/typography';
 
@@ -57,7 +47,7 @@ function triggerLabel(workflow: WorkflowItem): string {
     : 'Manual only';
 }
 
-function DetailItem({
+function Fact({
   label,
   children,
 }: {
@@ -65,11 +55,11 @@ function DetailItem({
   children: React.ReactNode;
 }) {
   return (
-    <Box sx={{ minWidth: 140 }}>
-      <Typography variant="caption" color="text.secondary">
+    <Box sx={{ py: 1.25 }}>
+      <Typography component="dt" variant="caption" color="text.secondary">
         {label}
       </Typography>
-      <Typography component="div" variant="body2" sx={{ mt: 0.25 }}>
+      <Typography component="dd" variant="body2" sx={{ m: 0, mt: 0.25 }}>
         {children}
       </Typography>
     </Box>
@@ -81,149 +71,169 @@ function parameterValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function ActivityRow({ activity }: { activity: WorkflowActivity }) {
-  const ActivityIcon =
-    activity.type === 'query'
-      ? ManageSearchIcon
-      : activity.type === 'workflow'
-        ? AccountTreeIcon
-        : ExtensionIcon;
-  const parameters = Object.entries(activity.parameters);
+function ActivityIcon({ type, selected }: { type: string; selected: boolean }) {
+  const color = selected ? 'primary' : 'action';
+  if (type === 'query')
+    return <ManageSearchIcon fontSize="small" color={color} />;
+  if (type === 'workflow')
+    return <AccountTreeIcon fontSize="small" color={color} />;
+  return <ExtensionIcon fontSize="small" color={color} />;
+}
+
+function ActivityTile({
+  activity,
+  selected,
+  onSelect,
+}: {
+  activity: WorkflowActivity;
+  selected: boolean;
+  onSelect: () => void;
+}) {
   return (
-    <Accordion
-      disableGutters
-      elevation={0}
-      square
-      slotProps={{ transition: { timeout: 0, unmountOnExit: true } }}
-      sx={{
-        border: 1,
-        borderColor: 'divider',
-        borderRadius: 1,
-        '&:before': { display: 'none' },
-      }}
-    >
-      <AccordionSummary
-        expandIcon={<ExpandMoreIcon fontSize="small" />}
-        sx={{
-          minHeight: 42,
-          px: 1.25,
-          '& .MuiAccordionSummary-content': {
-            alignItems: 'center',
-            gap: 1,
-            my: 0.75,
-          },
-        }}
+    <LaneTile selected={selected} onClick={onSelect}>
+      <Box sx={{ alignItems: 'center', display: 'flex', gap: 1 }}>
+        <ActivityIcon type={activity.type} selected={selected} />
+        <Typography
+          variant="body2"
+          sx={{ fontWeight: 600, wordBreak: 'break-word' }}
+        >
+          {activity.type}
+        </Typography>
+      </Box>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ fontFamily: fontFamilyMono, wordBreak: 'break-word' }}
       >
-        <ActivityIcon fontSize="small" color="action" />
-        <Box sx={{ minWidth: 0 }}>
-          <Typography variant="body2" sx={{ fontWeight: 600 }}>
-            {activity.type}
-          </Typography>
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{ fontFamily: fontFamilyMono, wordBreak: 'break-word' }}
-          >
-            {activity.input ?? 'No input'} → {activity.output}
-          </Typography>
-        </Box>
-        <Chip
-          label={`Output: ${activity.output}`}
-          size="small"
-          variant="outlined"
-          sx={{ ml: 'auto', mr: 1, maxWidth: 260 }}
-        />
-      </AccordionSummary>
-      <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
-        <Box sx={{ display: 'flex', gap: 3, mb: parameters.length ? 1.5 : 0 }}>
-          <DetailItem label="Input">{activity.input ?? 'None'}</DetailItem>
-          <DetailItem label="Named output">{activity.output}</DetailItem>
-        </Box>
-        {parameters.length === 0 ? (
-          <Typography variant="body2" color="text.secondary">
-            No parameters.
-          </Typography>
-        ) : (
-          <Stack spacing={1}>
-            {parameters.map(([name, value]) => (
-              <Box key={name}>
-                <Typography variant="caption" color="text.secondary">
-                  {name}
-                </Typography>
-                <Box
-                  component="pre"
-                  sx={{
-                    bgcolor: 'action.hover',
-                    borderRadius: 1,
-                    fontFamily: fontFamilyMono,
-                    fontSize: 12,
-                    m: 0,
-                    maxHeight: name === 'cypher' ? 260 : 180,
-                    overflow: 'auto',
-                    p: 1,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                  }}
-                >
-                  {parameterValue(value)}
-                </Box>
-              </Box>
-            ))}
-          </Stack>
-        )}
-      </AccordionDetails>
-    </Accordion>
+        {activity.input ?? 'No input'} → {activity.output}
+      </Typography>
+    </LaneTile>
   );
 }
 
-function WorkflowStages({ workflow }: { workflow: WorkflowItem }) {
+function ActivityParameters({ activity }: { activity: WorkflowActivity }) {
+  const parameters = Object.entries(activity.parameters);
   return (
-    <Box>
-      {workflow.stages.map((stage, stageIndex) => (
-        <Box key={`stage-${stageIndex + 1}`}>
-          <Card variant="outlined">
-            <CardContent>
+    <Box
+      sx={{ border: 1, borderColor: 'divider', borderRadius: 1, mt: 2, p: 2 }}
+    >
+      <Box
+        sx={{
+          alignItems: 'baseline',
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 1.5,
+          mb: 1.5,
+        }}
+      >
+        <Typography component="h3" variant="h5">
+          {activity.type}
+        </Typography>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ fontFamily: fontFamilyMono }}
+        >
+          {activity.input ? `reads ${activity.input} · ` : ''}writes{' '}
+          {activity.output}
+        </Typography>
+      </Box>
+      {parameters.length === 0 ? (
+        <Typography variant="body2" color="text.secondary">
+          No parameters.
+        </Typography>
+      ) : (
+        <Stack spacing={1.25}>
+          {parameters.map(([name, value]) => (
+            <Box key={name}>
+              <Typography variant="caption" color="text.secondary">
+                {name}
+              </Typography>
               <Box
+                component="pre"
                 sx={{
-                  alignItems: 'center',
-                  display: 'flex',
-                  gap: 1,
-                  mb: 1.5,
+                  bgcolor: 'action.hover',
+                  borderRadius: 1,
+                  fontFamily: fontFamilyMono,
+                  fontSize: 12,
+                  m: 0,
+                  maxHeight: name === 'cypher' ? 320 : 180,
+                  overflow: 'auto',
+                  p: 1.25,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
                 }}
               >
-                <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-                  Stage {stageIndex + 1}
-                </Typography>
-                <Chip
-                  label={
-                    stage.activities.length === 1
-                      ? '1 activity'
-                      : `${stage.activities.length} parallel activities`
-                  }
-                  size="small"
-                  variant="outlined"
-                />
+                {parameterValue(value)}
               </Box>
-              <Stack spacing={0.75}>
-                {stage.activities.map((activity) => (
-                  <ActivityRow key={activity.output} activity={activity} />
-                ))}
-              </Stack>
-            </CardContent>
-          </Card>
-          {stageIndex < workflow.stages.length - 1 && (
-            <Box
-              aria-hidden="true"
-              sx={{
-                bgcolor: 'divider',
-                height: 20,
-                mx: 'auto',
-                width: 2,
-              }}
+            </Box>
+          ))}
+        </Stack>
+      )}
+    </Box>
+  );
+}
+
+function WorkflowPipeline({ workflow }: { workflow: WorkflowItem }) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const selectedActivity = workflow.stages
+    .flatMap((stage) => stage.activities)
+    .find((activity) => activity.output === selected);
+  return (
+    <>
+      <WorkflowStageLanes
+        label="Workflow stages"
+        lanes={workflow.stages.map((stage, stageIndex) => ({
+          key: `stage-${stageIndex + 1}`,
+          title: `Stage ${stageIndex + 1}`,
+          meta:
+            stage.activities.length > 1
+              ? `${stage.activities.length} in parallel`
+              : undefined,
+          children: stage.activities.map((activity) => (
+            <ActivityTile
+              key={activity.output}
+              activity={activity}
+              selected={activity.output === selected}
+              onSelect={() =>
+                setSelected((current) =>
+                  current === activity.output ? null : activity.output,
+                )
+              }
             />
-          )}
-        </Box>
-      ))}
+          )),
+        }))}
+      />
+      {selectedActivity && <ActivityParameters activity={selectedActivity} />}
+    </>
+  );
+}
+
+function SectionHeading({
+  title,
+  meta,
+}: {
+  title: string;
+  meta?: React.ReactNode;
+}) {
+  return (
+    <Box
+      sx={{
+        alignItems: 'baseline',
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 1.5,
+        mb: 2,
+      }}
+    >
+      <Typography component="h2" variant="h4">
+        {title}
+      </Typography>
+      {meta && (
+        <Typography variant="body2" color="text.secondary">
+          {meta}
+        </Typography>
+      )}
     </Box>
   );
 }
@@ -271,7 +281,7 @@ export default function WorkflowView() {
   if (loading)
     return (
       <Box sx={pageContentSx}>
-        <Typography>Loading workflow…</Typography>
+        <ListViewState loading>{null}</ListViewState>
       </Box>
     );
   if (error || !workflow)
@@ -304,53 +314,92 @@ export default function WorkflowView() {
       >
         Back to workflows
       </Button>
-      <ListPageHeader
-        title={workflow.name}
-        action={
-          <Box sx={{ display: 'flex', gap: 1 }}>
-            <Button
-              startIcon={<HistoryIcon />}
-              onClick={() =>
-                navigate(`/app/workflows/${workflow.workflow_id}/history`, {
-                  state: {
-                    fromLabel: workflow.name,
-                  } satisfies BackState,
-                })
-              }
-            >
-              History
-            </Button>
-            <Button
-              startIcon={<EditIcon />}
-              disabled={!canMutate}
-              onClick={() => setEditOpen(true)}
-            >
-              Edit
-            </Button>
-            <Button
-              variant="contained"
-              startIcon={<PlayArrowIcon />}
-              disabled={!canMutate}
-              onClick={async () => {
-                setOperationError(null);
-                try {
-                  await runWorkflow(workflow.workflow_id);
-                  refresh();
-                  refreshRuns();
-                } catch (reason) {
-                  setOperationError(
-                    reason instanceof Error
-                      ? reason.message
-                      : 'Failed to run workflow.',
-                  );
-                }
-              }}
-            >
-              Run now
-            </Button>
+      <Box
+        sx={{
+          alignItems: 'flex-start',
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 2,
+          justifyContent: 'space-between',
+          mb: 3,
+        }}
+      >
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="h1">{workflow.name}</Typography>
+          <Box
+            sx={{
+              alignItems: 'center',
+              color: 'text.secondary',
+              display: 'flex',
+              flexWrap: 'wrap',
+              columnGap: 1.5,
+              rowGap: 0.5,
+              mt: 1,
+            }}
+          >
+            <StatusMark status={currentStatus} size="medium" />
+            {/* Disabled changes what the status means, so it stays beside it;
+                trigger and version live in the details column. */}
+            {!workflow.enabled && (
+              <>
+                <Typography variant="body2" aria-hidden="true">
+                  ·
+                </Typography>
+                <Typography variant="body2">Disabled</Typography>
+              </>
+            )}
           </Box>
-        }
-      />
+        </Box>
+        <Box
+          sx={{
+            display: 'flex',
+            flexShrink: 0,
+            gap: 1,
+            '& .MuiButton-root': { whiteSpace: 'nowrap' },
+          }}
+        >
+          <Button
+            startIcon={<HistoryIcon />}
+            onClick={() =>
+              navigate(`/app/workflows/${workflow.workflow_id}/history`, {
+                state: {
+                  fromLabel: workflow.name,
+                } satisfies BackState,
+              })
+            }
+          >
+            History
+          </Button>
+          <Button
+            startIcon={<EditIcon />}
+            disabled={!canMutate}
+            onClick={() => setEditOpen(true)}
+          >
+            Edit
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={<PlayArrowIcon />}
+            disabled={!canMutate}
+            onClick={async () => {
+              setOperationError(null);
+              try {
+                await runWorkflow(workflow.workflow_id);
+                refresh();
+                refreshRuns();
+              } catch (reason) {
+                setOperationError(
+                  reason instanceof Error
+                    ? reason.message
+                    : 'Failed to run workflow.',
+                );
+              }
+            }}
+          >
+            Run now
+          </Button>
+        </Box>
+      </Box>
       {operationError && (
         <Alert severity="error" sx={{ mb: 2 }}>
           {operationError}
@@ -369,34 +418,92 @@ export default function WorkflowView() {
             : ' The worker will retry automatically.'}
         </Alert>
       )}
-
-      <Card variant="outlined" sx={{ mb: 3 }}>
-        <CardContent>
-          <Typography variant="subtitle2" sx={{ mb: 1.5 }}>
-            Details
+      {workflow.last_errors.map((entry) => (
+        <Alert key={entry.timestamp} severity="error" sx={{ mb: 2 }}>
+          <Typography variant="caption" sx={{ display: 'block' }}>
+            {new Date(entry.timestamp).toLocaleString()}
           </Typography>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
-            <DetailItem label="Status">
-              <Chip
-                label={temporalStatusLabel(currentStatus)}
-                color={temporalStatusColor(currentStatus)}
-                size="small"
-                variant="outlined"
-              />
-            </DetailItem>
-            <DetailItem label="Availability">
-              <Chip
-                label={workflow.enabled ? 'Enabled' : 'Disabled'}
-                color={workflow.enabled ? 'success' : 'default'}
-                size="small"
-              />
-            </DetailItem>
-            <DetailItem label="Trigger">{triggerLabel(workflow)}</DetailItem>
-            <DetailItem label="Version">v{workflow.current_version}</DetailItem>
-            <DetailItem label="Pipeline">
-              {workflow.stages.length} stages · {activityCount} activities
-            </DetailItem>
-            <DetailItem label="Then run">
+          {entry.error}
+        </Alert>
+      ))}
+
+      <Box
+        sx={{
+          display: 'grid',
+          gap: { xs: 4, lg: 5 },
+          gridTemplateColumns: {
+            xs: 'minmax(0, 1fr)',
+            lg: 'minmax(0, 1fr) 16rem',
+          },
+          alignItems: 'start',
+        }}
+      >
+        <Box sx={{ minWidth: 0 }}>
+          <Box component="section" sx={{ mb: 5 }}>
+            <SectionHeading
+              title="Pipeline"
+              meta={`${workflow.stages.length} stages · ${activityCount} activities`}
+            />
+            <WorkflowPipeline workflow={workflow} />
+          </Box>
+          <Box component="section">
+            <SectionHeading
+              title="Runs"
+              meta={
+                runs && runs.length > 0 ? `Latest ${runs.length}` : undefined
+              }
+            />
+            <TemporalRunList
+              runs={runs}
+              error={runsError}
+              loadDetail={loadRunDetail}
+              cancelRun={
+                canMutate
+                  ? async (run) => {
+                      await cancelWorkflowRun(
+                        workflow.workflow_id,
+                        run.workflow_id,
+                        run.run_id,
+                      );
+                      refreshRuns();
+                    }
+                  : undefined
+              }
+            />
+          </Box>
+        </Box>
+        <Box
+          component="aside"
+          aria-label="Workflow details"
+          sx={{
+            gridRow: { xs: 1, lg: 'auto' },
+            position: { lg: 'sticky' },
+            top: { lg: 88 },
+          }}
+        >
+          <Box
+            component="dl"
+            sx={{
+              display: { xs: 'grid', lg: 'block' },
+              gridTemplateColumns: {
+                xs: 'repeat(auto-fill, minmax(10rem, 1fr))',
+              },
+              columnGap: 3,
+              m: 0,
+              '& > div + div': {
+                // Width, style and color set separately: the responsive
+                // shorthand would reset the color to the text color.
+                borderTopColor: 'divider',
+                borderTopStyle: 'solid',
+                borderTopWidth: { xs: 0, lg: 1 },
+              },
+            }}
+          >
+            <Fact label="Trigger">{triggerLabel(workflow)}</Fact>
+            <Fact label="Availability">
+              {workflow.enabled ? 'Enabled' : 'Disabled'}
+            </Fact>
+            <Fact label="Then run">
               {workflow.trigger_workflows.length
                 ? workflow.trigger_workflows
                     .map(
@@ -407,73 +514,22 @@ export default function WorkflowView() {
                     )
                     .join(', ')
                 : 'None'}
-            </DetailItem>
-            <DetailItem label="Owner">
-              <UserDisplay userId={workflow.created_by} />
-            </DetailItem>
-            <DetailItem label="Last run">
+            </Fact>
+            <Fact label="Last run">
               {workflow.last_run_at
                 ? new Date(workflow.last_run_at).toLocaleString()
                 : 'Never'}
-            </DetailItem>
-            <DetailItem label="Updated">
+            </Fact>
+            <Fact label="Owner">
+              <UserDisplay userId={workflow.created_by} />
+            </Fact>
+            <Fact label="Version">v{workflow.current_version}</Fact>
+            <Fact label="Updated">
               {new Date(workflow.updated_at).toLocaleString()}
-            </DetailItem>
+            </Fact>
           </Box>
-        </CardContent>
-      </Card>
-
-      {workflow.last_errors.length > 0 && (
-        <Card variant="outlined" sx={{ mb: 3 }}>
-          <CardContent>
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>
-              Recent errors
-            </Typography>
-            {workflow.last_errors.map((entry) => (
-              <Alert key={entry.timestamp} severity="error" sx={{ mb: 1 }}>
-                <Typography variant="caption" sx={{ display: 'block' }}>
-                  {new Date(entry.timestamp).toLocaleString()}
-                </Typography>
-                {entry.error}
-              </Alert>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
-      <Card variant="outlined">
-        <CardContent>
-          <Typography component="h2" variant="h5" sx={{ mb: 1.5 }}>
-            Workflow stages
-          </Typography>
-          <WorkflowStages workflow={workflow} />
-        </CardContent>
-      </Card>
-
-      <Card variant="outlined" sx={{ mt: 3 }}>
-        <CardContent>
-          <Typography component="h2" variant="h5" sx={{ mb: 1.5 }}>
-            Recent Temporal runs
-          </Typography>
-          <TemporalRunList
-            runs={runs}
-            error={runsError}
-            loadDetail={loadRunDetail}
-            cancelRun={
-              canMutate
-                ? async (run) => {
-                    await cancelWorkflowRun(
-                      workflow.workflow_id,
-                      run.workflow_id,
-                      run.run_id,
-                    );
-                    refreshRuns();
-                  }
-                : undefined
-            }
-          />
-        </CardContent>
-      </Card>
+        </Box>
+      </Box>
 
       {editOpen && (
         <WorkflowDialog
