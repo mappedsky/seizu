@@ -134,6 +134,7 @@ function SkillsetHistory() {
   const columns: ListTableColumn<SkillsetVersion>[] = [
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       cellSx: { width: 120 },
       render: (version) => {
@@ -172,6 +173,7 @@ function SkillsetHistory() {
     },
     {
       key: 'saved',
+      stacked: 'meta',
       label: 'Saved',
       hideBelow: 'sm',
       cellSx: savedColumnSx,
@@ -179,6 +181,7 @@ function SkillsetHistory() {
     },
     {
       key: 'created_by',
+      stacked: 'meta',
       label: 'Created By',
       hideBelow: 'md',
       cellSx: authorColumnSx,

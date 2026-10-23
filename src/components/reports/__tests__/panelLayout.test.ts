@@ -123,37 +123,72 @@ describe('buildResponsiveLayouts', () => {
     expect(Object.keys(layouts).sort()).toEqual(['lg', 'md', 'sm', 'xs']);
   });
 
-  it('doubles widths at xs to mirror legacy mobile behavior', () => {
+  it('gives charts, tables and graphs the full width below md', () => {
+    const panels: Panel[] = [
+      { type: 'graph', w: 7 },
+      { type: 'table', w: 5 },
+      { type: 'pie', w: 3 },
+    ];
+    const layouts = buildResponsiveLayouts(panels);
+
+    expect(layouts.lg.map((l) => l.w)).toEqual([7, 5, 3]);
+    for (const bp of ['sm', 'xs'] as const) {
+      expect(layouts[bp].map((l) => l.w)).toEqual([12, 12, 12]);
+      expect(layouts[bp].map((l) => l.y)).toEqual([0, 1, 2]);
+    }
+  });
+
+  it('pairs stat panels on a phone and sets three across on a tablet', () => {
     const panels: Panel[] = [
       { type: 'count', w: 3 },
-      { type: 'count', w: 4 },
+      { type: 'count', w: 3 },
+      { type: 'progress', w: 3 },
+      { type: 'count', w: 3 },
     ];
     const layouts = buildResponsiveLayouts(panels);
 
-    expect(layouts.lg[0].w).toBe(3);
-    expect(layouts.xs[0].w).toBe(6);
-    expect(layouts.xs[1].w).toBe(8);
+    expect(layouts.xs.map((l) => [l.x, l.y, l.w])).toEqual([
+      [0, 0, 6],
+      [6, 0, 6],
+      [0, 1, 6],
+      [6, 1, 6],
+    ]);
+    expect(layouts.sm.map((l) => [l.x, l.y, l.w])).toEqual([
+      [0, 0, 4],
+      [4, 0, 4],
+      [8, 0, 4],
+      // Alone on its row, so it takes the row.
+      [0, 1, 12],
+    ]);
   });
 
-  it('caps doubled xs widths at the column count', () => {
-    const panels: Panel[] = [{ type: 'count', w: 8 }];
-    const layouts = buildResponsiveLayouts(panels);
-
-    expect(layouts.xs[0].w).toBe(12);
-  });
-
-  it('repacks xs layouts so wide panels stack vertically', () => {
+  it('spreads a short last row of stat panels across the width', () => {
     const panels: Panel[] = [
-      { type: 'count', w: 4 },
-      { type: 'count', w: 4 },
-      { type: 'count', w: 4 },
+      { type: 'count', w: 3 },
+      { type: 'count', w: 3 },
+      { type: 'count', w: 3 },
+      { type: 'table', w: 12 },
+      { type: 'count', w: 3 },
+      { type: 'count', w: 3 },
     ];
     const layouts = buildResponsiveLayouts(panels);
 
-    // lg: three 4-wide panels fit in one row
-    expect(layouts.lg.map((l) => l.y)).toEqual([0, 0, 0]);
-    // xs: each becomes 8 wide → only one fits per row → stack
-    expect(layouts.xs.map((l) => l.y)).toEqual([0, 1, 2]);
+    expect(layouts.xs.map((l) => l.w)).toEqual([6, 6, 12, 12, 6, 6]);
+    expect(layouts.sm.map((l) => l.w)).toEqual([4, 4, 4, 12, 6, 6]);
+  });
+
+  it('stacks panels in the order they read on a wide screen', () => {
+    // Authored out of order: the panel listed first sits below the others.
+    const panels: Panel[] = [
+      { type: 'table', x: 0, y: 4, w: 12 },
+      { type: 'markdown', x: 0, y: 0, w: 6 },
+      { type: 'bar', x: 6, y: 0, w: 6 },
+    ];
+    const layouts = buildResponsiveLayouts(panels);
+
+    // Keyed by panel, positioned by reading order.
+    expect(layouts.xs.map((l) => l.i)).toEqual(['0', '1', '2']);
+    expect(layouts.xs.map((l) => l.y)).toEqual([2, 0, 1]);
   });
 });
 

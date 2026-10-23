@@ -242,6 +242,7 @@ function ScheduledChats() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'md',
       cellSx: versionColumnSx,

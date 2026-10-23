@@ -1,15 +1,23 @@
-import { memo } from 'react';
+import { lazy, memo, Suspense } from 'react';
 import { Box } from '@mui/material';
 
 import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import { Panel, ReportInput } from 'src/config.context';
 import CypherBar from 'src/components/reports/CypherBar';
 import CypherCount from 'src/components/reports/CypherCount';
-import CypherGraph from 'src/components/reports/CypherGraph';
 import CypherPie from 'src/components/reports/CypherPie';
 import CypherProgress from 'src/components/reports/CypherProgress';
-import CypherTable from 'src/components/reports/CypherTable';
 import CypherVerticalTable from 'src/components/reports/CypherVerticalTable';
+import {
+  GraphPanelSkeleton,
+  TablePanelSkeleton,
+} from 'src/components/reports/PanelLoadingSkeletons';
+
+// The graph panel carries the graph-layout libraries; only a report with a
+// graph panel fetches them.
+const CypherGraph = lazy(() => import('src/components/reports/CypherGraph'));
+// Likewise the table panel and its data-grid code.
+const CypherTable = lazy(() => import('src/components/reports/CypherTable'));
 
 export interface PanelItemProps {
   item: Panel;
@@ -135,19 +143,25 @@ const PanelItem = memo(
       );
     } else if (item.type === 'graph') {
       itemComponent = (
-        <CypherGraph
-          cypher={resolveQuery(item.cypher)}
-          params={params}
-          caption={effectiveCaption}
-          graphSettings={item.graph_settings}
-          needInputs={needInputs}
-          fillHeight
-          reportQueryToken={resolveCapability(
-            `rows.${rowIndex}.panels.${index}.cypher`,
-          )}
-          refreshKey={refreshKey}
-          onTokenExpired={onTokenExpired}
-        />
+        <Suspense
+          fallback={
+            <GraphPanelSkeleton caption={effectiveCaption} fillHeight />
+          }
+        >
+          <CypherGraph
+            cypher={resolveQuery(item.cypher)}
+            params={params}
+            caption={effectiveCaption}
+            graphSettings={item.graph_settings}
+            needInputs={needInputs}
+            fillHeight
+            reportQueryToken={resolveCapability(
+              `rows.${rowIndex}.panels.${index}.cypher`,
+            )}
+            refreshKey={refreshKey}
+            onTokenExpired={onTokenExpired}
+          />
+        </Suspense>
       );
     } else if (item.type === 'count') {
       itemComponent = (
@@ -168,19 +182,21 @@ const PanelItem = memo(
       );
     } else if (item.type === 'table') {
       itemComponent = (
-        <CypherTable
-          cypher={resolveQuery(item.cypher)}
-          params={params}
-          columns={item.columns}
-          caption={effectiveCaption}
-          details={details}
-          needInputs={needInputs}
-          reportQueryToken={resolveCapability(
-            `rows.${rowIndex}.panels.${index}.cypher`,
-          )}
-          refreshKey={refreshKey}
-          onTokenExpired={onTokenExpired}
-        />
+        <Suspense fallback={<TablePanelSkeleton />}>
+          <CypherTable
+            cypher={resolveQuery(item.cypher)}
+            params={params}
+            columns={item.columns}
+            caption={effectiveCaption}
+            details={details}
+            needInputs={needInputs}
+            reportQueryToken={resolveCapability(
+              `rows.${rowIndex}.panels.${index}.cypher`,
+            )}
+            refreshKey={refreshKey}
+            onTokenExpired={onTokenExpired}
+          />
+        </Suspense>
       );
     } else if (item.type === 'vertical-table') {
       itemComponent = (
@@ -215,7 +231,16 @@ const PanelItem = memo(
               ? { height: 'auto' }
               : { height: '100%', minHeight: 0, overflow: 'auto' }),
             '& p': { mb: 1 },
-            '& h2, & h3, & h4, & h5, & h6': { mb: 1 },
+            // Prose keeps a readable measure, about 75 characters of Inter,
+            // in a full-width panel; tables and code keep the panel's width.
+            '& p, & ul, & ol, & blockquote, & h3, & h4, & h5, & h6': {
+              maxWidth: '60ch',
+            },
+            // A panel sits under its row's h2, so its own headings start at
+            // h3 and stay below the row title in size.
+            '& h3': { typography: 'h4', mt: 0, mb: 1 },
+            '& h4': { typography: 'h5', mt: 2, mb: 1 },
+            '& h5, & h6': { typography: 'h6', mt: 2, mb: 0.5 },
             '& ul, & ol': { mb: 1 },
             '& hr': { my: 2 },
             '& li:has(> input[type="checkbox"])': {
@@ -228,7 +253,11 @@ const PanelItem = memo(
             },
           }}
         >
-          <MarkdocRenderer source={item.markdown ?? ''} variables={flatVars} />
+          <MarkdocRenderer
+            source={item.markdown ?? ''}
+            topHeadingLevel={3}
+            variables={flatVars}
+          />
         </Box>
       );
     }

@@ -1,5 +1,6 @@
 import { useCallback, useState, type ComponentType } from 'react';
 import PageTitle from 'src/components/PageTitle';
+import { useSidePanel } from 'src/hooks/useSidePanel';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -35,6 +36,7 @@ function SpaceDetail({ ReportPaneComponent = ReportPane }: SpaceDetailProps) {
   const navigate = useNavigate();
   const hasPermission = usePermissions();
   const [panelOpen, setPanelOpen] = useState(true);
+  const reportsPanel = useSidePanel(panelOpen, setPanelOpen);
 
   // No explicit refresh wiring here: every mutation below broadcasts an
   // invalidation (sub-spaces and the overview pointer via the spaces signal,
@@ -199,8 +201,9 @@ function SpaceDetail({ ReportPaneComponent = ReportPane }: SpaceDetailProps) {
         }}
       >
         <SpaceReportsPanel
-          open={panelOpen}
-          onToggle={() => setPanelOpen((prev) => !prev)}
+          open={reportsPanel.open}
+          overlay={reportsPanel.overlay}
+          onToggle={reportsPanel.toggle}
           tree={tree}
           // Not activeReportId: landing on the space root renders the
           // overview, but highlighting its row would make the star redundant
@@ -209,9 +212,10 @@ function SpaceDetail({ ReportPaneComponent = ReportPane }: SpaceDetailProps) {
           canWriteSpaces={canWriteSpaces}
           canDeleteSpaces={canDeleteSpaces}
           canWriteReports={canWriteReports}
-          onSelectReport={(targetReportId) =>
-            navigate(reportPath(targetReportId))
-          }
+          onSelectReport={(targetReportId) => {
+            reportsPanel.dismiss();
+            navigate(reportPath(targetReportId));
+          }}
           onCreateSubspace={createSubspace}
           onRenameSubspace={updateSubspace}
           onDeleteSubspace={deleteSubspace}
@@ -219,6 +223,7 @@ function SpaceDetail({ ReportPaneComponent = ReportPane }: SpaceDetailProps) {
           onRemoveReportFromSpace={handleRemoveReportFromSpace}
           onSetOverview={handleSetOverview}
           onCreateReport={() => {
+            reportsPanel.dismiss();
             setCreateError(null);
             setCreateOpen(true);
           }}

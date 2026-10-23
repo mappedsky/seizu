@@ -47,6 +47,7 @@ import type { MarkdownStorage } from 'tiptap-markdown';
 
 import { MarkdocVariable } from 'src/components/markdoc/MarkdocVariableNode';
 import { getCspNonce } from 'src/cspNonce';
+import { fontFamilyMono } from 'src/theme/typography';
 
 export interface MarkdocVariableOption {
   name: string;
@@ -423,7 +424,7 @@ function MarkdownEditorInner({
                 <MenuItem key={v.name} onClick={() => insertVariable(v.name)}>
                   <Box
                     sx={{
-                      fontFamily: 'monospace',
+                      fontFamily: fontFamilyMono,
                       fontSize: '0.85rem',
                       color: 'primary.main',
                       mr: 1,
@@ -604,14 +605,14 @@ function MarkdownEditorInner({
                   color: 'text.secondary',
                 },
                 '& code': {
-                  fontFamily: 'monospace',
+                  fontFamily: fontFamilyMono,
                   bgcolor: 'action.hover',
                   px: 0.5,
                   py: 0.25,
                   borderRadius: 0.5,
                 },
                 '& pre': {
-                  fontFamily: 'monospace',
+                  fontFamily: fontFamilyMono,
                   bgcolor: 'action.hover',
                   p: 1.5,
                   borderRadius: 1,

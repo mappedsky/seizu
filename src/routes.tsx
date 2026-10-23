@@ -1,41 +1,49 @@
+import { lazy } from 'react';
 import { Navigate, useParams } from 'react-router-dom';
 import DashboardLayout from 'src/components/DashboardLayout';
 import MainLayout from 'src/components/MainLayout';
-import Dashboard from 'src/pages/Dashboard';
-import Reports from 'src/pages/Reports';
-import ReportHistory from 'src/pages/ReportHistory';
-import ReportVersionView from 'src/pages/ReportVersionView';
-import ReportsList from 'src/pages/ReportsList';
-import Spaces from 'src/pages/Spaces';
-import SpaceDetail from 'src/pages/SpaceDetail';
 import NotFound from 'src/pages/NotFound';
-import QueryConsole from 'src/pages/QueryConsole';
-import ChatInterface from 'src/pages/ChatInterface';
-import BatchConfirmationPage from 'src/pages/BatchConfirmationPage';
-import ConfirmationPage from 'src/pages/ConfirmationPage';
-import ScheduledChats from 'src/pages/ScheduledChats';
-import ScheduledChatView from 'src/pages/ScheduledChatView';
-import ScheduledChatHistory from 'src/pages/ScheduledChatHistory';
-import Toolsets from 'src/pages/Toolsets';
-import ToolsetTools from 'src/pages/ToolsetTools';
-import ToolsetHistory from 'src/pages/ToolsetHistory';
-import ToolHistory from 'src/pages/ToolHistory';
-import Skillsets from 'src/pages/Skillsets';
-import SkillsetSkills from 'src/pages/SkillsetSkills';
-import SkillsetHistory from 'src/pages/SkillsetHistory';
-import SkillHistory from 'src/pages/SkillHistory';
-import Roles from 'src/pages/Roles';
-import RoleHistory from 'src/pages/RoleHistory';
 import LoggedOut from 'src/pages/LoggedOut';
-import Workflows from 'src/pages/Workflows';
-import WorkflowView from 'src/pages/WorkflowView';
-import WorkflowHistory from 'src/pages/WorkflowHistory';
-import Plugins from 'src/pages/Plugins';
-import PluginEditor from 'src/pages/PluginEditor';
-import PluginHistory from 'src/pages/PluginHistory';
-import ModelProfiles from 'src/pages/ModelProfiles';
-import ModelProfileHistory from 'src/pages/ModelProfileHistory';
-import ChatConnections from 'src/pages/ChatConnections';
+
+// Each page is its own chunk, fetched on first visit; the layouts' Suspense
+// boundaries cover the wait.
+const Dashboard = lazy(() => import('src/pages/Dashboard'));
+const Reports = lazy(() => import('src/pages/Reports'));
+const ReportHistory = lazy(() => import('src/pages/ReportHistory'));
+const ReportVersionView = lazy(() => import('src/pages/ReportVersionView'));
+const ReportsList = lazy(() => import('src/pages/ReportsList'));
+const Spaces = lazy(() => import('src/pages/Spaces'));
+const SpaceDetail = lazy(() => import('src/pages/SpaceDetail'));
+const QueryConsole = lazy(() => import('src/pages/QueryConsole'));
+const ChatInterface = lazy(() => import('src/pages/ChatInterface'));
+const BatchConfirmationPage = lazy(
+  () => import('src/pages/BatchConfirmationPage'),
+);
+const ConfirmationPage = lazy(() => import('src/pages/ConfirmationPage'));
+const ScheduledChats = lazy(() => import('src/pages/ScheduledChats'));
+const ScheduledChatView = lazy(() => import('src/pages/ScheduledChatView'));
+const ScheduledChatHistory = lazy(
+  () => import('src/pages/ScheduledChatHistory'),
+);
+const Toolsets = lazy(() => import('src/pages/Toolsets'));
+const ToolsetTools = lazy(() => import('src/pages/ToolsetTools'));
+const ToolsetHistory = lazy(() => import('src/pages/ToolsetHistory'));
+const ToolHistory = lazy(() => import('src/pages/ToolHistory'));
+const Skillsets = lazy(() => import('src/pages/Skillsets'));
+const SkillsetSkills = lazy(() => import('src/pages/SkillsetSkills'));
+const SkillsetHistory = lazy(() => import('src/pages/SkillsetHistory'));
+const SkillHistory = lazy(() => import('src/pages/SkillHistory'));
+const Roles = lazy(() => import('src/pages/Roles'));
+const RoleHistory = lazy(() => import('src/pages/RoleHistory'));
+const Workflows = lazy(() => import('src/pages/Workflows'));
+const WorkflowView = lazy(() => import('src/pages/WorkflowView'));
+const WorkflowHistory = lazy(() => import('src/pages/WorkflowHistory'));
+const Plugins = lazy(() => import('src/pages/Plugins'));
+const PluginEditor = lazy(() => import('src/pages/PluginEditor'));
+const PluginHistory = lazy(() => import('src/pages/PluginHistory'));
+const ModelProfiles = lazy(() => import('src/pages/ModelProfiles'));
+const ModelProfileHistory = lazy(() => import('src/pages/ModelProfileHistory'));
+const ChatConnections = lazy(() => import('src/pages/ChatConnections'));
 
 function LegacyWorkflowRedirect({ history = false }: { history?: boolean }) {
   const { id } = useParams();

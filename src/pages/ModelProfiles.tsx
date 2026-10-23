@@ -594,6 +594,7 @@ export default function ModelProfiles() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'sm',
       cellSx: { ...listTableSecondaryCellSx, width: 96 },
@@ -601,6 +602,7 @@ export default function ModelProfiles() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Latest Update',
       hideBelow: 'xl',
       cellSx: { ...listTableSecondaryCellSx, width: 180 },
@@ -608,6 +610,7 @@ export default function ModelProfiles() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated By',
       hideBelow: 'lg',
       cellSx: { ...listTableSecondaryCellSx, width: 150 },

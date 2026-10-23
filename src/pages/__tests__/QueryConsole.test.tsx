@@ -85,6 +85,27 @@ describe('QueryConsole', () => {
 
   afterEach(cleanup);
 
+  it.each([
+    ['Ctrl+Enter', { ctrlKey: true }],
+    ['Cmd+Enter', { metaKey: true }],
+  ])('runs the query on %s and keeps Enter for a new line', (_, modifier) => {
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: (permission: string) => permission === 'query:execute',
+      loading: false,
+      currentUser: null,
+    });
+
+    render(<QueryConsole />, { wrapper: Wrapper });
+
+    const editor = screen.getByRole('textbox', { name: 'Cypher query' });
+    fireEvent.change(editor, { target: { value: 'MATCH (n) RETURN n' } });
+    fireEvent.keyDown(editor, { key: 'Enter' });
+    expect(latestGraphProps).toBeNull();
+
+    fireEvent.keyDown(editor, { key: 'Enter', ...modifier });
+    expect(latestGraphProps?.cypher).toBe('MATCH (n) RETURN n');
+  });
+
   // Publishing the result's URL must not read back as someone navigating to it.
   // It did: `navigate` reaches the router a commit after the state set beside
   // it, and the console treated that window as a restore -- re-running as a
@@ -98,12 +119,9 @@ describe('QueryConsole', () => {
 
     render(<QueryConsole />, { wrapper: Wrapper });
 
-    fireEvent.change(
-      screen.getByPlaceholderText(
-        'Enter a Cypher query... (Ctrl+Enter to run)',
-      ),
-      { target: { value: 'MATCH (n) RETURN n' } },
-    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'Cypher query' }), {
+      target: { value: 'MATCH (n) RETURN n' },
+    });
     fireEvent.click(screen.getByRole('button', { name: /run/i }));
 
     await waitFor(() =>
@@ -165,12 +183,9 @@ describe('QueryConsole', () => {
       ),
     });
 
-    fireEvent.change(
-      screen.getByPlaceholderText(
-        'Enter a Cypher query... (Ctrl+Enter to run)',
-      ),
-      { target: { value: 'MATCH (n) RETURN n' } },
-    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'Cypher query' }), {
+      target: { value: 'MATCH (n) RETURN n' },
+    });
     fireEvent.click(screen.getByRole('button', { name: /run/i }));
     await waitFor(() =>
       expect(latestGraphProps?.cypher).toBe('MATCH (n) RETURN n'),
@@ -233,9 +248,7 @@ describe('QueryConsole', () => {
 
     expect(screen.getByTestId('schema-panel')).toBeInTheDocument();
     expect(
-      screen.getByPlaceholderText(
-        'Enter a Cypher query... (Ctrl+Enter to run)',
-      ),
+      screen.getByRole('textbox', { name: 'Cypher query' }),
     ).toBeInTheDocument();
   });
 
