@@ -4,20 +4,27 @@ import {
   Card,
   CardContent,
   CardHeader,
-  Divider,
-  IconButton,
   Grid,
   Typography,
+  useMediaQuery,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
-import Info from '@mui/icons-material/Info';
 import Error from '@mui/icons-material/Error';
 import { PieChart } from '@mui/x-charts/PieChart';
-import { chartColorsFor } from 'src/theme/brand';
+import { brand, chartColorsFor } from 'src/theme/brand';
+import {
+  compareSeverity,
+  isSeverityScale,
+  severityColor,
+  severityOf,
+} from 'src/theme/severity';
 import { useLazyCypherQuery, QueryRecord } from 'src/hooks/useCypherQuery';
-import CypherDetails from 'src/components/reports/CypherDetails';
+import CypherDetails from 'src/components/reports/LazyCypherDetails';
 import { ChartPanelSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
 import QueryValidationBadge from 'src/components/reports/QueryValidationBadge';
+import PanelInfoButton, {
+  panelInfoRevealSx,
+} from 'src/components/reports/PanelInfoButton';
 
 const fillCardSx = {
   height: '100%',
@@ -56,6 +63,23 @@ export function buildPieData(
   return pieData;
 }
 
+/**
+ * A severity breakdown is ordered most urgent first and drawn in each level's
+ * fixed color; any other breakdown is returned as is, for the chart palette.
+ */
+export function severityPieData(
+  data: { id: string; value: number; label: string }[],
+  mode: 'light' | 'dark',
+): { id: string; value: number; label: string; color?: string }[] {
+  if (!isSeverityScale(data.map((item) => item.id))) return data;
+  return [...data]
+    .sort((a, b) => compareSeverity(a.id, b.id))
+    .map((item) => ({
+      ...item,
+      color: severityColor(severityOf(item.id)!, mode),
+    }));
+}
+
 interface CypherPieProps {
   cypher?: string;
   params?: Record<string, unknown>;
@@ -80,6 +104,11 @@ export default function CypherPie({
   onTokenExpired,
 }: CypherPieProps) {
   const theme = useTheme();
+  // A side legend takes a fixed strip of the panel; on a phone that strip is
+  // most of it, so the legend goes below the chart instead.
+  const phone = useMediaQuery(theme.breakpoints.down('sm'), { noSsr: true });
+  const legend =
+    phone && pieSettings?.legend === 'column' ? 'row' : pieSettings?.legend;
   const [open, setOpen] = useState(false);
 
   const [
@@ -111,16 +140,16 @@ export default function CypherPie({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -140,16 +169,16 @@ export default function CypherPie({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -178,15 +207,15 @@ export default function CypherPie({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         <Grid
@@ -195,7 +224,7 @@ export default function CypherPie({
           sx={{ flexDirection: 'column', alignItems: 'center' }}
         >
           <CardContent>
-            <Typography variant="h4" align="center">
+            <Typography variant="h4" component="p" align="center">
               N/A
             </Typography>
             <Typography variant="body2" align="center">
@@ -215,16 +244,16 @@ export default function CypherPie({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -232,16 +261,19 @@ export default function CypherPie({
           sx={{ flexDirection: 'column', alignItems: 'center' }}
         >
           <CardContent>
-            <Typography variant="h4">N/A</Typography>
+            <Typography variant="h4" component="p">
+              N/A
+            </Typography>
           </CardContent>
         </Grid>
       </Card>
     );
   }
 
-  const pieData = buildPieData(records);
+  const pieData = severityPieData(buildPieData(records), theme.palette.mode);
 
-  const hasLegend = !!pieSettings?.legend;
+  const hasLegend = !!legend;
+  const severityScale = pieData.some((item) => 'color' in item);
 
   return (
     <>
@@ -249,33 +281,20 @@ export default function CypherPie({
         sx={{
           ...fillCardSx,
           position: 'relative',
-          '&:hover .panel-info-btn': { opacity: 1 },
+          ...panelInfoRevealSx,
         }}
       >
-        <IconButton
-          className="panel-info-btn"
-          size="small"
-          onClick={() => setOpen(true)}
-          sx={{
-            position: 'absolute',
-            top: 8,
-            right: 8,
-            opacity: 0,
-            transition: 'opacity 0.2s',
-          }}
-        >
-          <Info fontSize="small" />
-        </IconButton>
+        <PanelInfoButton onClick={() => setOpen(true)} panelName={caption} />
         {caption && (
-          <>
-            <Grid
-              container
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <QueryValidationBadge errors={queryErrors} warnings={warnings} />
 
@@ -305,9 +324,9 @@ export default function CypherPie({
             colors={chartColorsFor(theme.palette.mode)}
             hideLegend={!hasLegend}
             margin={
-              pieSettings?.legend === 'column'
+              legend === 'column'
                 ? { top: 16, right: 160, bottom: 16, left: 16 }
-                : pieSettings?.legend === 'row'
+                : legend === 'row'
                   ? { top: 16, right: 16, bottom: 80, left: 16 }
                   : { top: 24, right: 24, bottom: 24, left: 24 }
             }
@@ -315,20 +334,24 @@ export default function CypherPie({
               ...(hasLegend && {
                 legend: {
                   position:
-                    pieSettings?.legend === 'column'
+                    legend === 'column'
                       ? { vertical: 'middle', horizontal: 'end' }
                       : { vertical: 'bottom', horizontal: 'center' },
-                  direction:
-                    pieSettings?.legend === 'column'
-                      ? 'vertical'
-                      : 'horizontal',
+                  direction: legend === 'column' ? 'vertical' : 'horizontal',
                 },
               }),
               pieArcLabel: {
                 style: {
+                  // The dark-mode palette is all light tones, which white
+                  // text cannot be read against; Space reads on every one,
+                  // and on every severity color in either mode.
+                  fill:
+                    theme.palette.mode === 'dark' || severityScale
+                      ? brand.space
+                      : '#fff',
                   fontFamily: theme.typography.fontFamily ?? undefined,
                   fontSize: 12,
-                  fontWeight: 500,
+                  fontWeight: 600,
                 },
               },
             }}

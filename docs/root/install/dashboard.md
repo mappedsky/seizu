@@ -165,6 +165,22 @@ Choose **Delete** from the ⋮ menu in the Reports list and confirm. This perman
 Seizu supports various panel types that can be used to visualize graph data.
 See [the Panel schema](schema.html#panel) for more detailed info about specific fields.
 
+### Severity values
+
+Severity levels have fixed colors in every panel, so a level looks the same wherever it appears:
+
+| Level | Accepted values (any case) | Color |
+|-------|----------------------------|-------|
+| Critical | `critical` | Red (Flare) |
+| High | `high` | Amber (Ember) |
+| Medium | `medium`, `moderate` | Blue (Starlight) |
+| Low | `low` | Grey |
+| Info | `info`, `informational`, `none` | Grey |
+
+- **pie** and **bar** panels use these colors, ordered Critical to Info, when every category is a severity level. Otherwise they use the ordinary chart palette.
+- **graph** panels color nodes whose `node_color_by` value is a severity level. Other node groups in the same graph use colors no level uses.
+- **table** and **vertical-table** panels mark the values of a column or property whose name contains `severity` or `criticality` with a colored dot. A table sorts that column from Critical to Info.
+
 ### Panel layout
 
 Panels are positioned and sized on a 12-column grid (each row of the grid is 48 px tall). Every panel type accepts the same layout fields:
@@ -192,6 +208,7 @@ To simply display a count of a particular query, use a ``count`` panel.
 | params | A list of parameters to pass into the query. See [the PanelParam schema](schema.html#panelparam) for more info. |
 | caption | The caption to show as the title of this panel. |
 | type | The type of panel. ``count``, for this panel type. |
+| thresholds | A list of ``{value, color}`` rules; the rule with the highest ``value`` at or below the metric colors it. Use a palette name for ``color`` — ``flare`` (red), ``ember`` (yellow), ``aurora`` (green), ``starlight``, ``beacon``, ``pulsar`` or ``night`` — so it reads in both light and dark mode; any CSS color also works. See [the PanelThreshold schema](schema.html#panelthreshold). |
 | w, h, x, y, min_h | Layout fields. See [Panel layout](#panel-layout). |
 
 #### Example
@@ -219,6 +236,7 @@ By default, this panel will color the progress data based on a threshold of <70%
 | caption | The caption to show as the title of this panel. |
 | type | The type of panel. ``progress``, for this panel type. |
 | threshold | The lower threshold percentage to consider this result an error. Set to `0` to disable threshold. Default: ``70`` |
+| thresholds | A list of ``{value, color}`` rules; the rule with the highest ``value`` at or below the metric colors it. Use a palette name for ``color`` — ``flare`` (red), ``ember`` (yellow), ``aurora`` (green), ``starlight``, ``beacon``, ``pulsar`` or ``night`` — so it reads in both light and dark mode; any CSS color also works. See [the PanelThreshold schema](schema.html#panelthreshold). |
 | w, h, x, y, min_h | Layout fields. See [Panel layout](#panel-layout). |
 
 #### Example

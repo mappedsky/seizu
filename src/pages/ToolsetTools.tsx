@@ -64,6 +64,7 @@ import UserDisplay from 'src/components/UserDisplay';
 import { usePermissions } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 // ---------------------------------------------------------------------------
 // Built-in toolset detection
@@ -300,7 +301,9 @@ function ToolDialog({ open, onClose, onSave, initial }: ToolDialogProps) {
             multiline
             minRows={5}
             slotProps={{
-              htmlInput: { style: { fontFamily: 'monospace', fontSize: 13 } },
+              htmlInput: {
+                style: { fontFamily: fontFamilyMono, fontSize: 13 },
+              },
             }}
           />
           <FormControlLabel
@@ -318,7 +321,11 @@ function ToolDialog({ open, onClose, onSave, initial }: ToolDialogProps) {
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
               <Typography variant="subtitle2">Parameters</Typography>
-              <IconButton size="small" onClick={addParam}>
+              <IconButton
+                aria-label="Add parameter"
+                size="small"
+                onClick={addParam}
+              >
                 <AddCircleOutlineIcon fontSize="small" />
               </IconButton>
             </Box>
@@ -393,6 +400,7 @@ function ToolDialog({ open, onClose, onSave, initial }: ToolDialogProps) {
                     sx={{ flexShrink: 0 }}
                   />
                   <IconButton
+                    aria-label={`Remove parameter ${p.name || i + 1}`}
                     size="small"
                     onClick={() => removeParam(i)}
                     sx={{ mt: 0.5, flexShrink: 0 }}
@@ -618,6 +626,7 @@ function ToolsetTools() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'sm',
       cellSx: versionColumnSx,
@@ -626,6 +635,7 @@ function ToolsetTools() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Last updated',
       hideBelow: 'xl',
       cellSx: updatedAtColumnSx,
@@ -636,6 +646,7 @@ function ToolsetTools() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated by',
       hideBelow: 'lg',
       cellSx: updatedByColumnSx,

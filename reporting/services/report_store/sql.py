@@ -2,13 +2,15 @@ import hashlib
 import logging
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from sqlalchemy import (
     JSON,
     Column,
+    CursorResult,
     Index,
     LargeBinary,
+    Result,
     Text,
     UniqueConstraint,
     and_,
@@ -726,6 +728,16 @@ class ModelProfileVersionRecord(SQLModel, table=True):  # type: ignore
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+def _rowcount(result: Result[Any]) -> int:
+    """How many rows a DML statement affected.
+
+    ``AsyncSession.execute`` is typed as returning ``Result``, which carries no
+    ``rowcount``; an INSERT/UPDATE/DELETE always produces the ``CursorResult``
+    subclass that does.
+    """
+    return cast(CursorResult[Any], result).rowcount
 
 
 def generate_report_id() -> str:
@@ -1676,18 +1688,18 @@ class SQLModelReportStore(ReportStore):
         async with AsyncSession(_get_engine()) as session:
             if expected_last_scheduled_at is None:
                 condition = and_(
-                    ScheduledQueryRecord.scheduled_query_id == sq_id,
-                    ScheduledQueryRecord.last_scheduled_at == null(),
+                    col(ScheduledQueryRecord.scheduled_query_id) == sq_id,
+                    col(ScheduledQueryRecord.last_scheduled_at) == null(),
                 )
             else:
                 condition = and_(
-                    ScheduledQueryRecord.scheduled_query_id == sq_id,
-                    ScheduledQueryRecord.last_scheduled_at == expected_last_scheduled_at,
+                    col(ScheduledQueryRecord.scheduled_query_id) == sq_id,
+                    col(ScheduledQueryRecord.last_scheduled_at) == expected_last_scheduled_at,
                 )
             stmt = update(ScheduledQueryRecord).where(condition).values(last_scheduled_at=now)
             result = await session.execute(stmt)
             await session.commit()
-        return result.rowcount == 1
+        return _rowcount(result) == 1
 
     async def record_scheduled_query_result(self, sq_id: str, status: str, error: str | None = None) -> None:
         now = datetime.now(tz=UTC).isoformat()
@@ -1953,18 +1965,18 @@ class SQLModelReportStore(ReportStore):
         async with AsyncSession(_get_engine()) as session:
             if expected_last_scheduled_at is None:
                 condition = and_(
-                    ScheduledChatRecord.scheduled_chat_id == sc_id,
-                    ScheduledChatRecord.last_scheduled_at == null(),
+                    col(ScheduledChatRecord.scheduled_chat_id) == sc_id,
+                    col(ScheduledChatRecord.last_scheduled_at) == null(),
                 )
             else:
                 condition = and_(
-                    ScheduledChatRecord.scheduled_chat_id == sc_id,
-                    ScheduledChatRecord.last_scheduled_at == expected_last_scheduled_at,
+                    col(ScheduledChatRecord.scheduled_chat_id) == sc_id,
+                    col(ScheduledChatRecord.last_scheduled_at) == expected_last_scheduled_at,
                 )
             stmt = update(ScheduledChatRecord).where(condition).values(last_scheduled_at=now)
             result = await session.execute(stmt)
             await session.commit()
-        return result.rowcount == 1
+        return _rowcount(result) == 1
 
     async def record_scheduled_chat_result(self, sc_id: str, status: str, error: str | None = None) -> None:
         now = datetime.now(tz=UTC).isoformat()
@@ -2425,8 +2437,8 @@ class SQLModelReportStore(ReportStore):
             # Delete all toolset versions
             ts_versions_stmt = select(ToolsetVersionRecord).where(ToolsetVersionRecord.toolset_id == toolset_id)
             ts_versions_result = await session.execute(ts_versions_stmt)
-            for ver in ts_versions_result.scalars().all():
-                await session.delete(ver)
+            for ts_ver in ts_versions_result.scalars().all():
+                await session.delete(ts_ver)
 
             await session.delete(record)
             await session.commit()
@@ -2726,7 +2738,7 @@ class SQLModelReportStore(ReportStore):
         async with AsyncSession(_get_engine()) as session:
             stmt = (
                 select(ToolRecord)
-                .join(ToolsetRecord, ToolRecord.toolset_id == ToolsetRecord.toolset_id)
+                .join(ToolsetRecord, col(ToolRecord.toolset_id) == ToolsetRecord.toolset_id)
                 .where(ToolRecord.tool_id == tool_id)
                 .where(ToolRecord.toolset_id == toolset_id)
                 .where(ToolRecord.enabled == True)  # noqa: E712
@@ -2880,8 +2892,8 @@ class SQLModelReportStore(ReportStore):
 
             ss_versions_stmt = select(SkillsetVersionRecord).where(SkillsetVersionRecord.skillset_id == skillset_id)
             ss_versions_result = await session.execute(ss_versions_stmt)
-            for ver in ss_versions_result.scalars().all():
-                await session.delete(ver)
+            for ss_ver in ss_versions_result.scalars().all():
+                await session.delete(ss_ver)
 
             await session.delete(record)
             await session.commit()
@@ -3203,7 +3215,7 @@ class SQLModelReportStore(ReportStore):
         async with AsyncSession(_get_engine()) as session:
             stmt = (
                 select(SkillRecord)
-                .join(SkillsetRecord, SkillRecord.skillset_id == SkillsetRecord.skillset_id)
+                .join(SkillsetRecord, col(SkillRecord.skillset_id) == SkillsetRecord.skillset_id)
                 .where(SkillRecord.skill_id == skill_id)
                 .where(SkillRecord.skillset_id == skillset_id)
                 .where(SkillRecord.enabled == True)  # noqa: E712
@@ -3505,7 +3517,7 @@ class SQLModelReportStore(ReportStore):
                 return []
             result = await session.execute(
                 select(PluginFileRecord, PluginBlobRecord.size)
-                .join(PluginBlobRecord, PluginFileRecord.blob_sha256 == PluginBlobRecord.sha256)
+                .join(PluginBlobRecord, col(PluginFileRecord.blob_sha256) == PluginBlobRecord.sha256)
                 .where(PluginFileRecord.plugin_id == plugin_id)
                 .where(PluginFileRecord.revision == resolved)
                 .order_by(col(PluginFileRecord.path))
@@ -3529,7 +3541,7 @@ class SQLModelReportStore(ReportStore):
                 return []
             statement = (
                 select(PluginFileRecord, PluginBlobRecord)
-                .join(PluginBlobRecord, PluginFileRecord.blob_sha256 == PluginBlobRecord.sha256)
+                .join(PluginBlobRecord, col(PluginFileRecord.blob_sha256) == PluginBlobRecord.sha256)
                 .where(PluginFileRecord.plugin_id == plugin_id)
                 .where(PluginFileRecord.revision == resolved)
                 .order_by(col(PluginFileRecord.path))
@@ -3553,7 +3565,7 @@ class SQLModelReportStore(ReportStore):
                 return None
             statement = (
                 select(PluginFileRecord, PluginBlobRecord)
-                .join(PluginBlobRecord, PluginFileRecord.blob_sha256 == PluginBlobRecord.sha256)
+                .join(PluginBlobRecord, col(PluginFileRecord.blob_sha256) == PluginBlobRecord.sha256)
                 .where(PluginFileRecord.plugin_id == plugin_id)
                 .where(PluginFileRecord.revision == resolved)
                 .where(PluginFileRecord.path == path)
@@ -3570,7 +3582,7 @@ class SQLModelReportStore(ReportStore):
         async with AsyncSession(_get_engine()) as session:
             result = await session.execute(
                 select(PluginSkillRecord)
-                .join(PluginRecord, PluginSkillRecord.plugin_id == PluginRecord.plugin_id)
+                .join(PluginRecord, col(PluginSkillRecord.plugin_id) == PluginRecord.plugin_id)
                 .where(PluginSkillRecord.enabled == True)  # noqa: E712
                 .where(PluginRecord.enabled == True)  # noqa: E712
             )
@@ -3594,7 +3606,7 @@ class SQLModelReportStore(ReportStore):
         async with AsyncSession(_get_engine()) as session:
             result = await session.execute(
                 select(PluginSkillRecord)
-                .join(PluginRecord, PluginSkillRecord.plugin_id == PluginRecord.plugin_id)
+                .join(PluginRecord, col(PluginSkillRecord.plugin_id) == PluginRecord.plugin_id)
                 .where(PluginSkillRecord.plugin_id == plugin_id)
                 .where(PluginSkillRecord.skill_id == skill_id)
                 .where(PluginSkillRecord.enabled == True)  # noqa: E712
@@ -3626,7 +3638,7 @@ class SQLModelReportStore(ReportStore):
             result = (
                 await session.execute(
                     select(PluginFileRecord, PluginBlobRecord)
-                    .join(PluginBlobRecord, PluginFileRecord.blob_sha256 == PluginBlobRecord.sha256)
+                    .join(PluginBlobRecord, col(PluginFileRecord.blob_sha256) == PluginBlobRecord.sha256)
                     .where(PluginFileRecord.plugin_id == plugin_id)
                     .where(PluginFileRecord.blob_sha256 == sha256)
                     .limit(1)
@@ -4181,7 +4193,7 @@ class SQLModelReportStore(ReportStore):
             )
             result = await session.execute(stmt)
             await session.commit()
-            return bool(result.rowcount)
+            return bool(_rowcount(result))
 
     async def list_idle_chat_sessions(self, idle_before: str, limit: int) -> list[IdleChatSession]:
         async with AsyncSession(_get_engine()) as session:
@@ -4368,7 +4380,7 @@ class SQLModelReportStore(ReportStore):
                 col(ChatSessionRecord.thread_id) == thread_id,
             )
             result = await session.execute(stmt)
-            if result.rowcount > 0:
+            if _rowcount(result) > 0:
                 await session.execute(
                     delete(ChatElicitationRecord).where(
                         col(ChatElicitationRecord.user_id) == user_id,
@@ -4395,7 +4407,7 @@ class SQLModelReportStore(ReportStore):
                     )
                     await session.execute(delete(ChatTurnRecord).where(col(ChatTurnRecord.turn_id).in_(turn_ids)))
             await session.commit()
-            return result.rowcount > 0
+            return _rowcount(result) > 0
 
     # ------------------------------------------------------------------
     # Chat turn event log
@@ -4702,7 +4714,7 @@ class SQLModelReportStore(ReportStore):
             record = await session.get(ChatTurnRecord, turn_id)
             if record is None:
                 return None
-            if result.rowcount == 0:
+            if _rowcount(result) == 0:
                 # Already terminal. The caller is handed what is actually
                 # recorded rather than what it tried to write, so a late writer
                 # can tell it lost instead of believing it won.
@@ -4726,7 +4738,7 @@ class SQLModelReportStore(ReportStore):
                 delete(ChatTurnPayloadRecord).where(col(ChatTurnPayloadRecord.turn_id) == turn_id)
             )
             await session.commit()
-            return result.rowcount > 0 or events.rowcount > 0 or payloads.rowcount > 0
+            return _rowcount(result) > 0 or _rowcount(events) > 0 or _rowcount(payloads) > 0
 
     async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[str]:
         async with AsyncSession(_get_engine()) as session:
@@ -4800,7 +4812,7 @@ class SQLModelReportStore(ReportStore):
             )
             result = await session.execute(stmt)
             await session.commit()
-            return result.rowcount > 0
+            return _rowcount(result) > 0
 
     async def get_action_confirmation(
         self,

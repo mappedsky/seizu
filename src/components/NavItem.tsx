@@ -4,7 +4,6 @@ import {
   matchPath,
   useLocation,
 } from 'react-router-dom';
-import ExpandLess from '@mui/icons-material/ExpandLess';
 import ExpandMore from '@mui/icons-material/ExpandMore';
 import {
   Box,
@@ -176,9 +175,18 @@ function NavItem({
         </Button>
         <Button
           onClick={() => setOpen(!open)}
+          aria-label={open ? `Collapse ${title}` : `Expand ${title}`}
+          aria-expanded={open}
           sx={{ minWidth: 0, px: 0.5, color: 'text.secondary' }}
         >
-          {open ? <ExpandMore /> : <ExpandLess />}
+          {/* Down when open, turned to point right when collapsed — the same
+              disclosure the report rows use. */}
+          <ExpandMore
+            sx={{
+              transition: 'transform 0.2s',
+              transform: open ? 'none' : 'rotate(-90deg)',
+            }}
+          />
         </Button>
       </ListItem>
       <Collapse in={open} timeout="auto" unmountOnExit>
