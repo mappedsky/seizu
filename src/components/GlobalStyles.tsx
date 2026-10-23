@@ -1,9 +1,11 @@
 import { GlobalStyles as MuiGlobalStyles } from '@mui/material';
+import { alpha, type Theme } from '@mui/material/styles';
+import { fontFamilyMono } from 'src/theme/typography';
 
 function GlobalStyles() {
   return (
     <MuiGlobalStyles
-      styles={{
+      styles={(theme: Theme) => ({
         '*': {
           boxSizing: 'border-box',
           margin: 0,
@@ -12,14 +14,31 @@ function GlobalStyles() {
         html: {
           WebkitFontSmoothing: 'antialiased',
           MozOsxFontSmoothing: 'grayscale',
+          // Scrollbars take the palette rather than the browser's grey: a
+          // starlight thumb on a clear track. The property is inherited.
+          scrollbarColor: `${alpha(theme.palette.primary.main, 0.25)} transparent`,
         },
         body: {
-          backgroundColor: '#f4f6f8',
           height: '100%',
           width: '100%',
         },
         a: {
           textDecoration: 'none',
+        },
+        'code, kbd, samp, pre': {
+          fontFamily: fontFamilyMono,
+        },
+        // Each grid cell is CSS-transformed, so it is its own stacking
+        // context: a chart tooltip inside one cannot paint above the next
+        // panel at any z-index. Lift the panel being used above its
+        // neighbours instead (react-grid-layout drags at the same level).
+        '.report-row .react-grid-item:hover, .report-row .react-grid-item:focus-within':
+          {
+            zIndex: 3,
+          },
+        // Figures in a column read down as well as across.
+        'td, th': {
+          fontVariantNumeric: 'tabular-nums',
         },
         '#root': {
           height: '100%',
@@ -35,7 +54,7 @@ function GlobalStyles() {
           paddingTop: 10,
           paddingBottom: 10,
         },
-      }}
+      })}
     />
   );
 }

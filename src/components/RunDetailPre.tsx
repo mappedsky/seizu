@@ -1,4 +1,5 @@
 import { Box, Typography } from '@mui/material';
+import { fontFamilyMono } from 'src/theme/typography';
 
 /**
  * Labeled preformatted block for run/transcript detail output (tool results,
@@ -16,7 +17,7 @@ function RunDetailPre({ label, value }: { label: string; value: string }) {
         sx={{
           bgcolor: 'action.hover',
           borderRadius: 1,
-          fontFamily: 'monospace',
+          fontFamily: fontFamilyMono,
           fontSize: 12,
           m: 0,
           maxHeight: 240,

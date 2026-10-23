@@ -47,6 +47,7 @@ import type { BackState } from 'src/navigation';
 import { describeSchedule } from 'src/scheduleSpec';
 import { temporalStatusColor, temporalStatusLabel } from 'src/temporalStatus';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 function triggerLabel(workflow: WorkflowItem): string {
   if (workflow.watch_scans.length > 0)
@@ -121,7 +122,7 @@ function ActivityRow({ activity }: { activity: WorkflowActivity }) {
           <Typography
             variant="caption"
             color="text.secondary"
-            sx={{ fontFamily: 'monospace', wordBreak: 'break-word' }}
+            sx={{ fontFamily: fontFamilyMono, wordBreak: 'break-word' }}
           >
             {activity.input ?? 'No input'} → {activity.output}
           </Typography>
@@ -154,7 +155,7 @@ function ActivityRow({ activity }: { activity: WorkflowActivity }) {
                   sx={{
                     bgcolor: 'action.hover',
                     borderRadius: 1,
-                    fontFamily: 'monospace',
+                    fontFamily: fontFamilyMono,
                     fontSize: 12,
                     m: 0,
                     maxHeight: name === 'cypher' ? 260 : 180,

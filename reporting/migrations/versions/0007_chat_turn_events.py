@@ -49,7 +49,7 @@ def _indexes(table: str) -> set[str]:
     inspector = _inspector()
     if table not in inspector.get_table_names():
         return set()
-    return {index["name"] for index in inspector.get_indexes(table)}
+    return {index["name"] for index in inspector.get_indexes(table) if index["name"]}
 
 
 def upgrade() -> None:

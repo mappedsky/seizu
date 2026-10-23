@@ -39,7 +39,6 @@ it('shows only the locked profile with lowercase reasoning levels', () => {
   render(
     <ChatInput
       busy={false}
-      bypassConfirmations={false}
       disabled={false}
       footerControls={
         <ModelProfileSelect
@@ -51,17 +50,14 @@ it('shows only the locked profile with lowercase reasoning levels', () => {
           reasoningEffort="medium"
         />
       }
-      onBypassConfirmationsChange={() => {}}
       onStop={() => {}}
       onSubmit={() => {}}
-      showBypassConfirmations
     />,
   );
   expect(screen.queryByText(/Model profile is locked/)).not.toBeInTheDocument();
   const composer = screen.getByPlaceholderText('Ask Seizu...').closest('form');
   expect(composer).not.toBeNull();
   expect(within(composer!).getByRole('combobox')).toBeInTheDocument();
-  expect(within(composer!).getByRole('switch')).toBeInTheDocument();
   expect(screen.getByText('Anthropic · medium')).toBeInTheDocument();
   expect(screen.queryByText('Model and reasoning')).not.toBeInTheDocument();
 
@@ -83,26 +79,48 @@ it('shows only the locked profile with lowercase reasoning levels', () => {
   expect(onChange).toHaveBeenCalledWith('anthropic', 'high');
 });
 
-it('grows the chat composer with its text up to twice the default height', () => {
+it('sends on Enter and keeps Shift+Enter for a new line', () => {
+  const onSubmit = jest.fn();
   render(
     <ChatInput
       busy={false}
       disabled={false}
       onStop={() => {}}
-      onSubmit={() => {}}
+      onSubmit={onSubmit}
     />,
   );
-  const textarea = screen.getByPlaceholderText('Ask Seizu...');
-  Object.defineProperty(textarea, 'clientHeight', {
-    configurable: true,
-    value: 80,
-  });
-  Object.defineProperty(textarea, 'scrollHeight', {
-    configurable: true,
-    value: 400,
-  });
+  const field = screen.getByPlaceholderText('Ask Seizu...');
+  fireEvent.change(field, { target: { value: 'Map my graph' } });
 
-  fireEvent.change(textarea, { target: { value: 'A long question' } });
+  fireEvent.keyDown(field, { key: 'Enter', shiftKey: true });
+  expect(onSubmit).not.toHaveBeenCalled();
 
-  expect(screen.getByTestId('chat-composer')).toHaveStyle({ height: '280px' });
+  fireEvent.keyDown(field, { key: 'Enter' });
+  expect(onSubmit).toHaveBeenCalledWith('Map my graph');
+  expect(field).toHaveValue('');
+});
+
+it.each([
+  ['Ctrl+Enter', { ctrlKey: true }],
+  ['Cmd+Enter', { metaKey: true }],
+])('inserts a new line at the caret on %s', (_name, modifier) => {
+  const onSubmit = jest.fn();
+  render(
+    <ChatInput
+      busy={false}
+      disabled={false}
+      onStop={() => {}}
+      onSubmit={onSubmit}
+    />,
+  );
+  const field = screen.getByPlaceholderText(
+    'Ask Seizu...',
+  ) as HTMLTextAreaElement;
+  fireEvent.change(field, { target: { value: 'Map my graph' } });
+  field.setSelectionRange(3, 3);
+
+  fireEvent.keyDown(field, { key: 'Enter', ...modifier });
+
+  expect(onSubmit).not.toHaveBeenCalled();
+  expect(field).toHaveValue('Map\n my graph');
 });

@@ -9,7 +9,7 @@ from reporting.schema.reporting_config import ScheduledQueryAction
 
 logger = logging.getLogger(__name__)
 
-_MODULES = {}
+_MODULES: dict[str, "ModuleInterface"] = {}
 
 # These modules are always available regardless of SCHEDULED_QUERY_MODULES.
 _BUILTIN_MODULES = [

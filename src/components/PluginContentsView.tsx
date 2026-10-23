@@ -15,6 +15,7 @@ import {
   PluginSkillItem,
   usePluginContents,
 } from 'src/hooks/usePluginsApi';
+import { fontFamilyMono } from 'src/theme/typography';
 
 // Package files that belong to the package rather than to any one skill.
 const PACKAGE_ROOT_FILES = /^[^/]+$/;
@@ -50,7 +51,7 @@ function FileList({
         >
           <Typography
             variant="body2"
-            sx={{ fontFamily: 'monospace', flex: 1, wordBreak: 'break-all' }}
+            sx={{ fontFamily: fontFamilyMono, flex: 1, wordBreak: 'break-all' }}
           >
             {strip ? file.path.slice(strip.length) : file.path}
           </Typography>
@@ -112,14 +113,14 @@ function SkillCard({
       <Typography
         variant="caption"
         color="text.secondary"
-        sx={{ display: 'block', fontFamily: 'monospace' }}
+        sx={{ display: 'block', fontFamily: fontFamilyMono }}
       >
         {skill.plugin_id}__{skill.skill_id}
       </Typography>
       <Typography
         variant="caption"
         color="text.secondary"
-        sx={{ display: 'block', fontFamily: 'monospace', mb: 1 }}
+        sx={{ display: 'block', fontFamily: fontFamilyMono, mb: 1 }}
       >
         {skill.source_path}/ (portable name {skill.portable_name})
       </Typography>
@@ -142,7 +143,7 @@ function SkillCard({
                 key={parameter.name}
                 size="small"
                 variant="outlined"
-                sx={{ fontFamily: 'monospace' }}
+                sx={{ fontFamily: fontFamilyMono }}
                 label={`${parameter.name}: ${parameter.type}${parameter.required ? '' : '?'}`}
               />
             ))}
@@ -166,7 +167,7 @@ function SkillCard({
                 label={tool}
                 size="small"
                 variant="outlined"
-                sx={{ fontFamily: 'monospace' }}
+                sx={{ fontFamily: fontFamilyMono }}
               />
             ))}
           </Stack>

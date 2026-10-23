@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import logging
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -122,7 +123,7 @@ async def schedule_query(item: ScheduledQueryItem) -> None:
 async def _handle_results(
     scheduled_query_id: str,
     action: ScheduledQueryAction,
-    results: list[dict[str, Any]],
+    results: Sequence[Mapping[str, Any]],
 ) -> None:
     action_type = action.action_type
     if not action_type:

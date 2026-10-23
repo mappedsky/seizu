@@ -2,8 +2,11 @@ import type { Panel } from 'src/config.context';
 import {
   migrateLegacyThreshold,
   resolveThresholdColor,
-  THRESHOLD_PRESET_COLORS,
+  sameThresholdColor,
+  THRESHOLD_PRESETS,
+  thresholdCss,
 } from '../thresholds';
+import { brand, tones } from 'src/theme/brand';
 
 describe('resolveThresholdColor', () => {
   it('returns undefined when no thresholds are configured', () => {
@@ -52,25 +55,55 @@ describe('migrateLegacyThreshold', () => {
   it('maps a count threshold to a single red threshold', () => {
     const panel: Panel = { type: 'count', threshold: 1000 };
     expect(migrateLegacyThreshold(panel)).toEqual([
-      { value: 1000, color: '#F44336' },
+      { value: 1000, color: 'flare' },
     ]);
   });
 
   it('maps a progress threshold to red-at-zero plus green-at-hundred', () => {
     const panel: Panel = { type: 'progress', threshold: 70 };
     expect(migrateLegacyThreshold(panel)).toEqual([
-      { value: 0, color: '#F44336' },
-      { value: 100, color: '#4CAF50' },
+      { value: 0, color: 'flare' },
+      { value: 100, color: 'aurora' },
     ]);
   });
 });
 
-describe('THRESHOLD_PRESET_COLORS', () => {
-  it('exposes a non-empty palette of swatches', () => {
-    expect(THRESHOLD_PRESET_COLORS.length).toBeGreaterThan(0);
-    for (const preset of THRESHOLD_PRESET_COLORS) {
-      expect(preset.label).toBeTruthy();
-      expect(preset.hex).toMatch(/^#[0-9A-Fa-f]{6}$/);
+describe('THRESHOLD_PRESETS', () => {
+  it('leads with red, yellow and green', () => {
+    expect(THRESHOLD_PRESETS.slice(0, 3).map((p) => p.label)).toEqual([
+      'Red',
+      'Yellow',
+      'Green',
+    ]);
+  });
+
+  it('resolves every preset to a color in both modes', () => {
+    for (const preset of THRESHOLD_PRESETS) {
+      expect(thresholdCss(preset.name, 'dark')).toMatch(/^#[0-9A-F]{6}$/);
+      expect(thresholdCss(preset.name, 'light')).toMatch(/^#[0-9A-F]{6}$/);
     }
+  });
+});
+
+describe('thresholdCss', () => {
+  it('paints a palette name in the tone for the mode', () => {
+    expect(thresholdCss('flare', 'dark')).toBe(brand.flare);
+    expect(thresholdCss('flare', 'light')).toBe(tones.flare[700]);
+  });
+
+  it('maps the old preset hexes onto their brand hue', () => {
+    expect(thresholdCss('#F44336', 'dark')).toBe(brand.flare);
+    expect(thresholdCss('#4caf50', 'light')).toBe(tones.aurora[700]);
+  });
+
+  it('passes any other color through unchanged', () => {
+    expect(thresholdCss('#123456', 'dark')).toBe('#123456');
+    expect(thresholdCss('rebeccapurple', 'light')).toBe('rebeccapurple');
+    expect(thresholdCss(undefined, 'light')).toBeUndefined();
+  });
+
+  it('treats an old preset hex and its palette name as the same swatch', () => {
+    expect(sameThresholdColor('#FFC107', 'ember')).toBe(true);
+    expect(sameThresholdColor('flare', 'aurora')).toBe(false);
   });
 });
