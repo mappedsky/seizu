@@ -18,7 +18,6 @@ import {
   AccordionSummary,
   Box,
   Button,
-  Card,
   Chip,
   FormControl,
   IconButton,
@@ -48,6 +47,7 @@ import { AuthConfigContext } from 'src/authConfig.context';
 import { usePermissionState } from 'src/hooks/usePermissions';
 import { useChatHistory } from 'src/hooks/useChatHistory';
 import { useChatLocalStorage } from 'src/hooks/useChatLocalStorage';
+import { useSidePanel } from 'src/hooks/useSidePanel';
 import { useChatSessions } from 'src/hooks/useChatSessions';
 import {
   type ReasoningEffort,
@@ -56,6 +56,7 @@ import {
 } from 'src/hooks/useModelProfilesApi';
 import {
   type ActionConfirmation,
+  effectiveConfirmationStatus,
   useConfirmationsApi,
 } from 'src/hooks/useConfirmationsApi';
 import { useFeature } from 'src/features.context';
@@ -63,6 +64,8 @@ import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import ChatInput from 'src/components/ChatInput';
 import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
+import ChatConfirmationCard from 'src/components/ChatConfirmationCard';
+import { BypassChip, BypassConfirmDialog } from 'src/components/ChatBypass';
 import ChatElicitationCard from 'src/components/ChatElicitationCard';
 import { reconcileElicitationDetail } from 'src/utils/elicitationDetails';
 import { useChatElicitations } from 'src/hooks/useChatElicitations';
@@ -74,6 +77,12 @@ import { useChatHumanInputResume } from 'src/hooks/useChatHumanInputResume';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { CHAT_LANDING_PATH, chatSessionPath } from 'src/utils/chatPaths';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
+import { alpha } from '@mui/material/styles';
+
+// The conversation reads as one centered column — answers are documents, and
+// past this width lines grow too long to follow. The composer shares it.
+const CHAT_COLUMN_MAX_WIDTH = 780;
 
 // How often the streamed answer is written into React state.
 //
@@ -219,13 +228,31 @@ export function ModelProfileSelect({
   const value =
     profileId && reasoningEffort ? `${profileId}:${reasoningEffort}` : '';
   return (
+    // A quiet text control in the composer's control row rather than a full
+    // field: it truncates before it crowds the send button.
     <FormControl
       disabled={disabled}
       size="small"
-      sx={{ maxWidth: '100%', minWidth: { xs: 200, sm: 260 } }}
+      sx={{ flexShrink: 1, minWidth: 0 }}
     >
       <Select
+        variant="standard"
+        disableUnderline
         inputProps={{ 'aria-label': 'Model and reasoning' }}
+        sx={(theme) => ({
+          borderRadius: 1,
+          color: 'text.secondary',
+          fontSize: theme.typography.body2.fontSize,
+          '&:hover': { bgcolor: 'action.hover', color: 'text.primary' },
+          '& .MuiSelect-select': {
+            overflow: 'hidden',
+            pl: 1,
+            py: 0.5,
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          },
+          '& .MuiSelect-icon': { color: 'inherit' },
+        })}
         onChange={(event) => {
           const selected = options.find(
             (option) => option.key === event.target.value,
@@ -628,9 +655,9 @@ function DetailRow({ detail }: { detail: SeizuChatDetail }) {
       onChange={(_event, next) => setToggled(next)}
       slotProps={{ transition: { timeout: 0, unmountOnExit: true } }}
       sx={{
-        border: 1,
-        borderColor: 'divider',
-        borderRadius: 1,
+        // A section of the trace, not a card in it: the list draws the
+        // dividers between steps.
+        bgcolor: 'transparent',
         '&:before': { display: 'none' },
       }}
     >
@@ -663,10 +690,13 @@ function DetailRow({ detail }: { detail: SeizuChatDetail }) {
             <DetailPre label="Arguments" value={detail.arguments} />
           ) : null}
           {detail.body ? (
-            <DetailPre
-              label={detail.kind === 'thinking' ? 'Thinking' : 'Output'}
-              value={detail.body}
-            />
+            // The row already says Thinking; a thought needs no second label,
+            // and reads as prose rather than as tool output.
+            detail.kind === 'thinking' ? (
+              <DetailPre prose value={detail.body} />
+            ) : (
+              <DetailPre label="Output" value={detail.body} />
+            )
           ) : null}
         </AccordionDetails>
       ) : null}
@@ -752,7 +782,7 @@ const ChatMessageDetails = memo(
           onChange={(_event, nextExpanded) => setExpanded(nextExpanded)}
           slotProps={{ transition: { timeout: 0 } }}
           sx={{
-            bgcolor: 'background.paper',
+            bgcolor: 'transparent',
             border: 1,
             borderColor: 'divider',
             borderRadius: 1,
@@ -799,11 +829,13 @@ const ChatMessageDetails = memo(
                 // and no turn's trace takes over the view it scrolls through.
                 maxHeight: 'min(300px, 40vh)',
                 overflowY: 'auto',
-                px: 1,
-                py: 1,
+                px: 0.5,
+                pb: 0.5,
                 display: 'flex',
                 flexDirection: 'column',
-                gap: 0.75,
+                borderTop: 1,
+                borderColor: 'divider',
+                '& > * + *': { borderTop: 1, borderColor: 'divider' },
               }}
             >
               {tree.map((node, index) => (
@@ -823,29 +855,42 @@ const ChatMessageDetails = memo(
     detailsEqual(previous.details, next.details),
 );
 
-function DetailPre({ label, value }: { label: string; value: string }) {
+function DetailPre({
+  label,
+  value,
+  prose = false,
+}: {
+  label?: string;
+  value: string;
+  prose?: boolean;
+}) {
   return (
-    <Box sx={{ mt: 0.75 }}>
-      <Typography color="text.secondary" variant="caption">
-        {label}
-      </Typography>
+    <Box sx={{ mt: label ? 0.75 : 0.25 }}>
+      {label ? (
+        <Typography color="text.secondary" variant="caption">
+          {label}
+        </Typography>
+      ) : null}
       <Box
         component="pre"
-        sx={{
-          bgcolor: 'action.hover',
-          border: 1,
-          borderColor: 'divider',
+        sx={(theme) => ({
+          // The same light Starlight tint as code in an answer.
+          bgcolor: alpha(
+            theme.palette.primary.main,
+            theme.palette.mode === 'dark' ? 0.08 : 0.05,
+          ),
           borderRadius: 1,
-          fontFamily: '"JetBrains Mono", monospace',
-          fontSize: 11,
-          lineHeight: 1.45,
+          fontFamily: prose ? 'inherit' : fontFamilyMono,
+          fontSize: prose ? '0.8125rem' : '0.75rem',
+          lineHeight: prose ? 1.6 : 1.55,
           m: 0,
-          mt: 0.25,
+          mt: label ? 0.25 : 0,
           overflowX: 'auto',
-          p: 0.75,
+          px: 1,
+          py: 0.75,
           whiteSpace: 'pre-wrap',
           wordBreak: 'break-word',
-        }}
+        })}
       >
         {value}
       </Box>
@@ -897,7 +942,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
           alignItems: message.role === 'user' ? 'flex-end' : 'flex-start',
           display: 'flex',
           flexDirection: 'column',
-          mb: 1.5,
+          mb: 3,
           // The user's turn keeps its time and copy action out
           // of the way until the message is pointed at (or
           // reached with the keyboard). Pointer-less devices
@@ -928,37 +973,50 @@ const ChatMessageRow = memo(function ChatMessageRow({
           <ChatMessageDetails details={details} isStreaming={isStreaming} />
         ) : null}
         <Box
-          sx={{
-            bgcolor: message.role === 'user' ? 'primary.main' : 'action.hover',
-            border: message.role === 'user' ? 0 : 1,
-            borderColor: message.role === 'user' ? 'transparent' : 'divider',
-            borderRadius: 2,
-            color:
-              message.role === 'user' ? 'primary.contrastText' : 'text.primary',
-            maxWidth: { xs: '92%', md: '74%' },
-            px: 1.5,
-            py: 1,
-            whiteSpace: message.role === 'user' ? 'pre-wrap' : 'normal',
-            wordBreak: 'break-word',
-          }}
+          sx={
+            message.role === 'user'
+              ? (theme) => ({
+                  // A Starlight tint on the page, not a filled primary block:
+                  // the question stays distinct without shouting over the
+                  // answer it asked for.
+                  bgcolor: alpha(
+                    theme.palette.primary.main,
+                    theme.palette.mode === 'dark' ? 0.12 : 0.08,
+                  ),
+                  borderRadius: 2,
+                  borderTopRightRadius: 4,
+                  color: 'text.primary',
+                  maxWidth: { xs: '92%', md: '80%' },
+                  px: 1.75,
+                  py: 1.25,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                })
+              : {
+                  // An answer is read like a document, straight on the page.
+                  color: 'text.primary',
+                  width: '100%',
+                  wordBreak: 'break-word',
+                }
+          }
         >
           {message.role === 'user' ? (
-            <Typography variant="body2">
+            <Typography variant="body1">
               {text || (busy ? '...' : '')}
             </Typography>
           ) : (
             <Box
               sx={(theme) => ({
                 color: 'text.primary',
-                fontSize: theme.typography.body2.fontSize,
-                lineHeight: theme.typography.body2.lineHeight,
+                fontSize: theme.typography.body1.fontSize,
+                lineHeight: 1.65,
                 width: '100%',
                 '& > :first-child': { mt: 0 },
                 '& > :last-child': { mb: 0 },
                 '& p': {
                   fontSize: 'inherit',
                   lineHeight: 'inherit',
-                  mb: 1,
+                  mb: 1.5,
                   mt: 0,
                 },
                 '& ul, & ol': {
@@ -969,12 +1027,20 @@ const ChatMessageRow = memo(function ChatMessageRow({
                 },
                 '& li': { mb: 0.5, pl: 0.25 },
                 '& li > p': { mb: 0.5 },
-                '& h2, & h3, & h4, & h5, & h6': {
+                '& h2, & h3': {
+                  fontSize: theme.typography.h5.fontSize,
+                  fontWeight: 600,
+                  letterSpacing: theme.typography.h5.letterSpacing,
+                  lineHeight: 1.4,
+                  mb: 0.75,
+                  mt: 2.5,
+                },
+                '& h4, & h5, & h6': {
                   fontSize: theme.typography.subtitle2.fontSize,
                   fontWeight: 600,
-                  lineHeight: theme.typography.subtitle2.lineHeight,
-                  mb: 1,
-                  mt: 1.25,
+                  lineHeight: 1.45,
+                  mb: 0.5,
+                  mt: 2,
                 },
                 '& hr': {
                   border: 0,
@@ -982,25 +1048,33 @@ const ChatMessageRow = memo(function ChatMessageRow({
                   borderColor: 'divider',
                   my: 2,
                 },
+                // Code takes the same Starlight tint as the user's turn, at
+                // one strength for inline spans and blocks alike.
                 '& pre': {
-                  bgcolor: 'background.paper',
-                  border: 1,
-                  borderColor: 'divider',
+                  bgcolor: alpha(
+                    theme.palette.primary.main,
+                    theme.palette.mode === 'dark' ? 0.08 : 0.05,
+                  ),
                   borderRadius: 1,
-                  fontFamily: '"JetBrains Mono", monospace',
-                  fontSize: theme.typography.caption.fontSize,
-                  lineHeight: 1.55,
-                  my: 1.25,
+                  fontFamily: fontFamilyMono,
+                  fontSize: '0.8125rem',
+                  lineHeight: 1.6,
+                  my: 1.5,
                   overflowX: 'auto',
-                  p: 1,
+                  px: 1.5,
+                  py: 1.25,
                   whiteSpace: 'pre',
                 },
                 '& code': {
-                  bgcolor: 'background.paper',
+                  bgcolor: alpha(
+                    theme.palette.primary.main,
+                    theme.palette.mode === 'dark' ? 0.12 : 0.08,
+                  ),
                   borderRadius: 0.5,
-                  fontFamily: '"JetBrains Mono", monospace',
-                  fontSize: '0.9em',
+                  fontFamily: fontFamilyMono,
+                  fontSize: '0.875em',
                   px: 0.5,
+                  py: 0.125,
                 },
                 '& pre code': {
                   bgcolor: 'transparent',
@@ -1154,6 +1228,9 @@ const ChatTranscript = memo(function ChatTranscript({
   onElicitationAnswered,
   onElicitationResume,
   onLoadMore,
+  confirmations,
+  decidingConfirmationId,
+  onConfirmationDecision,
   scrollRef,
 }: {
   chat: Chat<SeizuChatMessage>;
@@ -1174,6 +1251,13 @@ const ChatTranscript = memo(function ChatTranscript({
   onElicitationAnswered: (item: ChatElicitation) => void;
   onElicitationResume: (item: ChatElicitation) => void;
   onLoadMore: (message: SeizuChatMessage) => void;
+  /** Pending confirmations, shown under the turn that is waiting on them. */
+  confirmations: ActionConfirmation[];
+  decidingConfirmationId: string | null;
+  onConfirmationDecision: (
+    confirmation: ActionConfirmation,
+    decision: 'approved' | 'denied',
+  ) => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const { messages, status } = useChat<SeizuChatMessage>({
@@ -1233,7 +1317,7 @@ const ChatTranscript = memo(function ChatTranscript({
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ block: 'end' });
-  }, [historyPolling, messages, scrollRef]);
+  }, [confirmations.length, historyPolling, messages, scrollRef]);
 
   return (
     <Box
@@ -1242,7 +1326,7 @@ const ChatTranscript = memo(function ChatTranscript({
         minHeight: 0,
         overflowY: 'auto',
         px: { xs: 1.5, md: 2 },
-        py: 1.5,
+        py: 2,
       }}
     >
       {sessionsLoading || (historyLoading && visibleMessages.length === 0) ? (
@@ -1272,7 +1356,7 @@ const ChatTranscript = memo(function ChatTranscript({
           </Typography>
         </Box>
       ) : (
-        <>
+        <Box sx={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, mx: 'auto' }}>
           {visibleMessages.map((message) => (
             <ChatMessageRow
               key={message.id}
@@ -1300,6 +1384,15 @@ const ChatTranscript = memo(function ChatTranscript({
               }
               onAnswered={() => onElicitationAnswered(item)}
               onResume={() => onElicitationResume(item)}
+            />
+          ))}
+          {confirmations.map((confirmation) => (
+            <ChatConfirmationCard
+              key={confirmation.confirmation_id}
+              confirmation={confirmation}
+              deciding={decidingConfirmationId === confirmation.confirmation_id}
+              inline
+              onDecision={onConfirmationDecision}
             />
           ))}
           {elicitationError && (
@@ -1337,7 +1430,7 @@ const ChatTranscript = memo(function ChatTranscript({
               </Typography>
             </Box>
           ) : null}
-        </>
+        </Box>
       )}
       <div ref={scrollRef} />
     </Box>
@@ -1473,7 +1566,8 @@ export default function ChatInterface() {
   // Inline arrows here defeat the panels' own memo: a new identity every
   // render means both re-render on every streamed token, which is most of
   // the work a long answer does.
-  const togglePanel = useCallback(() => setPanelOpen((open) => !open), []);
+  const sessionsPanel = useSidePanel(panelOpen, setPanelOpen);
+  const { toggle: togglePanel, dismiss: dismissSessionsPanel } = sessionsPanel;
   const toggleConfirmations = useCallback(
     () => setConfirmationsOpen((open) => !open),
     [],
@@ -1482,6 +1576,24 @@ export default function ChatInterface() {
   // per-session opt-in for users holding chat:bypass_permissions.
   const [bypassConfirmations, setBypassConfirmations] = useState(false);
   const bypassConfirmationsRef = useRef(false);
+  // Turning bypass on is acknowledged once per visit, in a dialog that says
+  // what it changes; turning it off never asks.
+  const [bypassDialogOpen, setBypassDialogOpen] = useState(false);
+  const bypassAcknowledgedRef = useRef(false);
+  const requestBypassChange = useCallback((value: boolean) => {
+    if (!value || bypassAcknowledgedRef.current) {
+      setBypassConfirmations(value);
+      return;
+    }
+    setBypassDialogOpen(true);
+  }, []);
+  const confirmBypass = useCallback(() => {
+    bypassAcknowledgedRef.current = true;
+    setBypassDialogOpen(false);
+    setBypassConfirmations(true);
+  }, []);
+  const cancelBypass = useCallback(() => setBypassDialogOpen(false), []);
+  const turnOffBypass = useCallback(() => setBypassConfirmations(false), []);
   const [decidingConfirmationId, setDecidingConfirmationId] = useState<
     string | null
   >(null);
@@ -1915,24 +2027,32 @@ export default function ChatInterface() {
 
   const handleSelectSession = useCallback(
     (threadId: string) => {
+      dismissSessionsPanel();
       if (threadId === activeThreadId) return;
       setMessages([]);
       setAutoTitleError(null);
       setStoredActiveSessionId(threadId);
       navigate(chatSessionPath(threadId));
     },
-    [activeThreadId, navigate, setMessages, setStoredActiveSessionId],
+    [
+      activeThreadId,
+      dismissSessionsPanel,
+      navigate,
+      setMessages,
+      setStoredActiveSessionId,
+    ],
   );
 
   // No API call: "new session" is the landing, and the session is created by
   // the question. Which conversation is on screen follows the route, so
   // navigating is the whole of it.
   const handleNewSession = useCallback(() => {
+    dismissSessionsPanel();
     setMessages([]);
     setAutoTitleError(null);
     setPendingAttach(null);
     navigate(CHAT_LANDING_PATH);
-  }, [navigate, setMessages]);
+  }, [dismissSessionsPanel, navigate, setMessages]);
 
   // The landing's question: create the session, show it, and admit its turn.
   //
@@ -2291,6 +2411,63 @@ export default function ChatInterface() {
     ],
   );
 
+  // While bypass is on the composer says so, beside the model it applies to.
+  const bypassOn = canBypassConfirmations && bypassConfirmations;
+  const bypassChip = useMemo(
+    () => (bypassOn ? <BypassChip onTurnOff={turnOffBypass} /> : null),
+    [bypassOn, turnOffBypass],
+  );
+  const landingComposerControls = useMemo(
+    () => (
+      <>
+        {landingProfileControl}
+        {bypassChip}
+      </>
+    ),
+    [bypassChip, landingProfileControl],
+  );
+  const activeComposerControls = useMemo(
+    () => (
+      <>
+        {activeProfileControl}
+        {bypassChip}
+      </>
+    ),
+    [activeProfileControl, bypassChip],
+  );
+  const pendingConfirmations = useMemo(
+    () =>
+      confirmations.filter(
+        (confirmation) =>
+          effectiveConfirmationStatus(confirmation) === 'pending',
+      ),
+    [confirmations],
+  );
+
+  // On the landing as well as in a conversation: it holds the bypass setting,
+  // which applies to the first message as much as to any later one.
+  const confirmationsPanel = (
+    <ChatConfirmationsPanel
+      confirmations={confirmations}
+      loading={confirmationsLoading}
+      error={confirmationsError}
+      open={confirmationsOpen}
+      decidingId={decidingConfirmationId}
+      onToggle={toggleConfirmations}
+      onDecision={handleConfirmationDecisionSync}
+      canBypassConfirmations={canBypassConfirmations}
+      bypassConfirmations={bypassConfirmations}
+      onBypassConfirmationsChange={requestBypassChange}
+    />
+  );
+  const bypassDialog = (
+    <BypassConfirmDialog
+      open={bypassDialogOpen}
+      onCancel={cancelBypass}
+      onConfirm={confirmBypass}
+    />
+  );
+
   if (!chatEnabled) {
     return (
       <Box sx={pageContentSx}>
@@ -2335,7 +2512,8 @@ export default function ChatInterface() {
         }}
       >
         <ChatSessionsPanel
-          open={panelOpen}
+          open={sessionsPanel.open}
+          overlay={sessionsPanel.overlay}
           onToggle={togglePanel}
           sessions={sessions}
           loading={sessionsLoading}
@@ -2383,7 +2561,8 @@ export default function ChatInterface() {
           resume={resumeAttached}
         />
         <ChatSessionsPanel
-          open={panelOpen}
+          open={sessionsPanel.open}
+          overlay={sessionsPanel.overlay}
           onToggle={togglePanel}
           sessions={sessions}
           loading={sessionsLoading}
@@ -2407,7 +2586,7 @@ export default function ChatInterface() {
             overflow: 'auto',
           }}
         >
-          <Box sx={{ maxWidth: 720, width: '100%' }}>
+          <Box sx={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, width: '100%' }}>
             <Typography
               component="h1"
               sx={{ mb: 2, textAlign: 'center' }}
@@ -2430,16 +2609,16 @@ export default function ChatInterface() {
               // busy turns the send button into a Stop, and there is nothing
               // here to stop.
               busy={false}
-              bypassConfirmations={bypassConfirmations}
               disabled={creatingSession}
-              footerControls={landingProfileControl}
-              onBypassConfirmationsChange={setBypassConfirmations}
+              footerControls={landingComposerControls}
               onSubmit={(text) => void handleStartSession(text)}
               onStop={() => {}}
-              showBypassConfirmations={canBypassConfirmations}
+              warning={bypassOn}
             />
           </Box>
         </Box>
+        {confirmationsPanel}
+        {bypassDialog}
       </Box>
     );
   }
@@ -2456,7 +2635,8 @@ export default function ChatInterface() {
         resume={resumeAttached}
       />
       <ChatSessionsPanel
-        open={panelOpen}
+        open={sessionsPanel.open}
+        overlay={sessionsPanel.overlay}
         onToggle={togglePanel}
         sessions={sessions}
         loading={sessionsLoading}
@@ -2488,7 +2668,10 @@ export default function ChatInterface() {
             overflow: 'hidden',
           }}
         >
-          <Card
+          {/* The transcript sits on the page: its messages carry their own
+              surfaces where they need one, and a card around them would put
+              one surface inside another. */}
+          <Box
             sx={{
               display: 'flex',
               height: '100%',
@@ -2508,13 +2691,16 @@ export default function ChatInterface() {
               onElicitationRespond={elicitations.respond}
               onElicitationResume={resumeElicitation}
               onLoadMore={handleLoadMore}
+              confirmations={pendingConfirmations}
+              decidingConfirmationId={decidingConfirmationId}
+              onConfirmationDecision={handleConfirmationDecisionSync}
               pendingContinuationTargetMessageId={
                 pendingContinuationTargetMessageId
               }
               scrollRef={scrollRef}
               sessionsLoading={sessionsLoading}
             />
-          </Card>
+          </Box>
         </Box>
 
         {startError ? (
@@ -2597,26 +2783,25 @@ export default function ChatInterface() {
           </Alert>
         ) : null}
 
-        <ChatInput
-          busy={busy}
-          bypassConfirmations={bypassConfirmations}
-          disabled={disabled}
-          footerControls={activeProfileControl}
-          onBypassConfirmationsChange={setBypassConfirmations}
-          onStop={handleStop}
-          onSubmit={handleSubmit}
-          showBypassConfirmations={canBypassConfirmations}
-        />
+        <Box
+          sx={{
+            maxWidth: CHAT_COLUMN_MAX_WIDTH,
+            mx: 'auto',
+            width: '100%',
+          }}
+        >
+          <ChatInput
+            busy={busy}
+            disabled={disabled}
+            footerControls={activeComposerControls}
+            onStop={handleStop}
+            onSubmit={handleSubmit}
+            warning={bypassOn}
+          />
+        </Box>
       </Box>
-      <ChatConfirmationsPanel
-        confirmations={confirmations}
-        loading={confirmationsLoading}
-        error={confirmationsError}
-        open={confirmationsOpen}
-        decidingId={decidingConfirmationId}
-        onToggle={toggleConfirmations}
-        onDecision={handleConfirmationDecisionSync}
-      />
+      {confirmationsPanel}
+      {bypassDialog}
     </Box>
   );
 }

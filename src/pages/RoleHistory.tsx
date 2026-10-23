@@ -116,6 +116,7 @@ function RoleHistory() {
   const columns: ListTableColumn<RoleVersion>[] = [
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       cellSx: { width: 120 },
       render: (version) => {
@@ -142,6 +143,7 @@ function RoleHistory() {
     },
     {
       key: 'saved',
+      stacked: 'meta',
       label: 'Saved',
       hideBelow: 'sm',
       cellSx: savedColumnSx,
@@ -149,6 +151,7 @@ function RoleHistory() {
     },
     {
       key: 'created_by',
+      stacked: 'meta',
       label: 'Created by',
       hideBelow: 'md',
       cellSx: authorColumnSx,

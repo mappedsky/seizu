@@ -1,5 +1,5 @@
 import { render, screen, cleanup, within } from '@testing-library/react';
-import GraphDetailPanel, { GraphSummaryPanel } from '../GraphDetailPanel';
+import GraphDetailPanel from '../GraphDetailPanel';
 
 afterEach(cleanup);
 
@@ -57,42 +57,5 @@ describe('GraphDetailPanel', () => {
     expect(screen.getByText('Properties')).toBeInTheDocument();
     expect(screen.getByText('AFFECTS')).toBeInTheDocument();
     expect(screen.getByText('domain-rel-id')).toBeInTheDocument();
-  });
-});
-
-describe('GraphSummaryPanel', () => {
-  it('renders an empty overview instead of crashing when graph data is malformed', () => {
-    expect(() =>
-      render(
-        <GraphSummaryPanel
-          nodes={{ bad: 'shape' }}
-          links={null}
-          nodeGroupKey="group"
-          getColor={() => '#8FB4FF'}
-        />,
-      ),
-    ).not.toThrow();
-
-    expect(screen.getByText('0 nodes')).toBeInTheDocument();
-  });
-
-  it('summarizes node groups and relationship types', () => {
-    render(
-      <GraphSummaryPanel
-        nodes={[
-          { id: 'a', group: 'CVE' },
-          { id: 'b', properties: { group: 'Package' } },
-        ]}
-        links={[{ source: 'a', target: 'b', type: 'AFFECTS' }]}
-        nodeGroupKey="group"
-        getColor={() => '#8FB4FF'}
-      />,
-    );
-
-    expect(screen.getByText('2 nodes')).toBeInTheDocument();
-    expect(screen.getByText('CVE: 1')).toBeInTheDocument();
-    expect(screen.getByText('Package: 1')).toBeInTheDocument();
-    expect(screen.getByText('1 relationship')).toBeInTheDocument();
-    expect(screen.getByText('→ AFFECTS: 1')).toBeInTheDocument();
   });
 });

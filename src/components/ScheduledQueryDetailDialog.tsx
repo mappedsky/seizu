@@ -11,6 +11,7 @@ import {
   ScheduledQueryRunError,
 } from 'src/hooks/useScheduledQueriesApi';
 import { ScheduleSpec, describeSchedule } from 'src/scheduleSpec';
+import { fontFamilyMono } from 'src/theme/typography';
 
 export interface ScheduledQueryViewData {
   name: string;
@@ -152,7 +153,7 @@ export default function ScheduledQueryDetailDialog({
                   <Typography
                     variant="body2"
                     sx={{
-                      fontFamily: 'monospace',
+                      fontFamily: fontFamilyMono,
                       fontWeight: 600,
                       minWidth: 120,
                     }}
@@ -162,7 +163,7 @@ export default function ScheduledQueryDetailDialog({
                   <Typography
                     variant="body2"
                     color="text.secondary"
-                    sx={{ fontFamily: 'monospace' }}
+                    sx={{ fontFamily: fontFamilyMono }}
                   >
                     {Array.isArray(p.value)
                       ? (p.value as unknown[]).join(', ')
@@ -171,7 +172,7 @@ export default function ScheduledQueryDetailDialog({
                       <Typography
                         component="span"
                         variant="caption"
-                        color="text.disabled"
+                        color="text.secondary"
                         sx={{ ml: 0.5 }}
                       >
                         (list)
@@ -213,14 +214,14 @@ export default function ScheduledQueryDetailDialog({
                           <Typography
                             variant="caption"
                             color="text.secondary"
-                            sx={{ fontFamily: 'monospace', minWidth: 140 }}
+                            sx={{ fontFamily: fontFamilyMono, minWidth: 140 }}
                           >
                             {k}
                           </Typography>
                           <Typography
                             variant="caption"
                             color="text.secondary"
-                            sx={{ fontFamily: 'monospace' }}
+                            sx={{ fontFamily: fontFamilyMono }}
                           >
                             {Array.isArray(v)
                               ? (v as unknown[]).join(', ')

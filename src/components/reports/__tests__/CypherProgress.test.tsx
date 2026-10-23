@@ -143,7 +143,7 @@ describe('CypherProgress', () => {
     expect(container.querySelector('.panel-info-btn')).toBeInTheDocument();
   });
 
-  it('opens the details dialog when the info button is clicked', () => {
+  it('opens the details dialog when the info button is clicked', async () => {
     useLazyCypherQuery.mockReturnValue([
       mockRunQuery,
       {
@@ -162,7 +162,8 @@ describe('CypherProgress', () => {
       </Wrapper>,
     );
     fireEvent.click(container.querySelector('.panel-info-btn')!);
-    expect(screen.getByTestId('details-dialog')).toBeInTheDocument();
+    // The dialog is fetched on first open.
+    expect(await screen.findByTestId('details-dialog')).toBeInTheDocument();
   });
 
   it('shows validation error state when queryErrors are present', () => {

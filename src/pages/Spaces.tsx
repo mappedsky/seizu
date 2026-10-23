@@ -247,6 +247,7 @@ function Spaces() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Latest Update',
       hideBelow: 'xl',
       cellSx: updatedAtColumnSx,
@@ -254,6 +255,7 @@ function Spaces() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated By',
       hideBelow: 'lg',
       cellSx: updatedByColumnSx,

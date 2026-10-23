@@ -114,13 +114,13 @@ def _range(value: int) -> ScheduleRange:
 
 
 def _calendar(spec: ScheduleSpec) -> list[ScheduleCalendarSpec]:
-    common = {"hour": [_range(spec.hour)], "minute": [_range(spec.minute)]}
     if spec.type == "daily":
         # Temporal calendar Sunday=0; Seizu/Python Monday=0.
         return [
             ScheduleCalendarSpec(
                 day_of_week=[_range((day + 1) % 7) for day in spec.days_of_week],
-                **common,
+                hour=[_range(spec.hour)],
+                minute=[_range(spec.minute)],
             )
         ]
     # Temporal has no "clamp to the month's last day" rule, so any day >= 28
@@ -131,7 +131,8 @@ def _calendar(spec: ScheduleSpec) -> list[ScheduleCalendarSpec]:
     return [
         ScheduleCalendarSpec(
             day_of_month=[_range(day) for day in candidates],
-            **common,
+            hour=[_range(spec.hour)],
+            minute=[_range(spec.minute)],
         )
     ]
 

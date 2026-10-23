@@ -86,7 +86,7 @@ export default function ConstellationSpinner({
   const ringColor = isDark ? brand.starlight : brand.starlightDark;
   const goldColor = isDark ? brand.ember : brand.emberDark;
   const blueColor = isDark ? brand.starlight : brand.starlightDark;
-  const whiteColor = isDark ? '#ffffff' : '#0a0f22';
+  const whiteColor = isDark ? '#fff' : brand.space;
 
   function nodeColor(role: string): string {
     if (role === 'gold') return goldColor;
@@ -109,6 +109,12 @@ export default function ConstellationSpinner({
   useEffect(() => {
     t0Ref.current = null; // reset on mount/remount
     let cancelled = false;
+    // Under reduced motion the ring's brightness still travels, so the
+    // spinner reads as working, but the nodes no longer scale or wobble.
+    const reduceMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     function tick(now: number) {
       if (cancelled) return;
@@ -139,10 +145,12 @@ export default function ConstellationSpinner({
         const sc = (0.74 + 0.26 * tw).toFixed(3);
         const wob = (7 * Math.sin(tsec * 0.9 + TWINKLE_PHASES[i])).toFixed(2);
         const n = NODES[i];
-        el.setAttribute(
-          'transform',
-          `translate(${n.x} ${n.y}) rotate(${wob}) scale(${sc}) translate(${-n.x} ${-n.y})`,
-        );
+        if (!reduceMotion) {
+          el.setAttribute(
+            'transform',
+            `translate(${n.x} ${n.y}) rotate(${wob}) scale(${sc}) translate(${-n.x} ${-n.y})`,
+          );
+        }
         el.setAttribute('opacity', (0.5 + 0.5 * tw).toFixed(3));
       }
 

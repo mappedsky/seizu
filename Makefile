@@ -117,6 +117,13 @@ chat_harness:
 test_frontend:
 	@docker compose run --rm --no-deps seizu-node bun run type-check
 
+# Runs on the host: the hooks need git, which the container does not have.
+# The mypy hook shells out to `uv run`, which creates the project environment
+# on first use.
+.PHONY: lint
+lint:
+	pre-commit run --all-files
+
 .PHONY: lock
 lock:
 	docker compose run --rm seizu uv lock

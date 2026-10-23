@@ -403,6 +403,7 @@ function Toolsets() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'sm',
       cellSx: versionColumnSx,
@@ -411,6 +412,7 @@ function Toolsets() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Last updated',
       hideBelow: 'xl',
       cellSx: updatedAtColumnSx,
@@ -421,6 +423,7 @@ function Toolsets() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated by',
       hideBelow: 'lg',
       cellSx: updatedByColumnSx,

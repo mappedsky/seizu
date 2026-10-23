@@ -75,6 +75,7 @@ function ScheduledQueryHistory() {
   const columns: ListTableColumn<ScheduledQueryVersion>[] = [
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       cellSx: { width: 120 },
       render: (version) => {
@@ -120,6 +121,7 @@ function ScheduledQueryHistory() {
     },
     {
       key: 'saved',
+      stacked: 'meta',
       label: 'Saved',
       hideBelow: 'sm',
       cellSx: savedColumnSx,
@@ -127,6 +129,7 @@ function ScheduledQueryHistory() {
     },
     {
       key: 'created_by',
+      stacked: 'meta',
       label: 'Created by',
       hideBelow: 'md',
       cellSx: authorColumnSx,

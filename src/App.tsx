@@ -6,8 +6,9 @@ import CssBaseline from '@mui/material/CssBaseline';
 import GlobalStyles from 'src/components/GlobalStyles';
 import AuthProvider from 'src/components/AuthProvider';
 import shadows from 'src/theme/shadows';
+import { shape, surfaceComponents } from 'src/theme/surfaces';
 import typography from 'src/theme/typography';
-import { brand } from 'src/theme/brand';
+import { paletteFor } from 'src/theme/palette';
 import { contentContainerRootStyles } from 'src/theme/layout';
 import routes from 'src/routes';
 import {
@@ -64,26 +65,12 @@ function App() {
   const theme = useMemo(
     () =>
       createTheme({
-        palette: prefersDarkMode
-          ? {
-              mode: 'dark',
-              primary: { main: brand.starlight, contrastText: brand.space },
-              secondary: { main: brand.ember, contrastText: brand.space },
-              background: { default: brand.space, paper: '#111a33' },
-              text: { primary: brand.paper, secondary: '#aab8d6' },
-              divider: 'rgba(143, 180, 255, 0.15)',
-            }
-          : {
-              mode: 'light',
-              primary: { main: brand.starlightDark, contrastText: '#ffffff' },
-              secondary: { main: brand.emberDark, contrastText: '#ffffff' },
-              background: { default: brand.paper, paper: '#ffffff' },
-              text: { primary: brand.space, secondary: '#3b4a6b' },
-              divider: 'rgba(58, 90, 165, 0.16)',
-            },
+        palette: paletteFor(prefersDarkMode ? 'dark' : 'light'),
         shadows,
+        shape,
         typography,
         components: {
+          ...surfaceComponents,
           MuiContainer: {
             styleOverrides: {
               root: ({ ownerState, theme }) => ({
@@ -107,7 +94,9 @@ function App() {
       <FeaturesContext.Provider value={features}>
         <ThemeProvider theme={theme}>
           <GlobalStyles />
-          <CssBaseline />
+          {/* enableColorScheme: native scrollbars and form controls follow the
+              theme instead of staying light in dark mode. */}
+          <CssBaseline enableColorScheme />
           <AuthProvider>
             <CurrentUserProvider>{routing}</CurrentUserProvider>
           </AuthProvider>

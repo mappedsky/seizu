@@ -32,12 +32,12 @@ import EditIcon from '@mui/icons-material/Edit';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutlined';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
+import SidePanelFrame from 'src/components/SidePanelFrame';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import { listTableTruncateSx } from 'src/components/ListTable';
 import type { ReportListItem } from 'src/hooks/useReportsApi';
 import type { SpaceTree, SubspaceItem } from 'src/hooks/useSpacesApi';
 
-const PANEL_WIDTH = 260;
 // Tightened from the MUI default so the footer actions sit at the same rhythm
 // as the report rows above them.
 const footerActionIconSx = { minWidth: 32 } as const;
@@ -58,6 +58,8 @@ const REPORT_NAME_GAP = 2;
 
 interface SpaceReportsPanelProps {
   open: boolean;
+  /** Float over the report instead of beside it (see `useSidePanel`). */
+  overlay?: boolean;
   onToggle: () => void;
   tree: SpaceTree;
   /** The report whose row is highlighted — the URL's report, if any. */
@@ -90,6 +92,7 @@ interface ReportGroup {
 
 function SpaceReportsPanel({
   open,
+  overlay = false,
   onToggle,
   tree,
   selectedReportId,
@@ -256,32 +259,28 @@ function SpaceReportsPanel({
 
   if (!open) {
     return (
-      <Box sx={{ p: 1, borderRight: 1, borderColor: 'divider' }}>
-        <Tooltip title="Show reports">
-          <IconButton aria-label="Show reports" size="small" onClick={onToggle}>
-            <ChevronRight />
-          </IconButton>
-        </Tooltip>
-      </Box>
+      <SidePanelFrame open={false} overlay={overlay} onClose={onToggle}>
+        <Box sx={{ display: 'flex', justifyContent: 'center', pt: 1 }}>
+          <Tooltip title="Show reports">
+            <IconButton
+              aria-label="Show reports"
+              size="small"
+              onClick={onToggle}
+            >
+              <ChevronRight />
+            </IconButton>
+          </Tooltip>
+        </Box>
+      </SidePanelFrame>
     );
   }
 
+  // The frame clips, so the scroll region is the list below rather than the
+  // whole panel, and the header stays put instead of scrolling out from under
+  // the navbar.
   return (
     <>
-      <Box
-        sx={{
-          width: PANEL_WIDTH,
-          flexShrink: 0,
-          borderRight: 1,
-          borderColor: 'divider',
-          display: 'flex',
-          flexDirection: 'column',
-          height: '100%',
-          // The scroll region is the list below, not the whole panel, so the
-          // header stays put instead of scrolling out from under the navbar.
-          overflow: 'hidden',
-        }}
-      >
+      <SidePanelFrame open overlay={overlay} onClose={onToggle}>
         {/* Title row: the space's own name, so the list below is only reports.
             Creation lives in the footer action group. */}
         <Box
@@ -496,7 +495,7 @@ function SpaceReportsPanel({
             </ListItem>
           </List>
         </Box>
-      </Box>
+      </SidePanelFrame>
 
       <Dialog
         open={subspaceDialogOpen}

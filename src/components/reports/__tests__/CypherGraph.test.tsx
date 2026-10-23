@@ -1,7 +1,13 @@
 import { type Edge, type Node } from '@xyflow/react';
 import {
   applyFocusOpacity,
+  applyGroupFocus,
+  dotDiameter,
+  placeNodeLabels,
   buildXyEdges,
+  placeEdgeLabels,
+  relationshipTypes,
+  applyTypeFocus,
   closestEdgeHandles,
   computeLayout,
   extractGraphData,
@@ -251,13 +257,13 @@ describe('buildXyEdges', () => {
     expect(result[0].labelShowBg).toBe(false);
     expect(result[0].labelStyle).toMatchObject({
       color: EDGE_COLOR,
-      fontSize: 9,
+      fontSize: 11,
       fontWeight: 500,
       opacity: 1,
     });
     expect(result[0].style).toMatchObject({
       stroke: EDGE_COLOR,
-      strokeWidth: 1.4,
+      strokeWidth: 1.2,
       opacity: 1,
     });
   });
@@ -358,13 +364,13 @@ describe('relationshipLabelTransform', () => {
 
   it('offsets relationship labels above the edge line', () => {
     expect(relationshipLabelTransform(0, 0, 10, 0, 5, 0)).toBe(
-      'translate(-50%, -50%) translate(5px, -6.5px) rotate(0deg)',
+      'translate(-50%, -50%) translate(5px, -7.5px) rotate(0deg)',
     );
   });
 
   it('keeps labels readable on right-to-left edges', () => {
     expect(relationshipLabelTransform(10, 0, 0, 0, 5, 0)).toBe(
-      'translate(-50%, -50%) translate(5px, -6.5px) rotate(0deg)',
+      'translate(-50%, -50%) translate(5px, -7.5px) rotate(0deg)',
     );
   });
 });
@@ -560,5 +566,238 @@ describe('applyFocusOpacity', () => {
       expect(x.style?.background).toBe('red');
       expect(x.style?.opacity).toBe(0.35);
     });
+  });
+});
+
+describe('placeEdgeLabels', () => {
+  const at = (entries: Array<[string, number, number]>) =>
+    new Map(entries.map(([id, x, y]) => [id, { x, y }]));
+
+  it('gives edges between the same two nodes one label naming them all', () => {
+    const placed = placeEdgeLabels(
+      [
+        { source: 'a', target: 'b', type: 'REST' },
+        { source: 'b', target: 'a', type: 'REST' },
+        { source: 'a', target: 'b', type: 'tools' },
+      ],
+      at([
+        ['a', 0, 0],
+        ['b', 400, 0],
+      ]),
+    );
+
+    expect(placed.map((p) => p.label)).toEqual([
+      'REST ×2 · tools',
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('moves a label along its edge to clear one already placed', () => {
+    // Two long edges crossing at their midpoints.
+    const placed = placeEdgeLabels(
+      [
+        { source: 'a', target: 'b', type: 'first' },
+        { source: 'c', target: 'd', type: 'second' },
+      ],
+      at([
+        ['a', 0, 0],
+        ['b', 600, 600],
+        ['c', 600, 0],
+        ['d', 0, 600],
+      ]),
+    );
+
+    expect(placed.every((p) => !p.labelHidden)).toBe(true);
+    expect(placed[0].labelT).not.toBe(placed[1].labelT);
+  });
+
+  it('holds back a label with no clear place rather than overprinting', () => {
+    // Two short edges crossing between nodes that leave no room to move.
+    const placed = placeEdgeLabels(
+      [
+        { source: 'a', target: 'b', type: 'schedules' },
+        { source: 'c', target: 'd', type: 'queries' },
+      ],
+      at([
+        ['a', 0, 0],
+        ['b', 110, 110],
+        ['c', 110, 0],
+        ['d', 0, 110],
+      ]),
+    );
+
+    expect(placed.filter((p) => p.labelHidden)).toHaveLength(1);
+  });
+
+  it('holds back a label longer than the line between its dots', () => {
+    const placed = placeEdgeLabels(
+      [
+        { source: 'a', target: 'b', type: 'HAS_DEPENDENCY' },
+        { source: 'c', target: 'd', type: 'HAS_DEPENDENCY' },
+      ],
+      at([
+        ['a', 0, 0],
+        ['b', 60, 0],
+        ['c', 0, 200],
+        ['d', 300, 200],
+      ]),
+    );
+
+    expect(placed.map((p) => p.labelHidden)).toEqual([true, false]);
+  });
+});
+
+describe('relationshipTypes', () => {
+  it('lists types most common first, each with its own stroke', () => {
+    const types = relationshipTypes([
+      { source: 'a', target: 'b', type: 'OWNER' },
+      { source: 'a', target: 'c', type: 'REQUIRES' },
+      { source: 'a', target: 'd', type: 'REQUIRES' },
+    ]);
+    expect(types.map((t) => [t.type, t.count])).toEqual([
+      ['REQUIRES', 2],
+      ['OWNER', 1],
+    ]);
+    expect(types[0].dash).toBeUndefined();
+    expect(types[1].dash).toBeDefined();
+  });
+
+  it('draws a single type solid', () => {
+    expect(
+      relationshipTypes([{ source: 'a', target: 'b', type: 'OWNER' }])[0].dash,
+    ).toBeUndefined();
+  });
+});
+
+describe('dotDiameter', () => {
+  it('grows with degree, by square root, within its bounds', () => {
+    expect(dotDiameter(0)).toBe(14);
+    expect(dotDiameter(4)).toBeGreaterThan(dotDiameter(1));
+    expect(dotDiameter(16) - dotDiameter(4)).toBeLessThan(
+      dotDiameter(4) - dotDiameter(0) + 1,
+    );
+    expect(dotDiameter(10_000)).toBe(40);
+  });
+});
+
+describe('placeNodeLabels', () => {
+  const centres = (entries: Array<[string, number, number]>) =>
+    new Map(entries.map(([id, x, y]) => [id, { x, y }]));
+
+  it('names every star that has room, to its right first', () => {
+    const placed = placeNodeLabels(
+      [
+        { id: 'a', label: 'FastAPI', degree: 3 },
+        { id: 'b', label: 'Report store', degree: 1 },
+      ],
+      centres([
+        ['a', 0, 0],
+        ['b', 0, 200],
+      ]),
+      new Map(),
+    );
+    expect(placed.get('a')?.side).toBe('right');
+    expect(placed.get('b')?.side).toBe('right');
+  });
+
+  it('lets the less connected name give way in a crowd', () => {
+    // The hub and the leaf place first; the star crowded between them finds
+    // its right side on the leaf's dot and its left on the hub's name.
+    const placed = placeNodeLabels(
+      [
+        { id: 'hub', label: 'severity-hub', degree: 9 },
+        { id: 'leaf', label: 'leaf-node-name', degree: 1 },
+        { id: 'mid', label: 'middle-name', degree: 0 },
+      ],
+      centres([
+        ['hub', 0, 0],
+        ['leaf', 180, 0],
+        ['mid', 110, 0],
+      ]),
+      new Map(),
+    );
+    expect(placed.get('hub')?.side).toBe('right');
+    expect(placed.get('mid')?.side).toBeNull();
+  });
+});
+
+describe('applyGroupFocus', () => {
+  const nodes = [
+    { id: 'a', position: { x: 0, y: 0 }, data: { group: 'CRITICAL' } },
+    { id: 'b', position: { x: 0, y: 0 }, data: { group: 'CRITICAL' } },
+    { id: 'c', position: { x: 0, y: 0 }, data: { group: 'LOW' } },
+  ] as Node[];
+  const edges = [
+    { id: 'e1', source: 'a', target: 'b' },
+    { id: 'e2', source: 'a', target: 'c' },
+  ] as Edge[];
+
+  it('lights one group and the relationships inside it', () => {
+    const { nodes: n, edges: e } = applyGroupFocus(
+      nodes,
+      edges,
+      'CRITICAL',
+      EDGE_COLOR,
+    );
+    expect(n.map((x) => x.data.focused)).toEqual([true, true, false]);
+    expect(n[2].style?.opacity).toBe(0.35);
+    expect(e.map((x) => x.data?.focused)).toEqual([true, false]);
+  });
+
+  it('clears with no group', () => {
+    const { nodes: n } = applyGroupFocus(nodes, edges, null, EDGE_COLOR);
+    expect(n.every((x) => x.style?.opacity === 1)).toBe(true);
+  });
+});
+
+describe('applyTypeFocus', () => {
+  const nodes = [
+    { id: 'a', position: { x: 0, y: 0 }, data: {} },
+    { id: 'b', position: { x: 0, y: 0 }, data: {} },
+    { id: 'c', position: { x: 0, y: 0 }, data: {} },
+  ] as Node[];
+  const edges = [
+    { id: 'e1', source: 'a', target: 'b', data: { relType: 'OWNER' } },
+    { id: 'e2', source: 'a', target: 'c', data: { relType: 'REQUIRES' } },
+  ] as Edge[];
+
+  it('lights one type and the nodes it joins, with its labels quiet', () => {
+    const { nodes: n, edges: e } = applyTypeFocus(
+      nodes,
+      edges,
+      'OWNER',
+      EDGE_COLOR,
+    );
+    expect(n.map((x) => x.data.focused)).toEqual([true, true, false]);
+    expect(e.map((x) => x.data?.focused)).toEqual([true, false]);
+    expect(e[0].data?.labelMuted).toBe(true);
+    expect(e[1].style?.opacity).toBe(0.35);
+  });
+
+  it('clears with no type, unmuting the labels', () => {
+    const { edges: e } = applyTypeFocus(nodes, edges, null, EDGE_COLOR);
+    expect(e.every((x) => x.data?.labelMuted === false)).toBe(true);
+  });
+});
+
+describe('applyFocusOpacity on a hub', () => {
+  it('keeps a hub from plating more labels than can be read', () => {
+    const spokes = Array.from({ length: 13 }, (_, i) => `n${i}`);
+    const nodes = ['hub', ...spokes].map((id) => ({
+      id,
+      position: { x: 0, y: 0 },
+      data: {},
+    })) as Node[];
+    const edges = spokes.map((id, i) => ({
+      id: `e${i}`,
+      source: 'hub',
+      target: id,
+      data: { labelHidden: i > 0 },
+    })) as Edge[];
+
+    const { edges: e } = applyFocusOpacity(nodes, edges, 'hub', EDGE_COLOR);
+    expect(e[0].data?.labelMuted).toBe(false);
+    expect(e.slice(1).every((x) => x.data?.labelMuted === true)).toBe(true);
   });
 });
