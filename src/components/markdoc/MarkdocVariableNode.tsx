@@ -3,6 +3,7 @@ import { NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
 import type { NodeViewProps } from '@tiptap/react';
 import { Chip } from '@mui/material';
 import type MarkdownIt from 'markdown-it';
+import { fontFamilyMono } from 'src/theme/typography';
 
 // Recognise compact `{%$name%}` and the spaced form `{% $name %}` — the
 // renderer accepts both on input, but the editor's serializer always writes
@@ -55,7 +56,7 @@ function MarkdocVariableChip({ node }: NodeViewProps) {
         size="small"
         label={`$${name}`}
         sx={{
-          fontFamily: 'monospace',
+          fontFamily: fontFamilyMono,
           height: 22,
           fontSize: '0.78rem',
           bgcolor: 'action.hover',

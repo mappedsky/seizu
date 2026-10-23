@@ -13,7 +13,13 @@ import Add from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 
 import type { PanelThreshold } from 'src/config.context';
-import { THRESHOLD_PRESET_COLORS } from 'src/components/reports/thresholds';
+import {
+  sameThresholdColor,
+  THRESHOLD_PRESETS,
+  thresholdCss,
+} from 'src/components/reports/thresholds';
+import { useTheme } from '@mui/material/styles';
+import { fontFamilyMono } from 'src/theme/typography';
 
 interface ColorSwatchPickerProps {
   color: string;
@@ -27,6 +33,10 @@ interface ColorSwatchPickerProps {
 function ColorSwatchPicker({ color, onChange }: ColorSwatchPickerProps) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const open = Boolean(anchor);
+  const mode = useTheme().palette.mode;
+  // What the stored value paints as on this theme; a palette name has no hex
+  // of its own for the native color input to start from.
+  const shown = thresholdCss(color, mode);
 
   return (
     <>
@@ -42,7 +52,7 @@ function ColorSwatchPicker({ color, onChange }: ColorSwatchPickerProps) {
             borderColor: 'divider',
             borderRadius: 1,
             p: 0,
-            bgcolor: color || 'transparent',
+            bgcolor: shown || 'transparent',
           }}
         />
       </Tooltip>
@@ -59,27 +69,32 @@ function ColorSwatchPicker({ color, onChange }: ColorSwatchPickerProps) {
           <Box
             sx={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(5, 24px)',
+              gridTemplateColumns: `repeat(${THRESHOLD_PRESETS.length}, 24px)`,
               gap: 0.75,
             }}
           >
-            {THRESHOLD_PRESET_COLORS.map((preset) => (
-              <Tooltip key={preset.hex} title={preset.label}>
+            {THRESHOLD_PRESETS.map((preset) => (
+              <Tooltip key={preset.name} title={preset.label}>
                 <Box
+                  component="button"
+                  type="button"
+                  aria-label={preset.label}
+                  aria-pressed={sameThresholdColor(color, preset.name)}
                   onClick={() => {
-                    onChange(preset.hex);
+                    onChange(preset.name);
                     setAnchor(null);
                   }}
                   sx={{
                     width: 24,
                     height: 24,
-                    bgcolor: preset.hex,
+                    p: 0,
+                    border: 0,
+                    bgcolor: thresholdCss(preset.name, mode),
                     borderRadius: 0.5,
                     cursor: 'pointer',
-                    outline:
-                      color.toLowerCase() === preset.hex.toLowerCase()
-                        ? '2px solid'
-                        : 'none',
+                    outline: sameThresholdColor(color, preset.name)
+                      ? '2px solid'
+                      : 'none',
                     outlineColor: 'primary.main',
                     outlineOffset: 1,
                   }}
@@ -97,7 +112,7 @@ function ColorSwatchPicker({ color, onChange }: ColorSwatchPickerProps) {
             </Typography>
             <input
               type="color"
-              value={color || '#000000'}
+              value={/^#[0-9a-f]{6}$/i.test(shown) ? shown : '#000000'}
               onChange={(e) => onChange(e.target.value)}
               style={{
                 width: 40,
@@ -115,8 +130,8 @@ function ColorSwatchPicker({ color, onChange }: ColorSwatchPickerProps) {
               placeholder="#FFFFFF"
               slotProps={{
                 htmlInput: {
-                  style: { fontFamily: 'monospace', fontSize: '0.75rem' },
-                  'aria-label': 'Hex color',
+                  style: { fontFamily: fontFamilyMono, fontSize: '0.75rem' },
+                  'aria-label': 'Color value',
                 },
               }}
               sx={{ width: 100 }}
@@ -229,7 +244,7 @@ function ThresholdsEditor({
     // intended number directly without first clearing a default.
     onChange([
       ...thresholds,
-      { value: Number.NaN, color: THRESHOLD_PRESET_COLORS[0].hex },
+      { value: Number.NaN, color: THRESHOLD_PRESETS[0].name },
     ]);
   }
 

@@ -47,6 +47,7 @@ import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import type { BackState } from 'src/navigation';
 import { describeSchedule } from 'src/scheduleSpec';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 const actionsColumnSx = { width: '18%' };
 const statusColumnSx = { width: 128 };
@@ -249,7 +250,7 @@ function ScheduledQueries() {
             color="text.secondary"
             sx={{
               ...listTableTruncateSx,
-              fontFamily: 'monospace',
+              fontFamily: fontFamilyMono,
               display: 'block',
             }}
           >
@@ -331,6 +332,7 @@ function ScheduledQueries() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'sm',
       cellSx: { ...listTableSecondaryCellSx, width: 96 },
@@ -338,6 +340,7 @@ function ScheduledQueries() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Last updated',
       hideBelow: 'xl',
       cellSx: { ...listTableSecondaryCellSx, width: 180 },
@@ -345,6 +348,7 @@ function ScheduledQueries() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated by',
       hideBelow: 'lg',
       cellSx: { ...listTableSecondaryCellSx, width: 150 },

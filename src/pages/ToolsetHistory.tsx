@@ -71,6 +71,7 @@ function ToolsetHistory() {
   const columns: ListTableColumn<ToolsetVersion>[] = [
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       cellSx: { width: 120 },
       render: (version) => {
@@ -97,6 +98,7 @@ function ToolsetHistory() {
     },
     {
       key: 'saved',
+      stacked: 'meta',
       label: 'Saved',
       hideBelow: 'sm',
       cellSx: savedColumnSx,
@@ -104,6 +106,7 @@ function ToolsetHistory() {
     },
     {
       key: 'created_by',
+      stacked: 'meta',
       label: 'Created by',
       hideBelow: 'md',
       cellSx: authorColumnSx,

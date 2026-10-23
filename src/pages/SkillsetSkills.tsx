@@ -71,6 +71,7 @@ import UserDisplay from 'src/components/UserDisplay';
 import { usePermissions } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 // Cap each slug component so the full "skillset__skill" MCP name stays <= 64
@@ -538,7 +539,7 @@ function SkillDetailDialog({
             >
               Slug
             </Typography>
-            <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+            <Typography variant="body2" sx={{ fontFamily: fontFamilyMono }}>
               {mcpNameForSkill(skill)}
             </Typography>
           </Box>
@@ -622,7 +623,7 @@ function SkillDetailDialog({
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-word',
                 m: 0,
-                fontFamily: 'monospace',
+                fontFamily: fontFamilyMono,
                 fontSize: 13,
               }}
             >
@@ -656,7 +657,7 @@ function SkillDetailDialog({
                   {parameters.map((param) => (
                     <TableRow key={param.name}>
                       <TableCell
-                        sx={{ fontFamily: 'monospace', fontWeight: 600 }}
+                        sx={{ fontFamily: fontFamilyMono, fontWeight: 600 }}
                       >
                         {param.name}
                       </TableCell>
@@ -667,7 +668,7 @@ function SkillDetailDialog({
                       <TableCell
                         sx={{
                           color: 'text.secondary',
-                          fontFamily: 'monospace',
+                          fontFamily: fontFamilyMono,
                         }}
                       >
                         {param.default !== null && param.default !== undefined
@@ -1086,6 +1087,7 @@ function SkillsetSkills() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'sm',
       cellSx: versionColumnSx,
@@ -1093,6 +1095,7 @@ function SkillsetSkills() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Last updated',
       hideBelow: 'xl',
       cellSx: updatedAtColumnSx,
@@ -1101,6 +1104,7 @@ function SkillsetSkills() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated by',
       hideBelow: 'lg',
       cellSx: updatedByColumnSx,
@@ -1208,7 +1212,7 @@ function SkillsetSkills() {
               <Box
                 component="li"
                 key={t}
-                sx={{ fontFamily: 'monospace', fontSize: 13 }}
+                sx={{ fontFamily: fontFamilyMono, fontSize: 13 }}
               >
                 {t}
               </Box>

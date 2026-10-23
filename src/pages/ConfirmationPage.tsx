@@ -14,6 +14,7 @@ import {
   useConfirmationsApi,
 } from 'src/hooks/useConfirmationsApi';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 export default function ConfirmationPage() {
   const navigate = useNavigate();
@@ -130,7 +131,7 @@ export default function ConfirmationPage() {
                   sx={{
                     bgcolor: 'action.hover',
                     borderRadius: 1,
-                    fontFamily: '"JetBrains Mono", monospace',
+                    fontFamily: fontFamilyMono,
                     fontSize: '0.8rem',
                     maxHeight: 360,
                     overflow: 'auto',

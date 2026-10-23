@@ -2,14 +2,18 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import PageTitle from 'src/components/PageTitle';
 import {
   Box,
+  Button,
   Collapse,
   Container,
   Divider,
   IconButton,
   Paper,
   Typography,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
 import Error from '@mui/icons-material/Error';
+import FilterList from '@mui/icons-material/FilterList';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 
 import { Report, type InputValue } from 'src/config.context';
@@ -268,7 +272,16 @@ function ReportView({
     Boolean(showTitle && displayTitle) || toolbarActions !== undefined;
   const hasInputsRow = inputControls.length > 0;
   const hasToolbarContent = hasHeaderRow || hasInputsRow;
-  const isSticky = stickyToolbar && hasToolbarContent;
+  // On a phone the toolbar scrolls away with the page rather than pinning: a
+  // pinned title, actions and inputs would hold a third of the screen. Its
+  // inputs fold behind a Filters button, open by choice.
+  const theme = useTheme();
+  const phone = useMediaQuery(theme.breakpoints.down('sm'), { noSsr: true });
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const activeFilterCount = (report.inputs ?? []).filter(
+    (input) => input !== undefined && Boolean(varData[input.input_id]?.value),
+  ).length;
+  const isSticky = stickyToolbar && hasToolbarContent && !phone;
 
   // A callback ref rather than a layout effect: the spacer that reserves room
   // for the fixed toolbar must be the right height on the first paint, and a
@@ -327,11 +340,13 @@ function ReportView({
       {/* Row 1: title and actions. The title lives here rather than in a band
           of its own, so a report gets one header row instead of two, and it
           truncates rather than wrapping so a long name cannot push the actions
-          off the row. */}
+          off the row. On a phone that row may have no room for both, so the
+          actions wrap below the title, which may then take two lines. */}
       {hasHeaderRow && (
         <Box
           sx={{
             display: 'flex',
+            flexWrap: { xs: 'wrap', sm: 'nowrap' },
             alignItems: 'center',
             justifyContent: 'space-between',
             gap: 1.5,
@@ -342,15 +357,18 @@ function ReportView({
           {showTitle && displayTitle && (
             <Typography
               component="h1"
-              variant="h2"
+              variant="h1"
               title={displayTitle}
               sx={{
-                lineHeight: 1.25,
-                flex: '1 1 auto',
+                [theme.breakpoints.down('sm')]: theme.typography.h2,
+                flex: { xs: '1 1 12rem', sm: '1 1 auto' },
                 minWidth: 0,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+                whiteSpace: { xs: 'normal', sm: 'nowrap' },
+                display: { xs: '-webkit-box', sm: 'block' },
+                WebkitBoxOrient: 'vertical',
+                WebkitLineClamp: { xs: 2, sm: 'none' },
               }}
             >
               {displayTitle}
@@ -376,6 +394,18 @@ function ReportView({
                 '& .MuiChip-root': {
                   height: 32,
                 },
+                // On a phone, actions with a main button get their own row:
+                // it spans the header, and the button stretches into the
+                // space between the status label and the overflow menu. An
+                // icon alone stays beside the title.
+                [theme.breakpoints.down('sm')]: {
+                  '&:has(.MuiButton-root)': {
+                    flex: '1 1 100%',
+                    flexWrap: 'nowrap',
+                    justifyContent: 'flex-start',
+                    '& .MuiButton-root': { flex: 1 },
+                  },
+                },
               }}
             >
               {toolbarActions({ onRefresh: handleRefresh, refreshedAtLabel })}
@@ -386,23 +416,57 @@ function ReportView({
       {/* Row 2: report inputs get their own bar. Sharing the row with the title
           and actions left too little space once a report had more than one
           input. */}
-      {hasInputsRow && (
+      {hasInputsRow && phone && (
         <Box
           sx={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 1,
-            flexWrap: 'wrap',
-            minWidth: 0,
-            pt: hasHeaderRow ? 0 : 2,
-            pb: 2,
-            ...(hasHeaderRow
-              ? { borderTop: 1, borderColor: 'divider', mt: 0, pt: 1.5 }
-              : {}),
+            pb: filtersOpen ? 0 : 1,
+            pt: hasHeaderRow ? 1 : 2,
+            ...(hasHeaderRow ? { borderTop: 1, borderColor: 'divider' } : {}),
           }}
         >
-          {inputControls}
+          <Button
+            aria-controls="report-filters"
+            aria-expanded={filtersOpen}
+            color="inherit"
+            endIcon={
+              <ExpandMoreIcon
+                sx={{
+                  transform: filtersOpen ? 'rotate(180deg)' : 'none',
+                  transition: 'transform 150ms ease-out',
+                }}
+              />
+            }
+            onClick={() => setFiltersOpen((open) => !open)}
+            size="small"
+            startIcon={<FilterList />}
+            sx={{ ml: -0.5 }}
+          >
+            {activeFilterCount > 0
+              ? `Filters (${activeFilterCount})`
+              : 'Filters'}
+          </Button>
         </Box>
+      )}
+      {hasInputsRow && (
+        <Collapse in={!phone || filtersOpen} id="report-filters">
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              flexWrap: 'wrap',
+              minWidth: 0,
+              pt: hasHeaderRow ? 0 : 2,
+              pb: 2,
+              ...(hasHeaderRow && !phone
+                ? { borderTop: 1, borderColor: 'divider', mt: 0, pt: 1.5 }
+                : {}),
+              ...(phone ? { pt: 1 } : {}),
+            }}
+          >
+            {inputControls}
+          </Box>
+        </Collapse>
       )}
     </Box>
   );
@@ -466,16 +530,20 @@ function ReportView({
       <Container
         key={row.name}
         maxWidth={false}
-        sx={{ ...contentContainerSx, pb: 1.5 }}
+        sx={{ ...contentContainerSx, pb: 2 }}
       >
-        <Paper
-          elevation={1}
+        {/* A row is a titled section, not a card: its panels are the cards,
+            and a card around them would nest one surface inside another. */}
+        <Box
+          component="section"
+          aria-label={hideHeader ? row.name : undefined}
+          aria-labelledby={hideHeader ? undefined : `report-row-${rowIndex}`}
           sx={{
-            p: 1.5,
-            // Remove top padding when header is hidden so the row is visually compact
-            pt: hideHeader ? 0 : 1.5,
+            pt: hideHeader ? 0 : 1,
             ...(effectiveCollapsible && {
-              '&:hover .row-collapse-btn': { opacity: 1 },
+              '&:hover .row-collapse-btn, &:focus-within .row-collapse-btn': {
+                opacity: 1,
+              },
             }),
           }}
         >
@@ -489,7 +557,12 @@ function ReportView({
           ) : (
             <>
               <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                <Typography variant="h2" sx={{ mb: 0, flex: 1 }}>
+                <Typography
+                  id={`report-row-${rowIndex}`}
+                  component="h2"
+                  variant="h3"
+                  sx={{ mb: 0, flex: 1 }}
+                >
                   {row.name}
                 </Typography>
                 {collapseBtn}
@@ -504,7 +577,7 @@ function ReportView({
           ) : (
             panelArea
           )}
-        </Paper>
+        </Box>
       </Container>
     );
   });

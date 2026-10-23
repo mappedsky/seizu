@@ -42,6 +42,7 @@ import {
   toolDeclaration,
   validateSkillAuthoring,
 } from 'src/pluginAuthoring';
+import { fontFamilyMono } from 'src/theme/typography';
 
 type SupportingDirectory = 'references' | 'scripts' | 'assets';
 
@@ -249,7 +250,7 @@ function AllowedToolsDialog({
                               color="text.secondary"
                               sx={{
                                 display: 'block',
-                                fontFamily: 'monospace',
+                                fontFamily: fontFamilyMono,
                                 overflowWrap: 'anywhere',
                               }}
                             >
@@ -408,7 +409,7 @@ function SupportingFileDialog({
                 slotProps={{
                   htmlInput: {
                     spellCheck: false,
-                    style: { fontFamily: 'monospace' },
+                    style: { fontFamily: fontFamilyMono },
                   },
                 }}
               />
@@ -589,7 +590,7 @@ export default function PluginSkillEditor({
         <Typography variant="h2" sx={{ mb: 0.5 }}>
           {title || document.portableName}
         </Typography>
-        <Typography color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+        <Typography color="text.secondary" sx={{ fontFamily: fontFamilyMono }}>
           skills/{document.portableName}/SKILL.md
         </Typography>
       </Box>
@@ -893,7 +894,7 @@ export default function PluginSkillEditor({
             >
               <Typography
                 variant="body2"
-                sx={{ fontFamily: 'monospace', flex: 1 }}
+                sx={{ fontFamily: fontFamilyMono, flex: 1 }}
               >
                 {file.path.split('/').slice(-2).join('/')}
               </Typography>

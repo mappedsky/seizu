@@ -86,6 +86,7 @@ function HistoryPage({ profileId }: { profileId: string }) {
   const columns: ListTableColumn<ModelProfileVersion>[] = [
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       cellSx: { width: 120 },
       render: (version) => (
@@ -121,6 +122,7 @@ function HistoryPage({ profileId }: { profileId: string }) {
     },
     {
       key: 'saved',
+      stacked: 'meta',
       label: 'Saved',
       hideBelow: 'sm',
       cellSx: { ...listTableSecondaryCellSx, width: 180 },
@@ -128,6 +130,7 @@ function HistoryPage({ profileId }: { profileId: string }) {
     },
     {
       key: 'created_by',
+      stacked: 'meta',
       label: 'Created By',
       hideBelow: 'md',
       cellSx: { ...listTableSecondaryCellSx, width: 150 },

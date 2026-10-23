@@ -47,13 +47,14 @@ import {
   serializeManifest,
   serializeSkillDocument,
 } from 'src/pluginAuthoring';
+import { fontFamilyMono } from 'src/theme/typography';
 
 // The rail is a fixed 260px, so its rows must ellipsize: a long skill title or
 // a long `plugin__skill` name would otherwise scroll the whole panel sideways.
 const railRowSx = { minWidth: 0, my: 0.25 };
 const railRowSlotProps = {
   primary: { noWrap: true },
-  secondary: { noWrap: true, sx: { fontFamily: 'monospace', fontSize: 12 } },
+  secondary: { noWrap: true, sx: { fontFamily: fontFamilyMono, fontSize: 12 } },
 } as const;
 
 const MANIFEST_PATH = 'plugin.json';

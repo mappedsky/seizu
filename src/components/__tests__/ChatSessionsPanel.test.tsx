@@ -1,7 +1,9 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
-import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
+import ChatSessionsPanel, {
+  groupSessionsByRecency,
+} from 'src/components/ChatSessionsPanel';
 import { DEFAULT_FEATURES, FeaturesContext } from 'src/features.context';
 import type { ChatSession } from 'src/hooks/useChatSessions';
 
@@ -96,5 +98,66 @@ describe('ChatSessionsPanel', () => {
       'href',
       '/app/chat/connections?from=thread-1',
     );
+  });
+});
+
+describe('groupSessionsByRecency', () => {
+  it('files sessions under when they were last active, in order', () => {
+    const now = new Date(2026, 9, 22, 15, 0);
+    const at = (days: number, hour = 10) =>
+      new Date(2026, 9, 22 - days, hour).toISOString();
+    const groups = groupSessionsByRecency(
+      [
+        session({ thread_id: 'a', updated_at: at(0, 14) }),
+        session({ thread_id: 'b', updated_at: at(0, 1) }),
+        session({ thread_id: 'c', updated_at: at(1) }),
+        session({ thread_id: 'd', updated_at: at(5) }),
+        session({ thread_id: 'e', updated_at: at(20) }),
+        session({ thread_id: 'f', updated_at: at(60) }),
+      ],
+      now,
+    );
+
+    expect(
+      groups.map((g) => [g.label, g.sessions.map((s) => s.thread_id)]),
+    ).toEqual([
+      ['Today', ['a', 'b']],
+      ['Yesterday', ['c']],
+      ['Previous 7 days', ['d']],
+      ['Previous 30 days', ['e']],
+      ['Earlier', ['f']],
+    ]);
+  });
+});
+
+describe('ChatSessionsPanel filter', () => {
+  afterEach(cleanup);
+
+  const many = Array.from({ length: 9 }, (_, i) =>
+    session({
+      thread_id: `t-${i}`,
+      title: i === 4 ? 'CVE triage' : `Chat ${i}`,
+    }),
+  );
+
+  it('appears only once the list is long enough to need it', () => {
+    renderPanel(many.slice(0, 3));
+    expect(
+      screen.queryByRole('textbox', { name: 'Filter sessions' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('narrows the list by title', () => {
+    renderPanel(many);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Filter sessions' }), {
+      target: { value: 'cve' },
+    });
+    expect(screen.getByText('CVE triage')).toBeInTheDocument();
+    expect(screen.queryByText('Chat 1')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Filter sessions' }), {
+      target: { value: 'nothing like this' },
+    });
+    expect(screen.getByText('No sessions match.')).toBeInTheDocument();
   });
 });

@@ -48,6 +48,7 @@ import { useCurrentUserState } from 'src/hooks/useCurrentUser';
 import { usePermissions } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 // ---------------------------------------------------------------------------
 // Run transcript rendering
@@ -424,7 +425,7 @@ function SchedulePanels({ schedule }: { schedule: ScheduledChat }) {
             sx={{
               bgcolor: 'action.hover',
               borderRadius: 1,
-              fontFamily: 'monospace',
+              fontFamily: fontFamilyMono,
               fontSize: 13,
               m: 0,
               overflow: 'auto',

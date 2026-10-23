@@ -175,7 +175,7 @@ function DashboardSidebar({
           }}
         />
       </Box>
-      <Box sx={{ p: isCollapsed ? 1 : 2 }}>
+      <Box component="nav" aria-label="Main" sx={{ p: isCollapsed ? 1 : 2 }}>
         <List>
           {items.map((item) => (
             <NavItem

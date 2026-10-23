@@ -167,7 +167,7 @@ async def respond(record: Record, response: ElicitationResponse) -> bool:
                 response_json=response.model_dump_json(),
                 decided_at=datetime.now(UTC).isoformat(),
             )
-            .returning(Record.elicitation_id)
+            .returning(col(Record.elicitation_id))
         )
         changed = result.scalar_one_or_none() is not None
         await session.commit()
@@ -206,7 +206,7 @@ async def group(record: Record, *, claim: bool = False) -> list[Record]:
                             col(Record.expires_at) > datetime.now(UTC).isoformat(),
                         )
                         .values(status="consumed", response_json=None)
-                        .returning(Record.elicitation_id)
+                        .returning(col(Record.elicitation_id))
                     )
                 )
                 .scalars()

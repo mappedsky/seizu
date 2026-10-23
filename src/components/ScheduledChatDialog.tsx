@@ -234,6 +234,7 @@ function ScheduledChatDialog({
                     sx={{ flex: 1 }}
                   />
                   <IconButton
+                    aria-label={`Remove watch scan ${i + 1}`}
                     size="small"
                     onClick={() =>
                       setWatchScans((scans) => scans.filter((_, j) => j !== i))

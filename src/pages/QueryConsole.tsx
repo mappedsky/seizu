@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Box,
-  Button,
   Card,
   CardContent,
-  TextField,
+  IconButton,
+  InputBase,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
@@ -18,11 +19,23 @@ import {
   QueryHistoryItem,
 } from 'src/hooks/useQueryHistory';
 import { pageContentSx } from 'src/theme/layout';
+import { useSidePanel } from 'src/hooks/useSidePanel';
+import { fontFamilyMono } from 'src/theme/typography';
 
 /** Exactly one thing is running: a typed query, or a stored history entry. */
 type ConsoleRun =
   | { kind: 'query'; query: string; key: number }
   | { kind: 'history'; historyId: string; key: number };
+
+// The editor starts at one line and grows with the query up to this many
+// lines, then scrolls, so the graph keeps most of the page.
+const QUERY_MAX_ROWS = 12;
+
+// The modifier this platform's users reach for; either one runs the query.
+const RUN_SHORTCUT =
+  typeof navigator !== 'undefined' && /Mac|iP(hone|ad)/.test(navigator.platform)
+    ? '⌘+Enter'
+    : 'Ctrl+Enter';
 
 const QUERY_CONSOLE_SCHEMA_PANEL_STORAGE_KEY =
   'seizu:query-console:schema-panel-open';
@@ -54,10 +67,10 @@ export default function QueryConsole() {
     );
     return storedValue === null ? true : storedValue === 'true';
   });
+  const schemaPanel = useSidePanel(schemaPanelOpen, setSchemaPanelOpen);
+  const { dismiss: dismissSchemaPanel, setOpen: setSchemaPanelShown } =
+    schemaPanel;
   const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0);
-  const [queryHeight, setQueryHeight] = useState(220);
-  const dragStartY = useRef(0);
-  const dragStartHeight = useRef(0);
 
   const handleQueryComplete = useCallback(
     (historyId: string | null) => {
@@ -129,6 +142,7 @@ export default function QueryConsole() {
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
         handleRun();
       }
     },
@@ -136,14 +150,18 @@ export default function QueryConsole() {
   );
 
   /** Insert a query from the schema browser and run it immediately. */
-  const handleQuerySelect = useCallback((query: string) => {
-    setQueryText(query);
-    setRun((previous) => ({
-      kind: 'query',
-      query,
-      key: (previous?.key ?? 0) + 1,
-    }));
-  }, []);
+  const handleQuerySelect = useCallback(
+    (query: string) => {
+      setQueryText(query);
+      setRun((previous) => ({
+        kind: 'query',
+        query,
+        key: (previous?.key ?? 0) + 1,
+      }));
+      dismissSchemaPanel();
+    },
+    [dismissSchemaPanel],
+  );
 
   /** Load a query from history into the editor and re-execute by history ID. */
   const handleHistorySelect = useCallback(
@@ -157,17 +175,21 @@ export default function QueryConsole() {
         key: (previous?.key ?? 0) + 1,
       }));
       navigate(`?h=${item.history_id}`);
+      dismissSchemaPanel();
     },
-    [navigate],
+    [navigate, dismissSchemaPanel],
   );
 
-  const handleSchemaPanelToggle = useCallback((tab?: 'schema' | 'history') => {
-    if (tab) {
-      setSchemaPanelOpen(true);
-      return;
-    }
-    setSchemaPanelOpen((value) => !value);
-  }, []);
+  const handleSchemaPanelToggle = useCallback(
+    (tab?: 'schema' | 'history') => {
+      if (tab) {
+        setSchemaPanelShown(true);
+        return;
+      }
+      setSchemaPanelShown((value) => !value);
+    },
+    [setSchemaPanelShown],
+  );
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -175,34 +197,6 @@ export default function QueryConsole() {
       String(schemaPanelOpen),
     );
   }, [schemaPanelOpen]);
-
-  const handleDragStart = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      dragStartY.current = e.clientY;
-      dragStartHeight.current = queryHeight;
-      document.body.style.cursor = 'ns-resize';
-      document.body.style.userSelect = 'none';
-
-      const handleMouseMove = (ev: MouseEvent) => {
-        const delta = dragStartY.current - ev.clientY;
-        setQueryHeight(
-          Math.max(100, Math.min(600, dragStartHeight.current + delta)),
-        );
-      };
-
-      const handleMouseUp = () => {
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
-      };
-
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-    },
-    [queryHeight],
-  );
 
   if (permissionsLoading) {
     return (
@@ -226,7 +220,8 @@ export default function QueryConsole() {
     >
       {/* Side panel (schema / history) */}
       <QueryConsoleSchemaPanel
-        open={schemaPanelOpen}
+        open={schemaPanel.open}
+        overlay={schemaPanel.overlay}
         onToggle={handleSchemaPanelToggle}
         onQuerySelect={handleQuerySelect}
         onHistorySelect={handleHistorySelect}
@@ -245,13 +240,12 @@ export default function QueryConsole() {
           overflow: 'hidden',
         }}
       >
-        {/* Graph panel — detail panel open by default in the console */}
+        {/* Graph panel */}
         <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
           {submittedQuery || submittedHistoryId ? (
             <CypherGraph
               cypher={submittedHistoryId ? undefined : submittedQuery}
               queryHistoryId={submittedHistoryId}
-              defaultDetailOpen
               fillHeight
               refreshKey={runKey}
               onQueryComplete={handleQueryComplete}
@@ -278,88 +272,69 @@ export default function QueryConsole() {
           )}
         </Box>
 
-        {/* Resize handle */}
+        {/* Query editor: one surface holding the query and its run button. */}
         <Box
-          onMouseDown={handleDragStart}
+          data-testid="query-composer"
           sx={{
-            height: 8,
-            flexShrink: 0,
-            cursor: 'ns-resize',
+            alignItems: 'flex-end',
+            bgcolor: 'background.paper',
+            border: 1,
+            borderColor: 'divider',
+            borderRadius: 2,
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            my: 0.5,
-            '&::after': {
-              content: '""',
-              display: 'block',
-              width: 48,
-              height: 4,
-              borderRadius: 2,
-              bgcolor: 'divider',
-              transition: 'background-color 0.15s',
-            },
-            '&:hover::after': { bgcolor: 'primary.main' },
+            flexShrink: 0,
+            gap: 1,
+            mt: 1.5,
+            pl: 1.5,
+            pr: 0.75,
+            py: 0.75,
+            transition: 'border-color 120ms ease',
+            '&:focus-within': { borderColor: 'primary.main' },
           }}
-        />
-
-        {/* Query editor */}
-        <Box sx={{ height: queryHeight, flexShrink: 0 }}>
-          <Card sx={{ height: '100%' }}>
-            <CardContent
-              sx={{
-                height: '100%',
-                boxSizing: 'border-box',
-                display: 'flex',
-                flexDirection: 'column',
-                '&:last-child': { pb: 2 },
-              }}
-            >
-              <TextField
-                multiline
-                fullWidth
-                value={queryText}
-                onChange={(e) => setQueryText(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Enter a Cypher query... (Ctrl+Enter to run)"
-                variant="outlined"
+        >
+          <InputBase
+            multiline
+            fullWidth
+            minRows={1}
+            maxRows={QUERY_MAX_ROWS}
+            value={queryText}
+            onChange={(e) => setQueryText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={`MATCH (n) RETURN n LIMIT 25 · ${RUN_SHORTCUT} to run`}
+            inputProps={{ 'aria-label': 'Cypher query', spellCheck: false }}
+            sx={{
+              alignSelf: 'center',
+              fontFamily: fontFamilyMono,
+              fontSize: 13,
+              // Show the characters as typed: `->` stays two glyphs, not an arrow.
+              fontVariantLigatures: 'none',
+              lineHeight: 1.6,
+              py: 0.5,
+            }}
+          />
+          <Tooltip title={`Run query (${RUN_SHORTCUT})`}>
+            <span style={{ flexShrink: 0 }}>
+              <IconButton
+                aria-label="Run query"
+                onClick={handleRun}
+                disabled={!queryText.trim()}
+                size="small"
                 sx={{
-                  flex: 1,
-                  minHeight: 0,
-                  '& .MuiInputBase-root': {
-                    height: '100%',
-                    alignItems: 'flex-start',
+                  bgcolor: 'primary.main',
+                  color: 'primary.contrastText',
+                  height: 32,
+                  width: 32,
+                  '&:hover': { bgcolor: 'primary.dark' },
+                  '&.Mui-disabled': {
+                    bgcolor: 'action.disabledBackground',
+                    color: 'action.disabled',
                   },
-                  '& .MuiInputBase-input': {
-                    height: '100% !important',
-                    overflow: 'auto !important',
-                    boxSizing: 'border-box',
-                  },
-                }}
-                slotProps={{
-                  htmlInput: {
-                    style: { fontFamily: 'monospace', fontSize: 13 },
-                  },
-                }}
-              />
-              <Box
-                sx={{
-                  mt: 1,
-                  display: 'flex',
-                  justifyContent: 'flex-end',
-                  flexShrink: 0,
                 }}
               >
-                <Button
-                  variant="contained"
-                  startIcon={<PlayArrow />}
-                  onClick={handleRun}
-                  disabled={!queryText.trim()}
-                >
-                  Run
-                </Button>
-              </Box>
-            </CardContent>
-          </Card>
+                <PlayArrow fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
         </Box>
       </Box>
     </Box>
