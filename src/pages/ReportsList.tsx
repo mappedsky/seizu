@@ -496,6 +496,7 @@ function ReportsList() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'sm',
       cellSx: { ...listTableSecondaryCellSx, width: 96 },
@@ -503,6 +504,7 @@ function ReportsList() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Last updated',
       hideBelow: 'md',
       cellSx: { ...listTableSecondaryCellSx, width: 200 },
@@ -510,6 +512,7 @@ function ReportsList() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated by',
       hideBelow: 'lg',
       cellSx: { ...listTableSecondaryCellSx, width: 150 },

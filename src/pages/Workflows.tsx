@@ -48,9 +48,9 @@ const nameColumnSx = listTablePrimaryCellSx;
 const triggerColumnSx = { width: 150 };
 const pipelineColumnSx = { width: 170 };
 const statusColumnSx = { width: 140 };
-const lastRunColumnSx = { width: 180 };
+const lastRunColumnSx = { width: 220 };
 const enabledColumnSx = { width: 110 };
-const versionColumnSx = { width: 90 };
+const versionColumnSx = { width: 100 };
 const updatedColumnSx = { width: 180 };
 const updatedByColumnSx = { width: 150 };
 
@@ -183,15 +183,19 @@ export default function Workflows() {
         hideBelow: 'md',
         cellSx: enabledColumnSx,
         render: (item) => (
-          <Chip
-            size="small"
-            label={item.enabled ? 'Enabled' : 'Disabled'}
-            color={item.enabled ? 'success' : 'default'}
-          />
+          // Plain text: the coloured chips in this table report how a run
+          // went, and a setting beside them should not read as an outcome.
+          <Typography
+            variant="body2"
+            color={item.enabled ? 'text.primary' : 'text.secondary'}
+          >
+            {item.enabled ? 'Enabled' : 'Disabled'}
+          </Typography>
         ),
       },
       {
         key: 'version',
+        stacked: 'meta',
         label: 'Version',
         hideBelow: 'lg',
         cellSx: versionColumnSx,
@@ -199,6 +203,7 @@ export default function Workflows() {
       },
       {
         key: 'updated',
+        stacked: 'meta',
         label: 'Latest Update',
         hideBelow: 'xl',
         cellSx: updatedColumnSx,
@@ -206,6 +211,7 @@ export default function Workflows() {
       },
       {
         key: 'updated_by',
+        stacked: 'meta',
         label: 'Updated By',
         hideBelow: 'xl',
         cellSx: updatedByColumnSx,

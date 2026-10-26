@@ -111,10 +111,11 @@ describe('ReportPane', () => {
     mockUseReportsMutations.mockRestore?.();
   });
 
-  it('populates edit-mode report name from report metadata when config name is absent', () => {
+  it('populates edit-mode report name from report metadata when config name is absent', async () => {
     render(<ReportPane id="r1" />, { wrapper: Wrapper });
 
-    expect(screen.getByLabelText('Report name')).toHaveValue(
+    // The editor is a lazily loaded chunk.
+    expect(await screen.findByLabelText('Report name')).toHaveValue(
       'Metadata Report Name',
     );
   });
@@ -122,7 +123,7 @@ describe('ReportPane', () => {
   it('saves the edited report name through the new report version', async () => {
     render(<ReportPane id="r1" />, { wrapper: Wrapper });
 
-    fireEvent.change(screen.getByLabelText('Report name'), {
+    fireEvent.change(await screen.findByLabelText('Report name'), {
       target: { value: 'Renamed Report' },
     });
     fireEvent.click(screen.getByRole('button', { name: /save version/i }));

@@ -11,6 +11,7 @@ import {
   PluginSkillItem,
   usePluginMutations,
 } from 'src/hooks/usePluginsApi';
+import { fontFamilyMono } from 'src/theme/typography';
 
 interface Props {
   open: boolean;
@@ -44,7 +45,7 @@ export default function PluginDetailDialog({ open, onClose, plugin }: Props) {
     >
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
         <DetailSection title="Namespace">
-          <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+          <Typography variant="body2" sx={{ fontFamily: fontFamilyMono }}>
             {plugin.plugin_id}
           </Typography>
         </DetailSection>

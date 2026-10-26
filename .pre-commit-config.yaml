@@ -26,14 +26,18 @@ repos:
     -   id: ruff
         args: [--fix]
     -   id: ruff-format
--   repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.0.0
+-   repo: local
     hooks:
     -   id: mypy
-        additional_dependencies:
-          - pydantic
-          - types-PyYAML
-          - types-requests
+        name: mypy
+        # Runs from the project environment rather than an isolated one
+        # pre-commit builds; the script explains the sync flags. Needs `uv` on
+        # PATH -- `language: system` means pre-commit installs nothing here.
+        entry: scripts/run_mypy.sh
+        language: system
+        types_or: [python, pyi]
+        args: [--scripts-are-modules]
+        require_serial: true
 -   repo: https://github.com/pre-commit/mirrors-eslint
     rev: v10.4.0
     hooks:

@@ -5,19 +5,23 @@ import {
   CardContent,
   CardHeader,
   CircularProgress,
-  Divider,
-  IconButton,
   Grid,
   Typography,
 } from '@mui/material';
-import Info from '@mui/icons-material/Info';
 import Error from '@mui/icons-material/Error';
 import { useLazyCypherQuery } from 'src/hooks/useCypherQuery';
-import CypherDetails from 'src/components/reports/CypherDetails';
+import CypherDetails from 'src/components/reports/LazyCypherDetails';
 import { ProgressPanelSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
 import QueryValidationBadge from 'src/components/reports/QueryValidationBadge';
 import type { PanelThreshold } from 'src/config.context';
-import { resolveThresholdColor } from 'src/components/reports/thresholds';
+import {
+  resolveThresholdColor,
+  thresholdCss,
+} from 'src/components/reports/thresholds';
+import { useTheme } from '@mui/material/styles';
+import PanelInfoButton, {
+  panelInfoRevealSx,
+} from 'src/components/reports/PanelInfoButton';
 
 const fillCardSx = {
   height: '100%',
@@ -83,6 +87,7 @@ export default function CypherProgress({
   refreshKey,
   onTokenExpired,
 }: CypherProgressProps) {
+  const theme = useTheme();
   const [open, setOpen] = useState(false);
   const handleClickOpen = () => {
     setOpen(true);
@@ -146,16 +151,16 @@ export default function CypherProgress({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -175,16 +180,16 @@ export default function CypherProgress({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -192,7 +197,7 @@ export default function CypherProgress({
           sx={[fillBodySx, { flexDirection: 'column', alignItems: 'center' }]}
         >
           <CardContent>
-            <Typography variant="h4" align="center">
+            <Typography variant="h4" component="p" align="center">
               N/A
             </Typography>
             <Typography variant="body2" align="center">
@@ -217,15 +222,15 @@ export default function CypherProgress({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         <Grid
@@ -234,7 +239,7 @@ export default function CypherProgress({
           sx={[fillBodySx, { flexDirection: 'column', alignItems: 'center' }]}
         >
           <CardContent>
-            <Typography variant="h4" align="center">
+            <Typography variant="h4" component="p" align="center">
               N/A
             </Typography>
             <Typography variant="body2" align="center">
@@ -254,16 +259,16 @@ export default function CypherProgress({
     return (
       <Card sx={fillCardSx}>
         {caption && (
-          <>
-            <Grid
-              container
-              spacing={0}
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            spacing={0}
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <Grid
           container
@@ -271,7 +276,9 @@ export default function CypherProgress({
           sx={[fillBodySx, { flexDirection: 'column', alignItems: 'center' }]}
         >
           <CardContent>
-            <Typography variant="h4">N/A</Typography>
+            <Typography variant="h4" component="p">
+              N/A
+            </Typography>
           </CardContent>
         </Grid>
       </Card>
@@ -293,7 +300,10 @@ export default function CypherProgress({
   // Use the multi-threshold list when configured; otherwise fall back to
   // the legacy single-threshold semantics (below threshold = red,
   // 100% = green, otherwise primary; with no threshold the cutoff is 70%).
-  const hexColor = resolveThresholdColor(percent, thresholds);
+  const hexColor = thresholdCss(
+    resolveThresholdColor(percent, thresholds),
+    theme.palette.mode,
+  );
   let circleColor: CircularProgressColor | undefined;
   let textColor: string | undefined;
   if (hexColor === undefined) {
@@ -322,39 +332,39 @@ export default function CypherProgress({
     textColor = hexColor;
   }
 
+  const showLabel = progressSettings?.show_label !== false;
+  // When the label is shown the wheel is a secondary element and stays at
+  // most MAX_WHEEL to avoid dwarfing the text. When the label is hidden the
+  // wheel IS the panel, so it fills the available space.
+  const wheelSize = Math.max(
+    MIN_WHEEL,
+    Math.min(
+      showLabel ? MAX_WHEEL : Number.POSITIVE_INFINITY,
+      bodySize.w - BODY_PADDING,
+      bodySize.h - BODY_PADDING - (showLabel ? TEXT_RESERVE : 0),
+    ),
+  );
+
   return (
     <>
       <Card
         sx={{
           ...fillCardSx,
           position: 'relative',
-          '&:hover .panel-info-btn': { opacity: 1 },
+          ...panelInfoRevealSx,
         }}
       >
-        <IconButton
-          className="panel-info-btn"
-          size="small"
-          onClick={handleClickOpen}
-          sx={{
-            position: 'absolute',
-            top: 8,
-            right: 8,
-            opacity: 0,
-            transition: 'opacity 0.2s',
-          }}
-        >
-          <Info fontSize="small" />
-        </IconButton>
+        <PanelInfoButton onClick={handleClickOpen} panelName={caption} />
         {caption && (
-          <>
-            <Grid
-              container
-              sx={{ flexDirection: 'column', alignItems: 'center' }}
-            >
-              <CardHeader title={caption} />
-            </Grid>
-            <Divider />
-          </>
+          <Grid
+            container
+            sx={{ flexDirection: 'column', alignItems: 'center' }}
+          >
+            <CardHeader
+              title={caption}
+              slotProps={{ title: { component: 'h3' } }}
+            />
+          </Grid>
         )}
         <QueryValidationBadge errors={queryErrors} warnings={warnings} />
 
@@ -372,7 +382,7 @@ export default function CypherProgress({
             overflow: 'hidden',
           }}
         >
-          {progressSettings?.show_label !== false && (
+          {showLabel && (
             <Typography
               component="div"
               variant="h5"
@@ -393,23 +403,20 @@ export default function CypherProgress({
               ...(hexColor ? { color: hexColor } : {}),
             }}
           >
+            {/* The full circle, faintly, so a small share reads as a share
+                of something rather than a stray arc. */}
+            <CircularProgress
+              aria-hidden
+              variant="determinate"
+              value={100}
+              size={wheelSize}
+              sx={{ color: 'action.selected', left: 0, position: 'absolute' }}
+            />
             <CircularProgress
               variant="determinate"
               value={percent}
               color={circleColor}
-              size={(() => {
-                const showLabel = progressSettings?.show_label !== false;
-                const wAvail = bodySize.w - BODY_PADDING;
-                const hAvail =
-                  bodySize.h - BODY_PADDING - (showLabel ? TEXT_RESERVE : 0);
-                const fit = Math.min(wAvail, hAvail);
-                // When the label is shown the wheel is a secondary element
-                // and stays at most 100 px to avoid dwarfing the text. When
-                // the label is hidden the wheel IS the panel, so let it
-                // fill the available space.
-                const cap = showLabel ? MAX_WHEEL : Number.POSITIVE_INFINITY;
-                return Math.max(MIN_WHEEL, Math.min(cap, fit));
-              })()}
+              size={wheelSize}
             />
             <Box
               sx={{

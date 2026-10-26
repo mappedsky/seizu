@@ -40,6 +40,7 @@ import UserDisplay from 'src/components/UserDisplay';
 import { usePermissions } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 const savedColumnSx = { ...listTableSecondaryCellSx, width: 180 };
 const authorColumnSx = { ...listTableSecondaryCellSx, width: 150 };
@@ -67,7 +68,7 @@ function SkillVersionDetailDialog({
             >
               Slug
             </Typography>
-            <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+            <Typography variant="body2" sx={{ fontFamily: fontFamilyMono }}>
               {mcpNameForSkill(version)}
             </Typography>
           </Box>
@@ -161,7 +162,7 @@ function SkillVersionDetailDialog({
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-word',
                 m: 0,
-                fontFamily: 'monospace',
+                fontFamily: fontFamilyMono,
                 fontSize: 13,
               }}
             >
@@ -196,7 +197,7 @@ function SkillVersionDetailDialog({
                     {version.parameters.map((param) => (
                       <TableRow key={param.name}>
                         <TableCell
-                          sx={{ fontFamily: 'monospace', fontWeight: 600 }}
+                          sx={{ fontFamily: fontFamilyMono, fontWeight: 600 }}
                         >
                           {param.name}
                         </TableCell>
@@ -207,7 +208,7 @@ function SkillVersionDetailDialog({
                         <TableCell
                           sx={{
                             color: 'text.secondary',
-                            fontFamily: 'monospace',
+                            fontFamily: fontFamilyMono,
                           }}
                         >
                           {param.default !== null && param.default !== undefined
@@ -276,6 +277,7 @@ function SkillHistory() {
   const columns: ListTableColumn<SkillVersion>[] = [
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       cellSx: { width: 120 },
       render: (version) => {
@@ -314,6 +316,7 @@ function SkillHistory() {
     },
     {
       key: 'saved',
+      stacked: 'meta',
       label: 'Saved',
       hideBelow: 'sm',
       cellSx: savedColumnSx,
@@ -321,6 +324,7 @@ function SkillHistory() {
     },
     {
       key: 'created_by',
+      stacked: 'meta',
       label: 'Created by',
       hideBelow: 'md',
       cellSx: authorColumnSx,
@@ -445,7 +449,7 @@ function SkillHistory() {
               <Box
                 component="li"
                 key={tool}
-                sx={{ fontFamily: 'monospace', fontSize: 13 }}
+                sx={{ fontFamily: fontFamilyMono, fontSize: 13 }}
               >
                 {tool}
               </Box>

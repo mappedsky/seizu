@@ -1,4 +1,6 @@
+import { Suspense } from 'react';
 import { Outlet } from 'react-router-dom';
+import PageLoading from 'src/components/PageLoading';
 import { styled } from '@mui/material';
 import MainNavbar from './MainNavbar';
 
@@ -36,7 +38,9 @@ function MainLayout() {
       <MainLayoutWrapper>
         <MainLayoutContainer>
           <MainLayoutContent>
-            <Outlet />
+            <Suspense fallback={<PageLoading />}>
+              <Outlet />
+            </Suspense>
           </MainLayoutContent>
         </MainLayoutContainer>
       </MainLayoutWrapper>

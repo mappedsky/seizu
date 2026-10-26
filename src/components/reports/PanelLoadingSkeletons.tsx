@@ -15,7 +15,13 @@ interface CaptionProps {
 
 function HeaderSkeleton({ caption }: CaptionProps) {
   if (!caption) return null;
-  return <CardHeader title={caption} sx={{ textAlign: 'center' }} />;
+  return (
+    <CardHeader
+      title={caption}
+      slotProps={{ title: { component: 'h3' } }}
+      sx={{ textAlign: 'center' }}
+    />
+  );
 }
 
 /** SVG graph content shared between standalone and inline modes. */
@@ -111,12 +117,7 @@ export function CountPanelSkeleton({
   }
   return (
     <Card data-testid="count-panel-loading-skeleton" sx={{ minHeight: 150 }}>
-      {caption && (
-        <>
-          <HeaderSkeleton caption={caption} />
-          <Divider />
-        </>
-      )}
+      {caption && <HeaderSkeleton caption={caption} />}
       <CardContent sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
         <Skeleton variant="text" width={96} height={56} />
       </CardContent>
@@ -155,12 +156,7 @@ export function ProgressPanelSkeleton({
         flexDirection: 'column',
       }}
     >
-      {caption && (
-        <>
-          <HeaderSkeleton caption={caption} />
-          <Divider />
-        </>
-      )}
+      {caption && <HeaderSkeleton caption={caption} />}
       <CardContent
         sx={{
           flex: 1,
@@ -264,12 +260,7 @@ export function ChartPanelSkeleton({
       data-testid={`${variant}-panel-loading-skeleton`}
       sx={{ minHeight: 410 }}
     >
-      {caption && (
-        <>
-          <HeaderSkeleton caption={caption} />
-          <Divider />
-        </>
-      )}
+      {caption && <HeaderSkeleton caption={caption} />}
       <Box
         sx={{
           height: 350,
@@ -322,14 +313,9 @@ export function GraphPanelSkeleton({
   inline = false,
 }: CaptionProps & { fillHeight?: boolean; inline?: boolean }) {
   const theme = useTheme();
-  const nodeColor =
-    theme.palette.mode === 'dark'
-      ? 'rgba(255,255,255,0.13)'
-      : 'rgba(0,0,0,0.11)';
-  const edgeColor =
-    theme.palette.mode === 'dark'
-      ? 'rgba(255,255,255,0.07)'
-      : 'rgba(0,0,0,0.07)';
+  // The brand-tinted washes, so the placeholder has the canvas's hue.
+  const nodeColor = theme.palette.action.focus;
+  const edgeColor = theme.palette.action.hover;
 
   if (inline) {
     return (
@@ -658,12 +644,7 @@ export function MarkdownPanelSkeleton({
   }
   return (
     <Card sx={{ minHeight: 200 }}>
-      {caption && (
-        <>
-          <HeaderSkeleton caption={caption} />
-          <Divider />
-        </>
-      )}
+      {caption && <HeaderSkeleton caption={caption} />}
       <CardContent sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
         <Skeleton variant="text" width="55%" height={24} sx={{ mb: 0.5 }} />
         <Skeleton variant="text" width="97%" height={16} />

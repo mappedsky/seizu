@@ -59,7 +59,7 @@ interface DetailsData {
   [key: string]: unknown;
 }
 
-interface CypherDetailsProps {
+export interface CypherDetailsProps {
   details?: DetailsData;
   open: boolean;
   setOpen: (open: boolean) => void;
