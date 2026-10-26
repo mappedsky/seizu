@@ -1,6 +1,5 @@
 import {
   Box,
-  Divider,
   Table,
   TableBody,
   TableCell,
@@ -78,21 +77,6 @@ function displayKey(key: string): string {
     default:
       return key;
   }
-}
-
-function readGraphValue(item: GraphNode | GraphLink, key: string): unknown {
-  const properties = item.properties;
-  if (
-    key !== 'group' &&
-    properties &&
-    Object.prototype.hasOwnProperty.call(properties, key)
-  ) {
-    return properties[key];
-  }
-  if (Object.prototype.hasOwnProperty.call(item, key)) {
-    return item[key];
-  }
-  return properties?.[key];
 }
 
 function DetailSection({
@@ -241,99 +225,6 @@ export default function GraphDetailPanel({
         emptyText="No properties"
       />
       <DetailSection title="Additional Fields" entries={otherEntries} />
-    </Box>
-  );
-}
-
-// ─── Graph summary panel ──────────────────────────────────────────────────────
-
-interface GraphSummaryPanelProps {
-  nodes: unknown;
-  links: unknown;
-  nodeGroupKey: string;
-  getColor: (group: string) => string;
-}
-
-function graphNodes(value: unknown): GraphNode[] {
-  return Array.isArray(value) ? (value as GraphNode[]) : [];
-}
-
-function graphLinks(value: unknown): GraphLink[] {
-  return Array.isArray(value) ? (value as GraphLink[]) : [];
-}
-
-export function GraphSummaryPanel({
-  nodes,
-  links,
-  nodeGroupKey,
-  getColor,
-}: GraphSummaryPanelProps) {
-  const safeNodes = graphNodes(nodes);
-  const safeLinks = graphLinks(links);
-  const groupCounts = new Map<string, number>();
-  safeNodes.forEach((n) => {
-    const g = String(readGraphValue(n, nodeGroupKey) ?? 'default');
-    groupCounts.set(g, (groupCounts.get(g) ?? 0) + 1);
-  });
-
-  const typeCounts = new Map<string, number>();
-  safeLinks.forEach((l) => {
-    const t = l.type ? String(l.type) : null;
-    if (t) typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1);
-  });
-
-  return (
-    <Box>
-      <Typography
-        variant="overline"
-        color="text.secondary"
-        sx={{ display: 'block' }}
-        gutterBottom
-      >
-        Graph Overview
-      </Typography>
-
-      <Typography variant="body2" gutterBottom>
-        {safeNodes.length} {safeNodes.length === 1 ? 'node' : 'nodes'}
-      </Typography>
-      {[...groupCounts.entries()].map(([group, count]) => (
-        <Box
-          key={group}
-          sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5, pl: 1 }}
-        >
-          <Box
-            sx={{
-              width: 10,
-              height: 10,
-              borderRadius: '50%',
-              bgcolor: getColor(group),
-              flexShrink: 0,
-            }}
-          />
-          <Typography variant="caption" color="text.secondary">
-            {group}: {count}
-          </Typography>
-        </Box>
-      ))}
-
-      {safeLinks.length > 0 && (
-        <>
-          <Divider sx={{ my: 1.5 }} />
-          <Typography variant="body2" gutterBottom>
-            {safeLinks.length}{' '}
-            {safeLinks.length === 1 ? 'relationship' : 'relationships'}
-          </Typography>
-          {typeCounts.size > 0
-            ? [...typeCounts.entries()].map(([type, count]) => (
-                <Box key={type} sx={{ pl: 1, mb: 0.5 }}>
-                  <Typography variant="caption" color="text.secondary">
-                    → {type}: {count}
-                  </Typography>
-                </Box>
-              ))
-            : null}
-        </>
-      )}
     </Box>
   );
 }

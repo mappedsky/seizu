@@ -41,6 +41,7 @@ import {
 } from 'src/hooks/useScheduledQueriesApi';
 import { useSyncMetadataValues } from 'src/hooks/useSyncMetadataValues';
 import { ScheduleSpec } from 'src/scheduleSpec';
+import { fontFamilyMono } from 'src/theme/typography';
 
 const EMPTY_FORM: ScheduledQueryRequest = {
   name: '',
@@ -209,7 +210,7 @@ function ActionConfigFieldControl({
         minRows={3}
         helperText={field.description}
         slotProps={{
-          htmlInput: { style: { fontFamily: 'monospace', fontSize: 12 } },
+          htmlInput: { style: { fontFamily: fontFamilyMono, fontSize: 12 } },
         }}
       />
     );
@@ -493,7 +494,9 @@ export default function ScheduledQueryDialog({
             multiline
             minRows={4}
             slotProps={{
-              htmlInput: { style: { fontFamily: 'monospace', fontSize: 13 } },
+              htmlInput: {
+                style: { fontFamily: fontFamilyMono, fontSize: 13 },
+              },
             }}
           />
           <FormControlLabel
@@ -542,7 +545,11 @@ export default function ScheduledQueryDialog({
                 sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}
               >
                 <Typography variant="subtitle2">Watch Scans</Typography>
-                <IconButton size="small" onClick={addWatchScan}>
+                <IconButton
+                  aria-label="Add watch scan"
+                  size="small"
+                  onClick={addWatchScan}
+                >
                   <AddCircleOutlineIcon fontSize="small" />
                 </IconButton>
               </Box>
@@ -579,7 +586,11 @@ export default function ScheduledQueryDialog({
                     options={syncValues.groupids}
                     sx={{ flex: 1 }}
                   />
-                  <IconButton size="small" onClick={() => removeWatchScan(i)}>
+                  <IconButton
+                    aria-label={`Remove watch scan ${i + 1}`}
+                    size="small"
+                    onClick={() => removeWatchScan(i)}
+                  >
                     <RemoveCircleOutlineIcon fontSize="small" />
                   </IconButton>
                 </Box>
@@ -592,7 +603,11 @@ export default function ScheduledQueryDialog({
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
               <Typography variant="subtitle2">Parameters</Typography>
-              <IconButton size="small" onClick={addParam}>
+              <IconButton
+                aria-label="Add parameter"
+                size="small"
+                onClick={addParam}
+              >
                 <AddCircleOutlineIcon fontSize="small" />
               </IconButton>
             </Box>
@@ -652,6 +667,7 @@ export default function ScheduledQueryDialog({
                   </Button>
                 </Tooltip>
                 <IconButton
+                  aria-label={`Remove parameter ${p.name || i + 1}`}
                   size="small"
                   onClick={() => removeParam(i)}
                   sx={{ mt: 0.25 }}
@@ -680,7 +696,11 @@ export default function ScheduledQueryDialog({
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
               <Typography variant="subtitle2">Actions</Typography>
-              <IconButton size="small" onClick={addAction}>
+              <IconButton
+                aria-label="Add action"
+                size="small"
+                onClick={addAction}
+              >
                 <AddCircleOutlineIcon fontSize="small" />
               </IconButton>
             </Box>
@@ -736,7 +756,11 @@ export default function ScheduledQueryDialog({
                       />
                     )}
                     <Box sx={{ flex: 1 }} />
-                    <IconButton size="small" onClick={() => removeAction(i)}>
+                    <IconButton
+                      aria-label={`Remove action ${i + 1}`}
+                      size="small"
+                      onClick={() => removeAction(i)}
+                    >
                       <RemoveCircleOutlineIcon fontSize="small" />
                     </IconButton>
                   </Box>

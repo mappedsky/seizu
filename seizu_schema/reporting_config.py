@@ -153,9 +153,14 @@ class PanelThreshold(BaseModel):
 
     color: str = Field(
         description=(
-            "The color to apply when the metric matches this threshold. A CSS color string (e.g. ``#F44336``, ``red``)."
+            "The color to apply when the metric matches this threshold. Prefer"
+            " a Seizu palette name — ``flare`` (red), ``ember`` (yellow),"
+            " ``aurora`` (green), ``starlight`` (blue), ``beacon`` (cyan),"
+            " ``pulsar`` (violet) or ``night`` (grey) — which renders in a"
+            " tone readable in both light and dark mode. Any CSS color string"
+            " (e.g. ``#F44336``) is also accepted and used as given."
         ),
-        examples=["#F44336"],
+        examples=["flare", "#F44336"],
     )
 
 

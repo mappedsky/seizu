@@ -66,6 +66,18 @@ describe('DashboardLayout', () => {
 
   afterEach(cleanup);
 
+  it('offers a skip link to the main landmark and labels the navigation', () => {
+    renderLayout();
+
+    const skip = screen.getByRole('link', { name: 'Skip to content' });
+    const main = screen.getByRole('main');
+    expect(skip).toHaveAttribute('href', `#${main.id}`);
+    expect(main).toHaveAttribute('tabindex', '-1');
+    expect(
+      screen.getAllByRole('navigation', { name: 'Main' }).length,
+    ).toBeGreaterThan(0);
+  });
+
   it('persists the collapsed sidebar state when toggled', () => {
     renderLayout();
 

@@ -3,14 +3,12 @@ import { useTheme } from '@mui/material/styles';
 
 function Logo(props: React.ImgHTMLAttributes<HTMLImageElement>) {
   const theme = useTheme();
-  // Logo sits on an AppBar using palette.primary. Pick the lockup whose
-  // wordmark color matches primary.contrastText so it reads correctly:
-  // dark mode → Starlight primary (light) → black wordmark;
-  // light mode → Starlight-shifted primary (dark) → white wordmark.
+  // Logo sits on the app bar, which uses background.paper: a white wordmark
+  // on the dark surface, a black one on the light surface.
   const src =
     theme.palette.mode === 'dark'
-      ? '/static/images/logo-horizontal-black.svg'
-      : '/static/images/logo-horizontal-white.svg';
+      ? '/static/images/logo-horizontal-white.svg'
+      : '/static/images/logo-horizontal-black.svg';
   return <img alt="Seizu" src={src} height="50" {...props} />;
 }
 

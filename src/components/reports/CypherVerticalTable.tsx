@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Box,
   Divider,
-  IconButton,
   List,
   ListItem,
   Paper,
@@ -13,10 +12,11 @@ import {
   TableContainer,
   TableRow,
 } from '@mui/material';
-import Info from '@mui/icons-material/Info';
 import Error from '@mui/icons-material/Error';
 
 import { useLazyCypherQuery, QueryRecord } from 'src/hooks/useCypherQuery';
+import SeverityLabel from 'src/components/SeverityLabel';
+import { isSeverityField, severityOf } from 'src/theme/severity';
 
 /**
  * Flatten a query record into a plain key→value map.
@@ -40,9 +40,12 @@ function flattenRecord(record: QueryRecord): QueryRecord {
   }
   return record;
 }
-import CypherDetails from 'src/components/reports/CypherDetails';
+import CypherDetails from 'src/components/reports/LazyCypherDetails';
 import { VerticalTableSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
 import QueryValidationBadge from 'src/components/reports/QueryValidationBadge';
+import PanelInfoButton, {
+  panelInfoRevealSx,
+} from 'src/components/reports/PanelInfoButton';
 
 const fillSx = {
   height: '100%',
@@ -213,7 +216,16 @@ export default function CypherVerticalTable({
         cellData = makeTable(data[key] as Record<string, unknown>);
       } else {
         const item = data[key];
-        cellData = <Typography variant="body1">{String(item)}</Typography>;
+        const severity = isSeverityField(key) ? severityOf(item) : undefined;
+        cellData = (
+          <Typography variant="body1">
+            {severity ? (
+              <SeverityLabel severity={severity}>{String(item)}</SeverityLabel>
+            ) : (
+              String(item)
+            )}
+          </Typography>
+        );
       }
       cells.push(
         <TableCell
@@ -253,30 +265,22 @@ export default function CypherVerticalTable({
     const caption = String(mungedData[id ?? '']);
     const table = makeTable(mungedData);
     tables.push(
-      <Box
-        key={i}
-        sx={{ position: 'relative', '&:hover .panel-info-btn': { opacity: 1 } }}
-      >
-        <IconButton
-          className="panel-info-btn"
-          size="small"
+      <Box key={i} sx={{ position: 'relative', ...panelInfoRevealSx }}>
+        <PanelInfoButton
           onClick={handleClickOpen}
-          sx={{
-            position: 'absolute',
-            top: 0,
-            right: 0,
-            opacity: 0,
-            transition: 'opacity 0.2s',
-          }}
+          inset={0}
+          panelName={caption}
+        />
+        <Typography
+          gutterBottom
+          variant="h4"
+          component="h3"
+          className="panel-info-caption"
         >
-          <Info fontSize="small" />
-        </IconButton>
-        <Typography gutterBottom variant="h4" component="div">
           {caption}
           <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         </Typography>
-        <Divider />
-        <TableContainer component={Paper} sx={{ p: 2 }}>
+        <TableContainer component={Paper} variant="outlined" sx={{ p: 2 }}>
           {table}
         </TableContainer>
       </Box>,

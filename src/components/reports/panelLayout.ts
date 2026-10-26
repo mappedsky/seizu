@@ -173,27 +173,71 @@ export function mergePanelLayout<T extends Panel>(
   };
 }
 
+/** Panels that show one figure: they read at half or a third of a phone. */
+const STAT_PANEL_TYPES = new Set(['count', 'progress']);
+
 /**
- * Build a layout map for every responsive breakpoint. At ``xs`` (mobile),
- * panel widths are doubled (capped to the column count) and panels stack
- * vertically.
+ * A panel's width on a narrower screen. Stat panels share a row (two on a
+ * phone, three on a tablet); every other panel takes the full width, because
+ * a chart, table or graph at a fraction of a phone is unreadable.
+ */
+function narrowWidth(panel: Panel, bp: 'sm' | 'xs'): number {
+  if (!STAT_PANEL_TYPES.has(panel.type)) return MAX_COLS;
+  return bp === 'xs' ? MAX_COLS / 2 : MAX_COLS / 3;
+}
+
+/**
+ * Build a layout map for every responsive breakpoint. ``lg`` and ``md`` keep
+ * the authored layout. Below that, panels are restacked in the order they read
+ * on a wide screen (top to bottom, then left to right), at the widths
+ * ``narrowWidth`` gives them.
  */
 export function buildResponsiveLayouts(
   panels: Panel[],
 ): Record<ResponsiveBreakpoint, LayoutCoords[]> {
   const wide = deriveRowLayout(panels, MAX_COLS);
+  const readingOrder = wide
+    .map((coords, idx) => ({ coords, idx }))
+    .sort((a, b) => a.coords.y - b.coords.y || a.coords.x - b.coords.x)
+    .map(({ idx }) => idx);
 
-  const xsPanels: Panel[] = panels.map((panel) => {
-    const baseW = defaultPanelWidth(panel, MAX_COLS);
-    const doubled = Math.min(MAX_COLS, baseW * 2);
-    return { ...panel, w: doubled, x: undefined, y: undefined };
-  });
-  const xs = deriveRowLayout(xsPanels, MAX_COLS);
+  const narrow = (bp: 'sm' | 'xs'): LayoutCoords[] => {
+    const widths = readingOrder.map((idx) => narrowWidth(panels[idx], bp));
+    // A run of stat panels that does not fill its last row spreads that row's
+    // panels across it, rather than leaving one stranded beside a gap.
+    for (let start = 0; start < widths.length; ) {
+      let end = start;
+      while (end < widths.length && widths[end] < MAX_COLS) end += 1;
+      const perRow = MAX_COLS / (widths[start] || MAX_COLS);
+      const leftover = (end - start) % perRow;
+      for (let k = end - leftover; k < end; k += 1) {
+        widths[k] = MAX_COLS / leftover;
+      }
+      start = Math.max(end, start + 1);
+    }
+    const stacked = deriveRowLayout(
+      readingOrder.map((idx, position) => ({
+        ...panels[idx],
+        w: widths[position],
+        x: undefined,
+        y: undefined,
+      })),
+      MAX_COLS,
+    );
+    // deriveRowLayout keys by position in the list it was given; key each
+    // result by the panel it belongs to.
+    const result: LayoutCoords[] = new Array(panels.length);
+    stacked.forEach((coords, position) => {
+      const idx = readingOrder[position];
+      result[idx] = { ...coords, i: `${idx}` };
+    });
+    return result;
+  };
 
   return {
     lg: wide,
     md: wide,
-    sm: wide,
-    xs,
+    sm: narrow('sm'),
+    xs: narrow('xs'),
   };
 }

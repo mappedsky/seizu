@@ -136,7 +136,9 @@ Chat exposes a deliberately narrower tool surface than the MCP server:
 - **Mutating tools** (creating or updating reports, scheduled queries, roles, and so on) pause the turn and render an in-chat **confirmation card**; the action runs only after you approve it. Approvals and denials expire after `ACTION_CONFIRMATION_TTL_SECONDS`.
 - New write/delete tools are **hidden from chat by default** (fail closed) until they are explicitly given a confirmation flow. The only no-confirmation mutating exception is `reports__create`, which creates a new private report and cannot modify existing resources — and it still asks for confirmation in the one case where the new report is public (filing it into a space). `reports__clone` asks every time, since whether the copy is public depends on where the source is filed.
 
-Users holding `chat:bypass_permissions` see a **Bypass confirmations** toggle (off by default) that lets the agent execute confirmation-gated actions without pausing. Every bypassed execution is audit-logged, and the user's normal RBAC permissions still apply. The same permission controls whether headless runs (scheduled chats, Temporal workflows) may bypass confirmations — without it, mutating tools fail closed for the run.
+Pending confirmations appear in the conversation, below the turn that is waiting on them, and in the **Confirmations** panel on the right.
+
+Users holding `chat:bypass_permissions` see a **Bypass confirmations** toggle in the Confirmations panel (off by default) that lets the agent execute confirmation-gated actions without pausing. The first time you turn it on in a visit, Seizu asks you to acknowledge what it changes. While it is on, the message box has an amber edge and a **Bypass on** chip; select the chip to turn bypass off. Bypass turns off when you leave the page. Every bypassed execution is audit-logged, and the user's normal RBAC permissions still apply. The same permission controls whether headless runs (scheduled chats, Temporal workflows) may bypass confirmations — without it, mutating tools fail closed for the run.
 
 ## Sessions and history
 
