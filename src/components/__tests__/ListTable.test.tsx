@@ -311,3 +311,114 @@ describe('ListTable', () => {
     expect(screen.queryByText('Row 1')).not.toBeInTheDocument();
   });
 });
+
+describe('ListTable column resizing', () => {
+  afterEach(cleanup);
+
+  it('exposes each resizable column edge to the keyboard', () => {
+    render(
+      <ListTable
+        rows={rows}
+        columns={[
+          ...columns,
+          { key: 'status', label: 'Status', render: (row) => row.status },
+        ]}
+        getRowKey={(row) => row.id}
+        emptyMessage="None"
+      />,
+    );
+
+    const handle = screen.getByRole('separator', {
+      name: 'Resize Name column',
+    });
+    expect(handle).toHaveAttribute('tabindex', '0');
+    expect(handle).toHaveAttribute('aria-orientation', 'vertical');
+    // Arrow keys are taken by the handle rather than scrolling the page.
+    expect(fireEvent.keyDown(handle, { key: 'ArrowRight' })).toBe(false);
+    expect(fireEvent.keyDown(handle, { key: 'Enter' })).toBe(true);
+  });
+});
+
+describe('ListTable on a phone', () => {
+  const original = window.matchMedia;
+  beforeEach(() => {
+    window.localStorage.clear();
+    // Below `sm` only: down() queries are max-width, up() queries min-width.
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes('max-width'),
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as typeof window.matchMedia;
+  });
+  afterEach(() => {
+    window.matchMedia = original;
+    cleanup();
+  });
+
+  interface Item {
+    id: string;
+    name: string;
+    owner: string;
+    description: string;
+    version: number;
+  }
+
+  const items: Item[] = [
+    { id: 'a', name: 'Alpha', owner: 'ana', description: '—', version: 3 },
+  ];
+
+  const itemColumns: ListTableColumn<Item>[] = [
+    { key: 'name', label: 'Name', render: (item) => item.name },
+    {
+      key: 'owner',
+      label: 'Owner',
+      hideBelow: 'lg',
+      render: (item) => item.owner,
+    },
+    {
+      key: 'description',
+      label: 'Description',
+      render: (item) => item.description,
+    },
+    {
+      key: 'version',
+      label: 'Version',
+      stacked: 'meta',
+      render: (item) => item.version,
+    },
+    {
+      key: 'actions',
+      render: () => <button type="button">Row actions</button>,
+    },
+  ];
+
+  it('lists each row with every field labelled instead of dropping columns', () => {
+    render(
+      <ListTable
+        rows={items}
+        columns={itemColumns}
+        getRowKey={(item) => item.id}
+        emptyMessage="None"
+      />,
+    );
+
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    const item = screen.getByRole('listitem');
+    expect(item).toHaveTextContent('Alpha');
+    // A column hidden below lg in the table still shows, labelled.
+    expect(screen.getByRole('term')).toHaveTextContent('Owner');
+    expect(screen.getByRole('definition')).toHaveTextContent('ana');
+    // A placeholder dash is left out rather than shown as a value.
+    expect(item).not.toHaveTextContent('Description');
+    // Bookkeeping joins the closing line, a bare number with its label.
+    expect(item).toHaveTextContent('Version 3');
+    expect(
+      screen.getByRole('button', { name: 'Row actions' }),
+    ).toBeInTheDocument();
+  });
+});

@@ -22,6 +22,7 @@ import {
   useConfirmationsApi,
 } from 'src/hooks/useConfirmationsApi';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 function statusColor(
   status: ActionConfirmation['status'],
@@ -78,7 +79,7 @@ function ConfirmationCard({
             sx={{
               bgcolor: 'action.hover',
               borderRadius: 1,
-              fontFamily: '"JetBrains Mono", monospace',
+              fontFamily: fontFamilyMono,
               fontSize: '0.8rem',
               maxHeight: 240,
               overflow: 'auto',

@@ -94,6 +94,7 @@ function ReportHistory() {
   const columns: ListTableColumn<ReportVersion>[] = [
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       cellSx: { width: 120 },
       render: (version) => {
@@ -127,6 +128,7 @@ function ReportHistory() {
     },
     {
       key: 'saved',
+      stacked: 'meta',
       label: 'Saved',
       hideBelow: 'sm',
       cellSx: savedColumnSx,
@@ -134,6 +136,7 @@ function ReportHistory() {
     },
     {
       key: 'author',
+      stacked: 'meta',
       label: 'Author',
       hideBelow: 'md',
       cellSx: authorColumnSx,

@@ -22,7 +22,7 @@ from reporting.services.report_query_tokens import QueryTokenExpiredError, resol
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_QUERY_ERROR_RESPONSES = {
+_QUERY_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {
         "model": ValidationResponse,
         "description": "Query validation or execution error",

@@ -16,7 +16,6 @@ export default defineConfig({
     rolldownOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes('node_modules/@nivo')) return 'vendor-nivo';
           if (
             id.includes('node_modules/react') ||
             id.includes('node_modules/react-dom') ||

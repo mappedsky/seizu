@@ -12,7 +12,7 @@
  * Assertions use hook call tracking (useLazyCypherQuery.mock.calls, mockRunQuery)
  * and DOM queries instead of prop inspection.
  */
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import ReportView from 'src/components/ReportView';
 import { Report } from 'src/config.context';
@@ -127,6 +127,55 @@ describe('ReportView param building', () => {
     expect(
       screen.getByRole('heading', { name: 'Executive Risk Report', level: 1 }),
     ).toBeInTheDocument();
+  });
+
+  describe('on a phone', () => {
+    const original = window.matchMedia;
+    beforeEach(() => {
+      window.matchMedia = ((query: string) => ({
+        matches: query.includes('max-width'),
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      })) as typeof window.matchMedia;
+    });
+    afterEach(() => {
+      window.matchMedia = original;
+    });
+
+    it('folds the inputs behind a Filters button', () => {
+      const report = makeReport([
+        { type: 'count', cypher: 'cves-total', caption: 'Total CVEs' },
+      ]);
+      render(
+        <Wrapper>
+          <ReportView report={report} title="Report" showTitle />
+        </Wrapper>,
+      );
+
+      const filters = screen.getByRole('button', { name: /^Filters/ });
+      expect(filters).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(filters);
+      expect(filters).toHaveAttribute('aria-expanded', 'true');
+    });
+  });
+
+  it('shows the inputs without a Filters button beside the page', () => {
+    const report = makeReport([
+      { type: 'count', cypher: 'cves-total', caption: 'Total CVEs' },
+    ]);
+    render(
+      <Wrapper>
+        <ReportView report={report} title="Report" showTitle />
+      </Wrapper>,
+    );
+    expect(
+      screen.queryByRole('button', { name: /^Filters/ }),
+    ).not.toBeInTheDocument();
   });
 
   it('does not render the report title as a heading by default', () => {

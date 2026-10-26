@@ -1,33 +1,88 @@
 import type { Panel, PanelThreshold } from 'src/config.context';
 
+import { HUES, hueFor, tones, type Hue } from 'src/theme/brand';
+
+/** A threshold color that names a brand hue rather than a fixed value. */
+export type ThresholdPaletteName = Hue | 'night';
+
 /**
- * Curated color palette offered as quick-select swatches in the
- * ThresholdsEditor. Users can also pick any color via the native color
- * input embedded next to these.
+ * The quick-select swatches in the ThresholdsEditor, red/yellow/green first.
+ * Each stores a palette name, so the same report reads correctly in light
+ * and dark mode; the editor still accepts any CSS color as a custom pick.
  */
-export const THRESHOLD_PRESET_COLORS: ReadonlyArray<{
+export const THRESHOLD_PRESETS: ReadonlyArray<{
   label: string;
-  hex: string;
+  name: ThresholdPaletteName;
 }> = [
-  { label: 'Red', hex: '#F44336' },
-  { label: 'Orange', hex: '#FF9800' },
-  { label: 'Yellow', hex: '#FFC107' },
-  { label: 'Green', hex: '#4CAF50' },
-  { label: 'Teal', hex: '#009688' },
-  { label: 'Blue', hex: '#2196F3' },
-  { label: 'Purple', hex: '#9C27B0' },
-  { label: 'Pink', hex: '#E91E63' },
-  { label: 'Grey', hex: '#9E9E9E' },
+  { label: 'Red', name: 'flare' },
+  { label: 'Yellow', name: 'ember' },
+  { label: 'Green', name: 'aurora' },
+  { label: 'Blue', name: 'starlight' },
+  { label: 'Cyan', name: 'beacon' },
+  { label: 'Violet', name: 'pulsar' },
+  { label: 'Grey', name: 'night' },
 ];
 
-const LEGACY_PROGRESS_LOW = '#F44336';
-const LEGACY_PROGRESS_FULL = '#4CAF50';
-const LEGACY_COUNT_HIGH = '#F44336';
+// The swatches offered before the palette names existed. Reports saved with
+// them render in the matching brand hue instead.
+const LEGACY_PRESET_HEXES: Readonly<Record<string, ThresholdPaletteName>> = {
+  '#f44336': 'flare',
+  '#e91e63': 'flare',
+  '#ff9800': 'ember',
+  '#ffc107': 'ember',
+  '#4caf50': 'aurora',
+  '#009688': 'aurora',
+  '#2196f3': 'starlight',
+  '#9c27b0': 'pulsar',
+  '#9e9e9e': 'night',
+};
+
+function paletteName(color: string): ThresholdPaletteName | undefined {
+  const key = color.trim().toLowerCase();
+  if (key === 'night' || (HUES as readonly string[]).includes(key)) {
+    return key as ThresholdPaletteName;
+  }
+  return LEGACY_PRESET_HEXES[key];
+}
+
+/**
+ * The CSS color to paint a stored threshold color with on the current
+ * theme: a palette name (or a legacy preset hex) becomes that hue's text-safe
+ * tone for the mode, and any other value passes through unchanged.
+ */
+export function thresholdCss(color: string, mode: 'light' | 'dark'): string;
+export function thresholdCss(
+  color: string | undefined,
+  mode: 'light' | 'dark',
+): string | undefined;
+export function thresholdCss(
+  color: string | undefined,
+  mode: 'light' | 'dark',
+): string | undefined {
+  if (!color) return color;
+  const name = paletteName(color);
+  if (name === undefined) return color;
+  if (name === 'night')
+    return mode === 'dark' ? tones.night[300] : tones.night[600];
+  return hueFor(name, mode);
+}
+
+/** Whether two stored threshold colors name the same swatch. */
+export function sameThresholdColor(a: string, b: string): boolean {
+  const left = paletteName(a) ?? a.trim().toLowerCase();
+  const right = paletteName(b) ?? b.trim().toLowerCase();
+  return left === right;
+}
+
+const LEGACY_PROGRESS_LOW: ThresholdPaletteName = 'flare';
+const LEGACY_PROGRESS_FULL: ThresholdPaletteName = 'aurora';
+const LEGACY_COUNT_HIGH: ThresholdPaletteName = 'flare';
 
 /**
  * Pick the color of the threshold with the highest ``value`` that is less
- * than or equal to ``metric``. Returns ``undefined`` when no threshold
- * matches — callers should fall back to the panel's default text color.
+ * than or equal to ``metric``, as stored. Returns ``undefined`` when no
+ * threshold matches — callers should fall back to the panel's default text
+ * color. Pass the result through ``thresholdCss`` before painting with it.
  */
 export function resolveThresholdColor(
   metric: number,
