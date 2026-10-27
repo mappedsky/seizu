@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import {
   Box,
@@ -29,8 +29,8 @@ import MoreVertIcon from '@mui/icons-material/MoreVert';
 import PublicIcon from '@mui/icons-material/Public';
 import RefreshIcon from '@mui/icons-material/Refresh';
 
+import PageLoading from 'src/components/PageLoading';
 import ReportView from 'src/components/ReportView';
-import EditableReportView from 'src/components/EditableReportView';
 import MoveToSpaceDialog from 'src/components/MoveToSpaceDialog';
 import {
   useReport,
@@ -42,6 +42,12 @@ import { Report } from 'src/config.context';
 import { usePermissionState } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
+
+// The editor carries the rich-text and drag-layout libraries; viewing a
+// report never fetches them.
+const EditableReportView = lazy(
+  () => import('src/components/EditableReportView'),
+);
 
 export interface ReportPaneProps {
   /** The report to render. */
@@ -265,12 +271,14 @@ function ReportPane({
 
   if (editMode) {
     return (
-      <EditableReportView
-        report={displayedReport}
-        reportId={id ?? ''}
-        onSave={handleSave}
-        onCancel={handleCancel}
-      />
+      <Suspense fallback={<PageLoading />}>
+        <EditableReportView
+          report={displayedReport}
+          reportId={id ?? ''}
+          onSave={handleSave}
+          onCancel={handleCancel}
+        />
+      </Suspense>
     );
   }
 
@@ -356,23 +364,17 @@ function ReportPane({
 
           return (
             <>
-              {displayedAccessScope && (
-                <Chip
-                  icon={
-                    displayedAccessScope === 'public' ? (
-                      <PublicIcon />
-                    ) : (
-                      <LockIcon />
-                    )
-                  }
-                  label={displayedAccessScope === 'public' ? 'Public' : 'Draft'}
-                  size="small"
-                  color={
-                    displayedAccessScope === 'public' ? 'success' : 'default'
-                  }
-                  variant="outlined"
-                  sx={{ alignSelf: 'center' }}
-                />
+              {/* Public is the normal state, so only a draft is labelled. */}
+              {displayedAccessScope === 'private' && (
+                <Tooltip title="Private to the owner">
+                  <Chip
+                    icon={<LockIcon />}
+                    label="Draft"
+                    size="small"
+                    variant="outlined"
+                    sx={{ alignSelf: 'center' }}
+                  />
+                </Tooltip>
               )}
               {canWriteReports && (
                 <Button

@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import WorkflowView from 'src/pages/WorkflowView';
 import * as permissionsHook from 'src/hooks/usePermissions';
@@ -129,14 +135,35 @@ it('shows workflow status, compact stages, and recent Temporal runs', async () =
   ).toBeInTheDocument();
   expect(screen.getAllByText('Running')).toHaveLength(2);
   expect(screen.getByText('2 stages · 2 activities')).toBeInTheDocument();
+  // Trigger and version are stated once, in the details column.
+  expect(screen.getAllByText('v3')).toHaveLength(1);
+  expect(screen.getAllByText('Every 60 min')).toHaveLength(1);
   expect(screen.getByText('Stage 1')).toBeInTheDocument();
   expect(screen.getByText('Stage 2')).toBeInTheDocument();
   expect(screen.getByText('No input → findings')).toBeInTheDocument();
   expect(screen.getByText('findings → logged')).toBeInTheDocument();
-  expect(
-    screen.getByRole('heading', { name: 'Recent Temporal runs' }),
-  ).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Pipeline' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Runs' })).toBeInTheDocument();
   expect(screen.getByText('seizu_configured_workflow')).toBeInTheDocument();
+});
+
+it("shows an activity's parameters when its stage tile is selected", async () => {
+  render(
+    <MemoryRouter initialEntries={['/app/workflows/workflow-1']}>
+      <Routes>
+        <Route path="/app/workflows/:id" element={<WorkflowView />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+  expect(screen.queryByText('RETURN 1')).not.toBeInTheDocument();
+  const tile = screen.getByRole('button', { name: /No input → findings/ });
+  fireEvent.click(tile);
+  expect(tile).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByText('RETURN 1')).toBeInTheDocument();
+  fireEvent.click(tile);
+  expect(screen.queryByText('RETURN 1')).not.toBeInTheDocument();
 });
 
 it('disables mutation actions without workflows:write permission, regardless of who created the workflow', async () => {

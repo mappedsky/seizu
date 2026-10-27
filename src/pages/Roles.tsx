@@ -49,6 +49,7 @@ import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
+import { fontFamilyMono } from 'src/theme/typography';
 
 const descriptionColumnSx = { ...listTableSecondaryCellSx, width: '22%' };
 const permissionsColumnSx = { width: '18%' };
@@ -724,6 +725,7 @@ function Roles() {
     },
     {
       key: 'version',
+      stacked: 'meta',
       label: 'Version',
       hideBelow: 'sm',
       cellSx: versionColumnSx,
@@ -732,6 +734,7 @@ function Roles() {
     },
     {
       key: 'updated_at',
+      stacked: 'meta',
       label: 'Last updated',
       hideBelow: 'xl',
       cellSx: updatedAtColumnSx,
@@ -742,6 +745,7 @@ function Roles() {
     },
     {
       key: 'updated_by',
+      stacked: 'meta',
       label: 'Updated by',
       hideBelow: 'lg',
       cellSx: updatedByColumnSx,
@@ -854,7 +858,7 @@ function Roles() {
               <Box
                 component="li"
                 key={p}
-                sx={{ fontFamily: 'monospace', fontSize: 13 }}
+                sx={{ fontFamily: fontFamilyMono, fontSize: 13 }}
               >
                 {p}
               </Box>

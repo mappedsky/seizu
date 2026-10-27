@@ -10,6 +10,7 @@ import {
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ErrorIcon from '@mui/icons-material/Error';
 import { useQueryHistory, QueryHistoryItem } from 'src/hooks/useQueryHistory';
+import { fontFamilyMono, fontSizeMin } from 'src/theme/typography';
 
 const PER_PAGE = 20;
 
@@ -87,7 +88,7 @@ export default function QueryConsoleHistoryPanel({
             title={item.query}
             placement="right"
             slotProps={{
-              tooltip: { sx: { fontFamily: 'monospace', fontSize: 11 } },
+              tooltip: { sx: { fontFamily: fontFamilyMono, fontSize: 11 } },
             }}
           >
             <ListItemButton
@@ -102,14 +103,14 @@ export default function QueryConsoleHistoryPanel({
               <Typography
                 variant="body2"
                 noWrap
-                sx={{ fontFamily: 'monospace', fontSize: 11, width: '100%' }}
+                sx={{ fontFamily: fontFamilyMono, fontSize: 11, width: '100%' }}
               >
                 {item.query}
               </Typography>
               <Typography
                 variant="caption"
                 color="text.secondary"
-                sx={{ fontSize: 10 }}
+                sx={{ fontSize: fontSizeMin }}
               >
                 {new Date(item.executed_at).toLocaleString()}
               </Typography>

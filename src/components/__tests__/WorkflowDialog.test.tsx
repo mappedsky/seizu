@@ -134,25 +134,37 @@ it('edits staged activities and serializes query parameters and output reference
     />,
   );
 
-  expect(screen.getAllByDisplayValue('findings')[0]).toBeInTheDocument();
+  // The first activity opens in the inspector; the flow shows every stage.
+  expect(screen.getByDisplayValue('findings')).toBeInTheDocument();
   expect(
     screen.getByDisplayValue('RETURN $severity AS severity'),
   ).toBeInTheDocument();
   expect(screen.getAllByRole('group', { name: /Stage/ })).toHaveLength(2);
-  const inputSelectors = screen.getAllByRole('combobox', { name: 'Input' });
-  expect(inputSelectors[0]).toHaveAttribute('aria-disabled', 'true');
-  expect(inputSelectors[1]).not.toHaveAttribute('aria-disabled', 'true');
+  expect(screen.getByRole('combobox', { name: 'Input' })).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  );
   expect(
-    screen
-      .getAllByRole('button', { name: 'Move activity 1 to previous stage' })
-      .some((button) => !button.hasAttribute('disabled')),
-  ).toBe(true);
+    screen.getByRole('button', { name: 'Move activity 1 to previous stage' }),
+  ).toBeDisabled();
 
-  const messages = [
-    screen.getByDisplayValue('first'),
-    screen.getByDisplayValue('second'),
-  ];
-  fireEvent.change(messages[0], { target: { value: 'updated first' } });
+  fireEvent.click(
+    screen.getByRole('button', { name: /findings → first_notification/ }),
+  );
+  expect(screen.getByRole('combobox', { name: 'Input' })).not.toHaveAttribute(
+    'aria-disabled',
+    'true',
+  );
+  expect(
+    screen.getByRole('button', { name: 'Move activity 1 to previous stage' }),
+  ).toBeEnabled();
+  fireEvent.change(screen.getByDisplayValue('first'), {
+    target: { value: 'updated first' },
+  });
+  fireEvent.click(
+    screen.getByRole('button', { name: /findings → second_notification/ }),
+  );
+  expect(screen.getByDisplayValue('second')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Save workflow' }));
 
   await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
@@ -195,22 +207,16 @@ it('supports manual workflows and post-completion workflow triggers', async () =
     />,
   );
 
+  fireEvent.click(
+    screen.getByRole('button', { name: /Runs when started by hand/ }),
+  );
   expect(screen.getByRole('radio', { name: 'Manual' })).toBeChecked();
-  expect(screen.getByText('No workflows to be triggered.')).toBeInTheDocument();
-  expect(
-    screen.queryByText(
-      'Trigger any selected workflow after all stages finish.',
-    ),
-  ).not.toBeInTheDocument();
-  fireEvent.mouseOver(
-    screen.getByRole('button', {
-      name: 'Help for On successful completion',
-    }),
+
+  fireEvent.click(
+    screen.getByRole('button', { name: /After every stage succeeds/ }),
   );
   expect(
-    await screen.findByRole('tooltip', {
-      name: 'Trigger any selected workflow after all stages finish.',
-    }),
+    screen.getByText('No workflows run after this one.'),
   ).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole('button', { name: 'Add workflow' }));
@@ -239,6 +245,10 @@ it('supports manual workflows and post-completion workflow triggers', async () =
     watch_scans: [],
     trigger_workflows: ['workflow-3'],
   });
+  // The flow names what runs next.
+  expect(
+    screen.getByRole('button', { name: /Another workflow/ }),
+  ).toBeInTheDocument();
 });
 
 const cartographySchemas: Record<string, ActionConfigFieldDef[]> = {
@@ -364,11 +374,9 @@ it('requires at least one intel module when the field is required', async () => 
   );
 
   fireEvent.click(screen.getByRole('button', { name: 'Save workflow' }));
-  expect(
-    await screen.findByText(
-      "Activity 'sync' requires at least one intel module.",
-    ),
-  ).toBeInTheDocument();
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    "Activity 'sync' requires at least one intel module.",
+  );
   expect(onSave).not.toHaveBeenCalled();
 });
 
@@ -391,9 +399,10 @@ it('shows activity descriptions in accessible tooltips instead of inline help te
     screen.queryByText('Produces any JSON value.'),
   ).not.toBeInTheDocument();
 
-  fireEvent.mouseOver(
-    screen.getAllByRole('button', { name: 'Help for Message' })[0],
+  fireEvent.click(
+    screen.getByRole('button', { name: /findings → first_notification/ }),
   );
+  fireEvent.mouseOver(screen.getByRole('button', { name: 'Help for Message' }));
 
   expect(
     await screen.findByRole('tooltip', {
@@ -403,7 +412,7 @@ it('shows activity descriptions in accessible tooltips instead of inline help te
 
   expect(
     screen
-      .getAllByRole('button', { name: 'Help for Output name' })[0]
+      .getByRole('button', { name: 'Help for Output name' })
       .getAttribute('title'),
   ).toBe('Produces any JSON value.');
 });
@@ -420,27 +429,154 @@ it('generates unique output names and explains disabled inputs', async () => {
     />,
   );
 
+  // A new stage arrives with its first activity, opened for editing.
   fireEvent.click(screen.getByRole('button', { name: 'Add stage' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Add activity' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Add activity' }));
-
   expect(screen.getByDisplayValue('stage_1_activity_1')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Add activity' }));
   expect(screen.getByDisplayValue('stage_1_activity_2')).toBeInTheDocument();
+  expect(
+    screen.getByRole('button', { name: /No input → stage_1_activity_1/ }),
+  ).toBeInTheDocument();
 
-  const inputs = screen.getAllByRole('combobox', { name: 'Input' });
-  expect(inputs).toHaveLength(2);
-  inputs.forEach((input) =>
-    expect(input).toHaveAttribute('aria-disabled', 'true'),
+  expect(screen.getByRole('combobox', { name: 'Input' })).toHaveAttribute(
+    'aria-disabled',
+    'true',
   );
-
   fireEvent.mouseOver(
-    screen.getAllByLabelText('Input unavailable', {
-      selector: 'span',
-    })[0],
+    screen.getByLabelText('Input unavailable', { selector: 'span' }),
   );
   expect(
     await screen.findByRole('tooltip', {
       name: 'Inputs can only reference outputs from earlier stages; none are available here.',
     }),
   ).toBeInTheDocument();
+});
+
+it('marks every problem after a save attempt and opens the first one', async () => {
+  const onSave = jest.fn().mockResolvedValue(undefined);
+  render(
+    <WorkflowDialog
+      open
+      initial={null}
+      activityTypes={['query', 'log']}
+      activitySchemas={schemas}
+      onClose={jest.fn()}
+      onSave={onSave}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add stage' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add activity' }));
+  // Nothing is marked while the workflow is still being built.
+  expect(
+    screen.queryByText('Choose an activity type.'),
+  ).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+    target: { value: 'Alerts' },
+  });
+  fireEvent.click(
+    screen.getByRole('button', { name: /No input → stage_1_activity_2/ }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Save workflow' }));
+
+  expect(onSave).not.toHaveBeenCalled();
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Choose an activity type. · 1 more marked below',
+  );
+  expect(screen.getAllByText('Choose an activity type.')).toHaveLength(3);
+  // The first problem's activity is opened for fixing.
+  expect(
+    screen.getByRole('button', { name: /No input → stage_1_activity_1/ }),
+  ).toHaveAttribute('aria-pressed', 'true');
+});
+
+it('closes straight away when nothing changed, and asks before discarding edits', async () => {
+  const onClose = jest.fn();
+  const { unmount } = render(
+    <WorkflowDialog
+      open
+      initial={initial}
+      activityTypes={['query', 'log']}
+      activitySchemas={schemas}
+      onClose={onClose}
+      onSave={jest.fn().mockResolvedValue(undefined)}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Close editor' }));
+  expect(onClose).toHaveBeenCalledTimes(1);
+  unmount();
+
+  render(
+    <WorkflowDialog
+      open
+      initial={initial}
+      activityTypes={['query', 'log']}
+      activitySchemas={schemas}
+      onClose={onClose}
+      onSave={jest.fn().mockResolvedValue(undefined)}
+    />,
+  );
+  fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), {
+    target: { value: 'Renamed' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(
+    await screen.findByText('Discard unsaved changes?'),
+  ).toBeInTheDocument();
+  expect(onClose).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+  expect(onClose).toHaveBeenCalledTimes(2);
+});
+
+describe('WorkflowDialog on a phone', () => {
+  const original = window.matchMedia;
+  beforeEach(() => {
+    // Below `md`: down() queries are max-width; reduced motion is not set.
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes('max-width'),
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as typeof window.matchMedia;
+  });
+  afterEach(() => {
+    window.matchMedia = original;
+    cleanup();
+  });
+
+  it('slides the inspector over the flow and back', async () => {
+    render(
+      <WorkflowDialog
+        open
+        initial={initial}
+        activityTypes={['query', 'log']}
+        activitySchemas={schemas}
+        onClose={jest.fn()}
+        onSave={jest.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    const inspector = () =>
+      document.querySelector('aside[aria-label="Inspector"]');
+
+    // The flow is the first screen; nothing is being edited yet.
+    expect(inspector()).toBeNull();
+
+    const tile = screen.getByRole('button', {
+      name: /findings → first_notification/,
+    });
+    fireEvent.click(tile);
+    expect(inspector()).not.toBeNull();
+    expect(screen.getByDisplayValue('first')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Back to workflow'));
+    // Booleans, not elements: a retried failure would otherwise pretty-print
+    // the whole inspector on every poll.
+    await waitFor(() => expect(inspector() === null).toBe(true));
+    await waitFor(() => expect(document.activeElement === tile).toBe(true));
+  });
 });

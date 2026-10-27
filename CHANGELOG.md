@@ -4,6 +4,116 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.6.0] - 2026-09-19
+
+Two changes. HTTP access logging, which has been off since the server moved to
+an ASGI worker and said nothing about it, is restored as the application's own
+job and gains a request id on every record and a span per request; and handing
+the default model profile to a profile created earlier no longer fails. No
+schema migration, no new settings, nothing removed.
+
+### Added
+
+- **One access log record per HTTP request, carrying the fields the dead
+  gunicorn format named** (#336). `AccessLogMiddleware`
+  (`reporting/access_log.py`) writes to stdout on the `reporting.access`
+  logger: status, response time, bytes sent, declared content length, client
+  address, `X-Forwarded-For`, `User-Agent` and `Accept`. They go out as
+  structured extras rather than packed into one formatted string, because under
+  the JSON formatter a field is queryable and a string is not. It is pure ASGI
+  rather than `BaseHTTPMiddleware`, which buffers a response and would break the
+  chat turn streams, and it sits outermost so that a response short-circuited by
+  an inner middleware — a CSRF rejection, a timeout, an MCP request — is logged
+  like any other. Two fields of the old format have no equivalent and are gone:
+  remote user (identity is resolved by a route dependency far inside the
+  middleware, and the AUDIT records it emits already carry the user) and request
+  time (the formatter timestamps every record anyway). Raise the
+  `reporting.access` level to quiet request logging on its own.
+- **A request id on every record a request produces**, not only on the access
+  line (#336). `asgi_correlation_id` owns it and its filter is attached to the
+  two stream handlers rather than to individual loggers, so records from
+  libraries carry it too; it appears as `correlation_id` in the JSON format and
+  keeps all 32 characters, since a truncated id does not survive being grepped
+  for across services. A malformed inbound id is replaced rather than echoed,
+  and the id is published on the ASGI scope where `request.state` reaches it.
+- **A span per HTTP request wherever tracing is already on** (#336), carrying
+  route, method, status and duration where they can be correlated with the chat
+  spans (`telemetry.instrument_fastapi`). Health check URLs are excluded: they
+  are polled on a short interval and a span each can easily outnumber every
+  request that carries signal. Like the rest of `telemetry.py` it is idempotent,
+  gated on `TELEMETRY_ENABLED` plus `TELEMETRY_OTLP_ENDPOINT`, and never fatal.
+  The stdout line is kept beside it rather than left to the spans alone, because
+  stdout is still there when a trace backend is not — and whatever makes the
+  backend unreachable is often what the requests worth reading about were
+  failing on.
+
+### Fixed
+
+- **No HTTP request had been logged since the server moved to an ASGI worker,
+  and nothing said so** (#336). Gunicorn's access log does not work under one:
+  it never parses a request, so `--access-logfile`, `access_log_format` and the
+  `pre_request` hook that minted `X-Request-ID` all produced nothing, and uvicorn
+  owned the access line instead. The handoff between the two is where it was
+  lost. Gunicorn installs a stdout handler on `gunicorn.access`, then applies
+  `logging.conf` as `logconfig_dict`; `dictConfig` removes existing handlers from
+  every logger it configures, and `gunicorn.access` declared none of its own,
+  relying on `propagate: True` to reach root's handler. The worker then copies
+  that — by now empty — handler list onto `uvicorn.access` and sets
+  `propagate = False` on the copy, and uvicorn emits an access line only when
+  `uvicorn.access.hasHandlers()` holds, which stops there. Access logging was
+  therefore off for the life of every process. `logging.conf` now names handlers
+  explicitly, which is load-bearing twice over: it is also the fallback, so
+  removing the middleware brings uvicorn's own access line back rather than
+  losing access logging silently a second time. `access_log_format` and
+  `pre_request` are annotated as inert rather than deleted.
+- **Every `gunicorn.error` line was logged twice** (#336) — once to its own
+  `console_stderr` and again to root's `console_stdout`. Gunicorn sets
+  `propagate = False` on that logger itself before applying `logging.conf`, which
+  set it back to `True`.
+- **Handing the default to a model profile created before the current default
+  failed with a 409 reporting a duplicate name** (#335). Both rows are
+  ORM-dirty rows of the same table, and one flush orders their UPDATEs by
+  primary key rather than by the order they were mutated: `profile_id` is a
+  time-ordered UUIDv7, so the row gaining the flag was written first and tripped
+  the `uq_model_profiles_default` partial index while the old default still held
+  it. The rows losing the flag are now flushed before the row gaining it, and
+  the create path takes the same explicit ordering rather than surviving on
+  SQLAlchemy emitting UPDATEs ahead of INSERTs within a flush. The existing
+  coverage missed this because its update case re-defaulted a profile that was
+  already the default, so no row ever had to be cleared.
+
+### Changed
+
+- **The gunicorn worker class is now `uvicorn_worker.UvicornWorker`** (#336),
+  from the `uvicorn-worker` distribution upstream points at; the in-tree
+  `uvicorn.workers` module is deprecated and warns on import. Its logging
+  behavior is byte-identical, so it fixes nothing here on its own. A deployment
+  that names the worker class itself must update it.
+- **`telemetry.configure()` runs whether or not chat is enabled** (#336). The
+  per-request HTTP spans need the tracer provider installed either way, and it
+  already gates itself on `TELEMETRY_ENABLED` and is idempotent.
+
+### Upgrade notes {#upgrade-notes-560}
+
+No schema migration, no new settings and nothing removed. Three new
+dependencies (`asgi-correlation-id`, `uvicorn-worker`,
+`opentelemetry-instrumentation-fastapi`), so rebuild rather than restart.
+
+1. **Update the worker class if your deployment names it.** It moves from
+   `uvicorn.workers.UvicornWorker` to `uvicorn_worker.UvicornWorker`. The
+   shipped `Dockerfile` and dev entrypoint are already updated; a Helm values
+   file, systemd unit or compose override that sets `-k` is not.
+2. **Expect HTTP access records again.** One JSON record per request on stdout
+   from `reporting.access`, plus a `correlation_id` field on every record from
+   every logger. Log-volume budgets and any pipeline that parses these streams
+   should be checked before the upgrade, and `reporting.access` can be raised to
+   `WARN` on its own to turn request logging back off.
+3. **Merge the `logging.conf` changes if you override it.** A file carried over
+   from an earlier release keeps the handler-less `gunicorn.access` logger that
+   caused this, and has no `correlation_id` filter or format field.
+
+Full procedures: [Upgrading Seizu — 5.6.0](docs/root/install/upgrading.md#560).
+
 ## [5.5.0] - 2026-09-14
 
 This release lets an external MCP server ask the person a question in the middle
@@ -1830,6 +1940,7 @@ frontend, storage, auth, and integrations.
 Initial release of the original reporting tool that Seizu was built from —
 Dockerized build, GitHub Container Registry publishing, and quickstart docs.
 
+[5.6.0]: https://github.com/mappedsky/seizu/compare/v5.5.0...v5.6.0
 [5.5.0]: https://github.com/mappedsky/seizu/compare/v5.4.0...v5.5.0
 [5.4.0]: https://github.com/mappedsky/seizu/compare/v5.3.0...v5.4.0
 [5.3.0]: https://github.com/mappedsky/seizu/compare/v5.2.0...v5.3.0

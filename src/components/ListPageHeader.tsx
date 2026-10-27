@@ -16,8 +16,10 @@ export default function ListPageHeader({ title, action }: ListPageHeaderProps) {
     <Box
       sx={{
         display: 'flex',
+        flexWrap: 'wrap',
         justifyContent: 'space-between',
         alignItems: 'center',
+        gap: 2,
         mb: 3,
       }}
     >
@@ -26,7 +28,15 @@ export default function ListPageHeader({ title, action }: ListPageHeaderProps) {
       ) : (
         title
       )}
-      {action}
+      {action && (
+        // Wraps below the title when both don't fit, rather than squeezing
+        // the action's label onto several lines.
+        <Box
+          sx={{ flexShrink: 0, '& .MuiButton-root': { whiteSpace: 'nowrap' } }}
+        >
+          {action}
+        </Box>
+      )}
     </Box>
   );
 }

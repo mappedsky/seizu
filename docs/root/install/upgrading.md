@@ -25,6 +25,55 @@ For every production upgrade:
    database written by a newer one unless its upgrade procedure explicitly says
    that downgrade is supported.
 
+## 5.6.0
+
+No schema migrations, no new settings and nothing removed. Three new
+dependencies, so this release is a rebuild rather than a restart:
+`asgi-correlation-id`, `uvicorn-worker` and
+`opentelemetry-instrumentation-fastapi`.
+
+### The gunicorn worker class moved
+
+Seizu now runs under `uvicorn_worker.UvicornWorker`, from the `uvicorn-worker`
+distribution upstream points at; the in-tree `uvicorn.workers` module is
+deprecated and warns on import. The shipped `Dockerfile` and
+`scripts/dev_entrypoint.sh` are updated.
+
+1. Update any deployment that names the worker class itself — a Helm values
+   file, a systemd unit, a Compose command override or a custom image
+   `CMD` — from `-k uvicorn.workers.UvicornWorker` to
+   `-k uvicorn_worker.UvicornWorker`.
+2. Nothing else changes with it. The two workers behave identically, including
+   their logging.
+
+### HTTP access logging is back, and every record carries a request id
+
+No HTTP request had been logged since the server moved to an ASGI worker;
+gunicorn's access log does not function under one. The application now writes
+its own.
+
+1. Expect one JSON record per request on stdout, on the `reporting.access`
+   logger, carrying status, response time, bytes sent, declared content length,
+   client address, `X-Forwarded-For`, `User-Agent` and `Accept` as structured
+   fields. Check log-volume budgets and any pipeline that parses this stream
+   before you upgrade a busy deployment.
+2. Every record from every logger now carries a 32-character `correlation_id`
+   field, generated per request or taken from a valid inbound `X-Request-ID`.
+   A malformed inbound id is replaced rather than echoed.
+3. To turn request logging back off without losing anything else, raise the
+   `reporting.access` logger to `WARN`. Uvicorn's own, smaller access line is
+   silenced by the middleware and does not come back.
+4. If you override `logging.conf` via `LOG_CONFIG_FILE` or gunicorn's own
+   config, merge the shipped changes into your copy. A file carried over from an
+   earlier release declares `gunicorn.access` with no handlers of its own —
+   which is what broke access logging — and has neither the `correlation_id`
+   filter on the stream handlers nor the field in the formatter's format string.
+   It also propagates `gunicorn.error` to root, which logs every error line
+   twice.
+5. Where `TELEMETRY_OTLP_ENDPOINT` is set, a span per HTTP request now joins
+   the chat spans, carrying route, method, status and duration; health check
+   URLs are excluded. Tracing that is off stays off — there is no new setting.
+
 ## 5.5.0
 
 One additive schema migration (`0014`) and no removed settings. In-chat input

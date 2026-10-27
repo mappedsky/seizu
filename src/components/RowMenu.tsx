@@ -56,6 +56,8 @@ export default function RowMenu({
         <IconButton
           size="small"
           aria-label={label}
+          aria-haspopup="menu"
+          aria-expanded={anchor ? true : undefined}
           onClick={(event: MouseEvent<HTMLElement>) =>
             setAnchor(event.currentTarget)
           }

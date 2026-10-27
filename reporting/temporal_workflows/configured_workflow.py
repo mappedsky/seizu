@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
@@ -303,7 +303,10 @@ async def _run_configured_workflow(invocation: ConfiguredWorkflowInvocation) -> 
             failures = [result for result in settled if isinstance(result, BaseException)]
             if failures:
                 raise failures[0]
-            for result in settled:
+            # Everything left is an activity output: the raise above removed
+            # every exception. Narrowed by that invariant rather than by
+            # ``isinstance``, for the reason given below.
+            for result in cast(list[ConfiguredActivityOutput], settled):
                 # Temporal's workflow sandbox can load a distinct class
                 # identity for this dataclass even though the decoded
                 # value has the expected fields. Avoid an ``isinstance``
@@ -349,13 +352,14 @@ async def _run_configured_workflow(invocation: ConfiguredWorkflowInvocation) -> 
             activity_results=summaries,
         )
     except BaseException as exc:
+        failure_record: dict[str, str | None] = {
+            "workflow_id": definition.workflow_id,
+            "status": "failure",
+            "error": str(exc),
+        }
         await workflow.execute_activity(
             record_configured_workflow_result,
-            {
-                "workflow_id": definition.workflow_id,
-                "status": "failure",
-                "error": str(exc),
-            },
+            failure_record,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )

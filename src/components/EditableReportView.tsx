@@ -79,6 +79,7 @@ import {
   DASHBOARD_SIDEBAR_WIDTH_VAR,
 } from 'src/components/dashboardLayoutConstants';
 import { contentContainerSx } from 'src/theme/layout';
+import { fontFamilyMono, fontSizeMin } from 'src/theme/typography';
 
 // ---------------------------------------------------------------------------
 // Edit-state types (panels/rows get stable _id for DnD keys)
@@ -175,7 +176,7 @@ function PanelTypeChip({ type }: { type: string }) {
       size="small"
       variant="outlined"
       color="primary"
-      sx={{ fontSize: '0.65rem', height: 20 }}
+      sx={{ fontSize: fontSizeMin, height: 20 }}
     />
   );
 }
@@ -401,7 +402,7 @@ function InputCard({ input, onEdit, onDelete, onResize }: InputCardProps) {
             size="small"
             variant="outlined"
             color="secondary"
-            sx={{ fontSize: '0.65rem', height: 20 }}
+            sx={{ fontSize: fontSizeMin, height: 20 }}
           />
           <Typography variant="body2" noWrap sx={{ fontWeight: 500 }}>
             {input.label || <em>no label</em>}
@@ -575,7 +576,7 @@ function InputEditorForm({
                 onChange={(e) => set('cypher', e.target.value || undefined)}
                 slotProps={{
                   htmlInput: {
-                    style: { fontFamily: 'monospace', fontSize: '0.8rem' },
+                    style: { fontFamily: fontFamilyMono, fontSize: '0.8rem' },
                   },
                 }}
                 helperText="Query to populate the dropdown. Must return a 'value' column."
@@ -675,7 +676,16 @@ function QueryRow({
   }
 
   return (
-    <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+    // On a phone the name shares a line with its delete button and the
+    // Cypher takes the full width below; beside the page they sit in a row.
+    <Box
+      sx={{
+        display: 'flex',
+        gap: 1,
+        alignItems: 'flex-start',
+        flexWrap: { xs: 'wrap', sm: 'nowrap' },
+      }}
+    >
       <TextField
         size="small"
         label="Query name"
@@ -690,7 +700,7 @@ function QueryRow({
           }
         }}
         slotProps={{ htmlInput: { 'data-query-key': queryKey } }}
-        sx={{ width: 220, flexShrink: 0 }}
+        sx={{ flex: { xs: '1 1 0', sm: '0 0 220px' }, minWidth: 0 }}
         helperText="Used as cypher field in panels"
       />
       <TextField
@@ -706,19 +716,20 @@ function QueryRow({
         onBlur={() => {
           if (localValue !== value) onValueChange(queryKey, localValue);
         }}
-        sx={{ flex: 1 }}
+        sx={{ flex: { xs: '1 1 100%', sm: 1 }, order: { xs: 3, sm: 0 } }}
         slotProps={{
           htmlInput: {
             'data-query-value': queryKey,
-            style: { fontFamily: 'monospace', fontSize: '0.8rem' },
+            style: { fontFamily: fontFamilyMono, fontSize: '0.8rem' },
           },
         }}
       />
       <Tooltip title="Delete query">
         <IconButton
+          aria-label={`Delete query ${queryKey}`}
           onClick={() => onDelete(queryKey)}
           size="small"
-          sx={{ mt: 0.5 }}
+          sx={{ mt: 0.5, order: { xs: 2, sm: 0 } }}
         >
           <DeleteIcon fontSize="small" />
         </IconButton>
@@ -773,13 +784,23 @@ const EditToolbar = memo(function EditToolbar({
         borderColor: 'divider',
         boxShadow: 1,
         ...contentContainerSx,
-        py: 2,
+        py: { xs: 1.5, sm: 2 },
         display: 'flex',
         alignItems: 'center',
-        gap: 1.5,
+        // On a phone each control takes a full line: name, comment, then
+        // the two actions side by side.
+        flexWrap: { xs: 'wrap', md: 'nowrap' },
+        gap: { xs: 1, sm: 1.5 },
       }}
     >
-      <Typography variant="body2" sx={{ fontWeight: 'medium', flexShrink: 0 }}>
+      <Typography
+        variant="body2"
+        sx={{
+          display: { xs: 'none', md: 'block' },
+          fontWeight: 'medium',
+          flexShrink: 0,
+        }}
+      >
         Editing report
       </Typography>
       <TextField
@@ -787,21 +808,32 @@ const EditToolbar = memo(function EditToolbar({
         label="Report name"
         value={reportName}
         onChange={(e) => setReportName(e.target.value)}
-        sx={{ width: 260 }}
+        sx={{ flex: { xs: '1 1 100%', sm: '1 1 200px', md: '0 0 260px' } }}
       />
       <TextField
         size="small"
         label="Save comment (optional)"
         value={saveComment}
         onChange={(e) => setSaveComment(e.target.value)}
-        sx={{ flex: 1, maxWidth: 400 }}
+        sx={{
+          flex: { xs: '1 1 100%', sm: '1 1 200px', md: 1 },
+          maxWidth: { md: 400 },
+        }}
       />
       {saveError && (
         <Typography variant="caption" color="error">
           {saveError}
         </Typography>
       )}
-      <Box sx={{ ml: 'auto', display: 'flex', gap: 1 }}>
+      <Box
+        sx={{
+          ml: 'auto',
+          display: 'flex',
+          gap: 1,
+          flex: { xs: '1 1 100%', md: '0 0 auto' },
+          '& .MuiButton-root': { flex: { xs: 1, md: 'none' } },
+        }}
+      >
         <Button
           variant="outlined"
           size="small"
@@ -895,7 +927,17 @@ const EditableRowCard = memo(function EditableRowCard({
       sx={{ ...contentContainerSx, pt: rowIndex === 0 ? 0.75 : 0, pb: 1.5 }}
     >
       <Paper elevation={1} sx={{ p: 1.5 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+        {/* On a phone the name takes the first line beside its drag handle,
+            and the row's actions wrap to the line below. */}
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            flexWrap: { xs: 'wrap', sm: 'nowrap' },
+            gap: 1,
+            mb: 1,
+          }}
+        >
           <Tooltip title="Drag to reorder row">
             <IconButton
               {...dragHandleProps}
@@ -917,14 +959,19 @@ const EditableRowCard = memo(function EditableRowCard({
                 e.currentTarget.blur();
               }
             }}
-            sx={{ flex: 1, maxWidth: 360 }}
+            sx={{
+              flex: { xs: '1 1 calc(100% - 48px)', sm: 1 },
+              maxWidth: { sm: 360 },
+              minWidth: 0,
+            }}
           />
-          <Box sx={{ flex: 1 }} />
+          <Box sx={{ display: { xs: 'none', sm: 'block' }, flex: 1 }} />
           <Tooltip title="Add panel to this row">
             <Button
               size="small"
               startIcon={<Add />}
               onClick={() => onAddPanel(row._id)}
+              sx={{ ml: { xs: 'auto', sm: 0 } }}
             >
               Add panel
             </Button>

@@ -34,6 +34,7 @@ from reporting.temporal_workflows import WORKFLOW_REGISTRY
 
 if TYPE_CHECKING:
     import temporalio.api.common.v1
+    import temporalio.api.enums.v1
     import temporalio.api.failure.v1
     import temporalio.client
 
@@ -449,16 +450,16 @@ async def _is_waiting_for_workflow_mutex(handle: "temporalio.client.WorkflowHand
     waiting = False
     async for event in handle.fetch_history_events():
         if event.HasField("start_child_workflow_execution_initiated_event_attributes"):
-            attrs = event.start_child_workflow_execution_initiated_event_attributes
-            if attrs.workflow_id.startswith(_CONFIGURED_WORKFLOW_MUTEX_ID_PREFIX):
+            initiated = event.start_child_workflow_execution_initiated_event_attributes
+            if initiated.workflow_id.startswith(_CONFIGURED_WORKFLOW_MUTEX_ID_PREFIX):
                 mutex_attempts.add(event.event_id)
         elif event.HasField("start_child_workflow_execution_failed_event_attributes"):
-            attrs = event.start_child_workflow_execution_failed_event_attributes
-            if attrs.initiated_event_id in mutex_attempts:
+            failed_start = event.start_child_workflow_execution_failed_event_attributes
+            if failed_start.initiated_event_id in mutex_attempts:
                 waiting = True
         elif event.HasField("child_workflow_execution_started_event_attributes"):
-            attrs = event.child_workflow_execution_started_event_attributes
-            if attrs.initiated_event_id in mutex_attempts:
+            started = event.child_workflow_execution_started_event_attributes
+            if started.initiated_event_id in mutex_attempts:
                 waiting = False
     return waiting
 
@@ -663,7 +664,7 @@ async def _collect_activities(
     return activities, workflow_failure
 
 
-def _retry_state_label(retry_state: int) -> str | None:
+def _retry_state_label(retry_state: "temporalio.api.enums.v1.RetryState.ValueType") -> str | None:
     import temporalio.api.enums.v1
 
     if not retry_state:

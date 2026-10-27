@@ -6,6 +6,7 @@ import DetailDialog, {
 import PluginContentsView from 'src/components/PluginContentsView';
 import UserDisplay from 'src/components/UserDisplay';
 import type { PluginVersion } from 'src/hooks/usePluginsApi';
+import { fontFamilyMono } from 'src/theme/typography';
 
 interface Props {
   open: boolean;
@@ -53,7 +54,7 @@ export default function PluginVersionDialog({
         )}
 
         <DetailSection title="Namespace">
-          <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+          <Typography variant="body2" sx={{ fontFamily: fontFamilyMono }}>
             {version.plugin_id}
           </Typography>
         </DetailSection>

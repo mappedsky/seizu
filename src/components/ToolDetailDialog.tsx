@@ -13,6 +13,7 @@ import DetailDialog, {
   DetailCodeBlock,
 } from 'src/components/DetailDialog';
 import { ToolItem, ToolVersion, ToolParamDef } from 'src/hooks/useToolsetsApi';
+import { fontFamilyMono } from 'src/theme/typography';
 
 export type ToolViewData = Pick<
   ToolItem | ToolVersion,
@@ -36,7 +37,7 @@ function ParamTypeChip({ type }: { type: ToolParamDef['type'] }) {
       label={type}
       size="small"
       variant="outlined"
-      sx={{ fontFamily: 'monospace', fontSize: 11 }}
+      sx={{ fontFamily: fontFamilyMono, fontSize: 11 }}
     />
   );
 }
@@ -60,7 +61,7 @@ export default function ToolDetailDialog({ open, onClose, data }: Props) {
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
         {data.slug && (
           <DetailSection title="Slug">
-            <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+            <Typography variant="body2" sx={{ fontFamily: fontFamilyMono }}>
               {data.slug}
             </Typography>
           </DetailSection>
@@ -100,7 +101,7 @@ export default function ToolDetailDialog({ open, onClose, data }: Props) {
                 {data.parameters.map((p, i) => (
                   <TableRow key={i}>
                     <TableCell
-                      sx={{ fontFamily: 'monospace', fontWeight: 600 }}
+                      sx={{ fontFamily: fontFamilyMono, fontWeight: 600 }}
                     >
                       {p.name}
                     </TableCell>
@@ -111,7 +112,10 @@ export default function ToolDetailDialog({ open, onClose, data }: Props) {
                       {p.required ? 'Yes' : 'No'}
                     </TableCell>
                     <TableCell
-                      sx={{ color: 'text.secondary', fontFamily: 'monospace' }}
+                      sx={{
+                        color: 'text.secondary',
+                        fontFamily: fontFamilyMono,
+                      }}
                     >
                       {p.default !== null && p.default !== undefined
                         ? String(p.default)

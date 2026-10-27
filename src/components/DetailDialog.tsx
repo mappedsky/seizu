@@ -11,6 +11,7 @@ import {
 } from '@mui/material';
 import type { Breakpoint } from '@mui/material/styles';
 import CloseIcon from '@mui/icons-material/Close';
+import { fontFamilyMono } from 'src/theme/typography';
 
 // Shared read-only detail dialog: a title (with optional secondary label such
 // as a version tag), a close button, a divider, and a content area. Use the
@@ -43,7 +44,7 @@ export function DetailCodeBlock({ children }: { children: ReactNode }) {
         borderRadius: 1,
         bgcolor: 'action.hover',
         fontSize: 12,
-        fontFamily: 'monospace',
+        fontFamily: fontFamilyMono,
         whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
         overflowX: 'auto',
