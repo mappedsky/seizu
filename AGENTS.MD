@@ -123,6 +123,7 @@ make seed_dashboard [ARGS="--force|--dry-run|export"]
 make auth_enable / auth_disable
 make external_mcp_enable / external_mcp_disable / external_mcp_login
 make build_cartography_worker     # build the cartography sync-worker image
+make lock_cartography_requirements # re-lock the sync worker's hash-pinned pip deps
 make cartography_contract_test    # verify registry flags against the pinned CLI
 make lock_proxy_requirements [REQUIREMENTS=... PYTHON_VERSION=... OUTPUT=...]  # re-lock the proxy's deps
 make build_proxy_template         # build the E2B template the credential proxy runs on

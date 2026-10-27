@@ -143,6 +143,15 @@ rebuild:
 build_cartography_worker:
 	docker compose build seizu-cartography-worker
 
+# Recompiles the sync worker's hash-locked requirements.txt from
+# requirements.in. Hashes cover every platform's wheels; the Python version
+# matches the pinned cartography image's interpreter.
+.PHONY: lock_cartography_requirements
+lock_cartography_requirements:
+	docker compose run --rm --no-deps seizu uv pip compile --generate-hashes \
+		--universal --python-version 3.13 --no-header \
+		-o cartography_sync/requirements.txt cartography_sync/requirements.in
+
 .PHONY: drop_db
 drop_db: down
 	@echo "Removing postgres_data volume..."
