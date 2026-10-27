@@ -24,9 +24,13 @@ RUN set -eu; \
     install -m 0644 "$CARTOGRAPHY_DATA_DIR/permission_relationships.yaml" /etc/cartography/permission_relationships.yaml; \
     install -m 0644 "$CARTOGRAPHY_DATA_DIR/azure_permission_relationships.yaml" /etc/cartography/azure_permission_relationships.yaml; \
     install -m 0644 "$CARTOGRAPHY_DATA_DIR/gcp_permission_relationships.yaml" /etc/cartography/gcp_permission_relationships.yaml
-# Match the temporalio version pinned in uv.lock (dataclass payloads are
-# JSON-serialized, but keeping the SDKs aligned avoids surprises).
-RUN pip install --no-cache-dir temporalio==1.28.0
+# Hash-locked worker dependencies. Keep temporalio in requirements.in matching
+# uv.lock (dataclass payloads are JSON-serialized, but keeping the SDKs aligned
+# avoids surprises) and regenerate with `make lock_cartography_requirements`.
+COPY cartography_sync/requirements.txt /tmp/cartography-sync-requirements.txt
+RUN pip install --no-cache-dir --no-deps --require-hashes \
+        -r /tmp/cartography-sync-requirements.txt \
+    && rm /tmp/cartography-sync-requirements.txt
 
 COPY cartography_sync /opt/seizu/cartography_sync
 ENV PYTHONPATH=/opt/seizu

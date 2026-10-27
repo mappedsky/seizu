@@ -1,0 +1,4 @@
+# Runtime dependencies of the cartography sync-worker image (Dockerfile.cartography).
+# Keep temporalio aligned with the version in uv.lock, then regenerate the
+# hash-locked requirements.txt with `make lock_cartography_requirements`.
+temporalio==1.28.0
