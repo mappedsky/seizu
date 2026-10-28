@@ -96,7 +96,10 @@ version. `model_profiles:read`,
 Admin role.
 
 The list supports search and status filters. Click a profile name to inspect its
-settings, or open its row menu to edit, view history, or delete it. The history
+settings, or open its row menu to edit, view history, or delete it. **New
+profile** and **Edit** open a full-page editor: the stage routing table lists
+each stage in turn order, showing the primary model it inherits and marking the
+stages that override the model or reasoning, with a reset per stage. The history
 page lists revisions with their author, saved time, and comment. Its row menu
 can view a revision's complete settings or restore an older revision as a new
 version; restoring requires `model_profiles:write`. Deleting a profile requires
