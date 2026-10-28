@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import urlencode, urlparse
 
 import httpx
+import httpx2
 import jwt
 from authlib.common.errors import AuthlibBaseError
 from authlib.integrations.httpx_client import AsyncOAuth2Client
@@ -503,7 +504,7 @@ async def exchange_code(*, code: str, code_verifier: str, redirect_uri: str) -> 
             )
         except AuthlibBaseError as exc:
             raise OAuthClientError(f"Token exchange failed: {exc}") from exc
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx2.HTTPError) as exc:
             raise OAuthClientError(f"Token endpoint request failed: {exc}") from exc
     return _coerce_token(token)
 
@@ -519,7 +520,7 @@ async def refresh_tokens(*, refresh_token: str) -> TokenResponse:
             )
         except AuthlibBaseError as exc:
             raise OAuthClientError(f"Token refresh failed: {exc}") from exc
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx2.HTTPError) as exc:
             raise OAuthClientError(f"Token endpoint request failed: {exc}") from exc
     return _coerce_token(token)
 
@@ -554,7 +555,7 @@ async def revoke_refresh_token(*, refresh_token: str) -> None:
                 body=body,
             )
             resp.raise_for_status()
-    except (AuthlibBaseError, httpx.HTTPError) as exc:
+    except (AuthlibBaseError, httpx.HTTPError, httpx2.HTTPError) as exc:
         logger.warning("refresh-token revocation failed (continuing logout): %s", exc)
 
 
@@ -587,7 +588,7 @@ async def introspect_token(*, token: str) -> dict[str, Any]:
             )
             resp.raise_for_status()
             data = resp.json()
-    except (AuthlibBaseError, httpx.HTTPError) as exc:
+    except (AuthlibBaseError, httpx.HTTPError, httpx2.HTTPError) as exc:
         raise OAuthClientError(f"Token introspection failed: {exc}") from exc
 
     if not isinstance(data, dict) or not data.get("active"):
