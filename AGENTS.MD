@@ -94,6 +94,13 @@ docker compose build seizu                     # REQUIRED after any dependency c
 ```
 > Always run tests via `uv run --frozen --no-sync` **in the container** so they use the synced Docker env and `uv.lock`. Commit `pyproject.toml` + `uv.lock` together.
 
+> **Releases younger than a week are invisible to resolution.** `exclude-newer`
+> in `pyproject.toml` (uv) and `minimumReleaseAge` in `bunfig.toml` (bun) hold
+> every lock and `add` to versions published at least seven days ago, so a
+> just-released version "does not exist" until it ages in. To take an urgent fix
+> sooner, exempt that one package (`exclude-newer-package` /
+> `minimumReleaseAgeExcludes`) rather than shortening the window.
+
 > **A dependency change needs a rebuild, not a `uv sync`.** The environment lives
 > in the image, and `docker compose run --rm` discards the container it synced —
 > so `uv sync` appears to succeed, the new package is gone the moment the command
@@ -105,7 +112,7 @@ docker compose build seizu                     # REQUIRED after any dependency c
 > whose dependencies changed. `make build` does it, `make test_unit` depends on
 > it, and it is cached when `pyproject.toml` and `uv.lock` have not moved.
 
-**Docs (Sphinx):** isolated venv under `docs/.venv`, pinned in `docs/requirements.txt`. Sphinx is **not** in the project `pyproject.toml` — don't add it there. `make docs` runs `docs/build.sh` (bootstraps the venv). To change a docs dep, edit `docs/requirements.txt` and re-run `make docs`.
+**Docs (Sphinx):** isolated venv under `docs/.venv`, declared in `docs/requirements.txt` and installed by `uv pip` with the same one-week cooldown (`--exclude-newer` in `docs/build.sh`), never as a uv project of its own (see `.github/dependabot.yml`). Sphinx is **not** in the project `pyproject.toml` — don't add it there. `make docs` runs `docs/build.sh` (bootstraps the venv). To change a docs dep, edit `docs/requirements.txt` and re-run `make docs`.
 
 **Linting:** run pre-commit **on the host** (the `seizu` container lacks git): `pre-commit run --all-files` or `make lint`. The mypy hook is a `repo: local` hook running `scripts/run_mypy.sh`, so it type-checks against the project's own locked environment: mypy's version is declared in the `dev` group and nowhere else, and the libraries it resolves are the ones the app imports. The script syncs `.venv/` from `uv.lock` itself — needing only `uv` on PATH — and must keep `--no-install-workspace`, since the wheel force-includes the built frontend at `build/` and installing the root package fails without it.
 

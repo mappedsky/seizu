@@ -83,6 +83,11 @@ dev = [
 ]
 
 [tool.uv]
+# Resolve only distributions uploaded at least a week ago, so a compromised
+# release has time to be noticed and yanked before a lock can pick it up. An
+# urgent security fix newer than that is admitted per package with
+# `exclude-newer-package = { <name> = "<RFC 3339 timestamp>" }`.
+exclude-newer = "7 days"
 constraint-dependencies = [
     "aiohttp>=3.14.4",
     "h2>=4.4.1",
