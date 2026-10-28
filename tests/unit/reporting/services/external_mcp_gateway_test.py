@@ -4,7 +4,6 @@ import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
-import httpx
 import httpx2
 import pytest
 from authlib.integrations.httpx_client import AsyncOAuth2Client
@@ -64,7 +63,7 @@ def token_server(mocker, handler):
     mocker.patch.object(
         external_mcp_tokens,
         "AsyncOAuth2Client",
-        side_effect=lambda **kwargs: AsyncOAuth2Client(transport=httpx.MockTransport(handler), **kwargs),
+        side_effect=lambda **kwargs: AsyncOAuth2Client(transport=httpx2.MockTransport(handler), **kwargs),
     )
 
 
@@ -75,7 +74,7 @@ async def test_token_acquisition_coalesces_renews_and_keeps_user_headers_out(moc
     async def handle(request):
         requests.append(request)
         await asyncio.sleep(0)
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"access_token": f"token-{len(requests)}", "token_type": "Bearer", "expires_in": 3600}
         )
 
@@ -113,7 +112,7 @@ async def test_token_acquisition_coalesces_renews_and_keeps_user_headers_out(moc
     ],
 )
 async def test_invalid_token_responses_are_sanitized(mocker, response):
-    token_server(mocker, lambda request: httpx.Response(200, json=response))
+    token_server(mocker, lambda request: httpx2.Response(200, json=response))
     with pytest.raises(external_mcp_tokens.ServiceCredentialError) as caught:
         await external_mcp_tokens.service_token(credentials_proxy())
     assert "secret" not in str(caught.value)
@@ -127,10 +126,10 @@ async def test_token_endpoint_failure_has_no_redirect_or_retry(mocker, failure):
     def handle(request):
         requests.append(request)
         if failure == "timeout":
-            raise httpx.ReadTimeout("private-secret")
+            raise httpx2.ReadTimeout("private-secret")
         if failure == "redirect":
-            return httpx.Response(302, headers={"Location": "https://other.test/token"})
-        return httpx.Response(401, json={"error": "invalid_client", "error_description": "private-secret"})
+            return httpx2.Response(302, headers={"Location": "https://other.test/token"})
+        return httpx2.Response(401, json={"error": "invalid_client", "error_description": "private-secret"})
 
     token_server(mocker, handle)
     with pytest.raises(external_mcp_tokens.ServiceCredentialError, match="Service authentication"):
@@ -233,7 +232,7 @@ async def test_storage_failure_never_replays_a_successful_tool(mocker):
 async def test_rejected_m2m_invalidates_token_without_replaying_tool(mocker):
     token_server(
         mocker,
-        lambda request: httpx.Response(
+        lambda request: httpx2.Response(
             200, json={"access_token": "m2m-token", "token_type": "Bearer", "expires_in": 3600}
         ),
     )
