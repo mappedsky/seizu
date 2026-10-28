@@ -94,6 +94,13 @@ docker compose build seizu                     # REQUIRED after any dependency c
 ```
 > Always run tests via `uv run --frozen --no-sync` **in the container** so they use the synced Docker env and `uv.lock`. Commit `pyproject.toml` + `uv.lock` together.
 
+> **Releases younger than a week are invisible to resolution.** `exclude-newer`
+> in `pyproject.toml` (uv) and `minimumReleaseAge` in `bunfig.toml` (bun) hold
+> every lock and `add` to versions published at least seven days ago, so a
+> just-released version "does not exist" until it ages in. To take an urgent fix
+> sooner, exempt that one package (`exclude-newer-package` /
+> `minimumReleaseAgeExcludes`) rather than shortening the window.
+
 > **A dependency change needs a rebuild, not a `uv sync`.** The environment lives
 > in the image, and `docker compose run --rm` discards the container it synced —
 > so `uv sync` appears to succeed, the new package is gone the moment the command
