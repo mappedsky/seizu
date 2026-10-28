@@ -112,7 +112,7 @@ docker compose build seizu                     # REQUIRED after any dependency c
 > whose dependencies changed. `make build` does it, `make test_unit` depends on
 > it, and it is cached when `pyproject.toml` and `uv.lock` have not moved.
 
-**Docs (Sphinx):** isolated venv under `docs/.venv`, pinned in `docs/requirements.txt`. Sphinx is **not** in the project `pyproject.toml` — don't add it there. `make docs` runs `docs/build.sh` (bootstraps the venv). To change a docs dep, edit `docs/requirements.txt` and re-run `make docs`.
+**Docs (Sphinx):** isolated venv under `docs/.venv`, declared in `docs/requirements.txt` and installed with the same one-week cooldown (`--uploaded-prior-to P7D` in `docs/build.sh`). Sphinx is **not** in the project `pyproject.toml` — don't add it there. `make docs` runs `docs/build.sh` (bootstraps the venv). To change a docs dep, edit `docs/requirements.txt` and re-run `make docs`.
 
 **Linting:** run pre-commit **on the host** (the `seizu` container lacks git): `pre-commit run --all-files` or `make lint`. The mypy hook is a `repo: local` hook running `scripts/run_mypy.sh`, so it type-checks against the project's own locked environment: mypy's version is declared in the `dev` group and nowhere else, and the libraries it resolves are the ones the app imports. The script syncs `.venv/` from `uv.lock` itself — needing only `uv` on PATH — and must keep `--no-install-workspace`, since the wheel force-includes the built frontend at `build/` and installing the root package fails without it.
 
