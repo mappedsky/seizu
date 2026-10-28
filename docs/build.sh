@@ -11,14 +11,13 @@ BUILD_DIR=build_docs
 # Bootstrap an isolated virtualenv for docs so Sphinx and its extensions
 # do not pollute the main project's uv environment.
 if [[ ! -x "${VENV_DIR}/bin/sphinx-build" ]]; then
-    python3 -m venv "${VENV_DIR}"
+    uv venv --quiet "${VENV_DIR}"
 fi
-# Pinned: the pip a fresh venv bundles may predate --uploaded-prior-to, and
-# this install runs before the cooldown below can apply.
-"${VENV_DIR}/bin/pip" install --quiet "pip==26.2.2"
-# Resolve only distributions uploaded at least a week ago, matching the uv and
-# bun cooldown, so a compromised release has time to be noticed and yanked.
-"${VENV_DIR}/bin/pip" install --quiet --uploaded-prior-to P7D -r "${SCRIPT_DIR}/requirements.txt"
+# Resolve only distributions uploaded at least a week ago, matching the
+# exclude-newer window in pyproject.toml, so a compromised release has time to
+# be noticed and yanked.
+uv pip install --quiet --python "${VENV_DIR}/bin/python" \
+    --exclude-newer "7 days" -r "${SCRIPT_DIR}/requirements.txt"
 
 rm -rf "${DOCS_OUTPUT_DIR}"
 mkdir -p "${DOCS_OUTPUT_DIR}"
