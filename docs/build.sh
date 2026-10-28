@@ -11,7 +11,7 @@ BUILD_DIR=build_docs
 # Bootstrap an isolated virtualenv for docs so Sphinx and its extensions
 # do not pollute the main project's uv environment.
 if [[ ! -x "${VENV_DIR}/bin/sphinx-build" ]]; then
-    uv venv --quiet "${VENV_DIR}"
+    uv venv --quiet --python 3.12 "${VENV_DIR}"
 fi
 # Resolve only distributions uploaded at least a week ago, matching the
 # exclude-newer window in pyproject.toml, so a compromised release has time to
