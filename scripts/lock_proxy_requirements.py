@@ -53,10 +53,12 @@ from reporting.services import sandbox_agent  # noqa: E402
 from reporting.services.sandbox_backend import open_backend  # noqa: E402
 
 # Only used when there is no lock to re-read and no sandbox to measure.
-# FastAPI is pinned alongside LiteLLM as a *ceiling*: LiteLLM 1.96.2 accepts
-# fastapi<1.0,>=0.136.3 but still imports `get_flat_dependant`, which FastAPI
-# removed in 0.140.7, so a free resolution installs a proxy that cannot import.
-DEFAULT_REQUIREMENTS = "litellm[proxy]==1.96.2 fastapi==0.140.6"
+# FastAPI is pinned alongside LiteLLM as a *ceiling*: LiteLLM 1.100.4 accepts
+# fastapi<1.0,>=0.136.3 but the proxy reaches into FastAPI internals that
+# changed at 0.140.7 (`get_flat_dependant` was removed; LiteLLM now uses
+# `get_flat_params`), so the ceiling keeps the proxy importable and a newer
+# FastAPI is only safe once verified.
+DEFAULT_REQUIREMENTS = "litellm[proxy]==1.100.4 fastapi==0.140.6"
 DEFAULT_PYTHON_VERSION = "3.13"
 DEFAULT_PLATFORM = "x86_64-unknown-linux-gnu"
 # uv target tag for a measured `uname -m`. Deliberately only the two E2B runs on:
