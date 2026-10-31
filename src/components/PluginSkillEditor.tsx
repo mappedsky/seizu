@@ -10,13 +10,11 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
   FormControl,
   FormControlLabel,
   IconButton,
   InputLabel,
   MenuItem,
-  Paper,
   Select,
   Stack,
   TextField,
@@ -25,11 +23,17 @@ import {
 } from '@mui/material';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircle';
 import BuildIcon from '@mui/icons-material/Build';
+import CancelIcon from '@mui/icons-material/Cancel';
 import DeleteIcon from '@mui/icons-material/Delete';
-import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircle';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
+import AllowedToolsDialog from 'src/components/AllowedToolsDialog';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
+import {
+  EditorSection,
+  IdentityFact,
+  IdentityFacts,
+} from 'src/components/EditorSection';
 import FieldWithHelp from 'src/components/FieldWithHelp';
 import MarkdownEditor from 'src/components/MarkdownEditor';
 import type { PluginFileInfo } from 'src/hooks/usePluginsApi';
@@ -108,6 +112,20 @@ function fromParamForm(parameter: ParamFormState): ToolParamDef {
   };
 }
 
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function EmptyLine({ children }: { children: string }) {
+  return (
+    <Typography variant="body2" color="text.secondary">
+      {children}
+    </Typography>
+  );
+}
+
 function StringListEditor({
   label,
   values,
@@ -137,149 +155,6 @@ function StringListEditor({
         sx={{ flex: 1, minWidth: 0 }}
       />
     </FieldWithHelp>
-  );
-}
-
-function AllowedToolsDialog({
-  open,
-  tools,
-  selected,
-  onClose,
-  onSave,
-}: {
-  open: boolean;
-  tools: ToolCatalogItem[];
-  selected: string[];
-  onClose: () => void;
-  onSave: (tools: string[]) => void;
-}) {
-  const [selection, setSelection] = useState(selected);
-  const groups = useMemo(() => {
-    const grouped = new Map<
-      string,
-      { label: string; tools: ToolCatalogItem[] }
-    >();
-    for (const tool of tools) {
-      const key = tool.toolset_id || tool.toolset_name;
-      const group = grouped.get(key) ?? {
-        label: tool.toolset_name,
-        tools: [],
-      };
-      group.tools.push(tool);
-      grouped.set(key, group);
-    }
-    return [...grouped.entries()]
-      .map(([key, group]) => ({
-        key,
-        ...group,
-        tools: group.tools.sort((left, right) =>
-          left.mcp_name.localeCompare(right.mcp_name),
-        ),
-      }))
-      .sort((left, right) => left.label.localeCompare(right.label));
-  }, [tools]);
-
-  const toggle = (name: string) => {
-    setSelection((current) =>
-      current.includes(name)
-        ? current.filter((item) => item !== name)
-        : [...current, name].sort(),
-    );
-  };
-
-  return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle>Allowed tools</DialogTitle>
-      <DialogContent dividers>
-        {groups.length === 0 ? (
-          <Typography color="text.secondary">
-            No tools are available from enabled toolsets.
-          </Typography>
-        ) : (
-          <Box
-            sx={{
-              display: 'grid',
-              gridTemplateColumns: {
-                xs: '1fr',
-                md: 'repeat(2, minmax(0, 1fr))',
-              },
-              gap: 2,
-            }}
-          >
-            {groups.map((group) => (
-              <Paper
-                key={group.key}
-                variant="outlined"
-                sx={{ minWidth: 0, p: 1.5 }}
-              >
-                <Typography variant="body2" sx={{ fontWeight: 700, mb: 0.5 }}>
-                  {group.label}
-                </Typography>
-                <Box sx={{ display: 'flex', flexDirection: 'column' }}>
-                  {group.tools.map((tool) => {
-                    // The declaration, not the catalog name, is what the file
-                    // carries and what the server resolves.
-                    const declaration = toolDeclaration(tool.mcp_name);
-                    return (
-                      <FormControlLabel
-                        key={declaration}
-                        // A tool declaration is one unbroken token, so the
-                        // label must be allowed to shrink and to break inside
-                        // a word or it pushes the dialog sideways.
-                        sx={{
-                          minWidth: 0,
-                          mr: 0,
-                          '& .MuiFormControlLabel-label': { minWidth: 0 },
-                        }}
-                        control={
-                          <Checkbox
-                            checked={selection.includes(declaration)}
-                            onChange={() => toggle(declaration)}
-                          />
-                        }
-                        label={
-                          <Box sx={{ minWidth: 0 }}>
-                            <Typography
-                              variant="body2"
-                              sx={{ overflowWrap: 'anywhere' }}
-                            >
-                              {tool.name || tool.mcp_name}
-                            </Typography>
-                            <Typography
-                              variant="caption"
-                              color="text.secondary"
-                              sx={{
-                                display: 'block',
-                                fontFamily: fontFamilyMono,
-                                overflowWrap: 'anywhere',
-                              }}
-                            >
-                              {declaration}
-                            </Typography>
-                          </Box>
-                        }
-                      />
-                    );
-                  })}
-                </Box>
-              </Paper>
-            ))}
-          </Box>
-        )}
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button
-          variant="contained"
-          onClick={() => {
-            onSave(selection);
-            onClose();
-          }}
-        >
-          Save
-        </Button>
-      </DialogActions>
-    </Dialog>
   );
 }
 
@@ -433,6 +308,45 @@ function SupportingFileDialog({
   );
 }
 
+function defaultTitle(portableName: string): string {
+  return portableName
+    .split('-')
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+/**
+ * The skill as this editor stages it before anyone edits it: defaults filled
+ * in, text trimmed, and tool declarations in the spelling the server
+ * resolves. Idempotent, so comparing two skills through it tells an edit from
+ * a difference the editor introduced by opening the skill.
+ */
+export function normalizeSkill(
+  document: SkillDocument,
+  extension: PluginSkillExtension,
+): { document: SkillDocument; extension: PluginSkillExtension } {
+  return {
+    document: {
+      ...document,
+      description: document.description.trim(),
+      body: document.body,
+      allowedTools: document.allowedTools.map(toolDeclaration),
+    },
+    extension: {
+      // Not written: the id derives from the portable name, and a manifest
+      // that repeats it is flagged as redundant on publish (AGT-040).
+      title:
+        (extension.title ?? defaultTitle(document.portableName)).trim() ||
+        undefined,
+      triggers: extension.triggers ?? [],
+      aliases: extension.aliases ?? [],
+      parameters: (extension.parameters ?? [])
+        .map(toParamForm)
+        .map(fromParamForm),
+    },
+  };
+}
+
 export default function PluginSkillEditor({
   document,
   extension,
@@ -443,6 +357,7 @@ export default function PluginSkillEditor({
   onCreateTextFile,
   onDeleteFile,
   onDeleteSkill,
+  qualifiedName,
 }: {
   document: SkillDocument;
   extension: PluginSkillExtension;
@@ -458,23 +373,21 @@ export default function PluginSkillEditor({
   ) => Promise<void>;
   onDeleteFile: (file: PluginFileInfo) => Promise<void>;
   onDeleteSkill: () => Promise<void>;
+  /** The `plugin__skill` name agents call this skill by, when known. */
+  qualifiedName?: string;
 }) {
   const [description, setDescription] = useState(document.description);
   const [body, setBody] = useState(document.body);
   // A declaration written before the mcp__<server>__ form was required still
-  // names a real tool. Normalizing on load checks its box and republishes it
-  // in the spelling the server resolves, so opening a stale skill heals it.
+  // names a real tool. Normalizing on load checks its box, and the next edit
+  // to the skill publishes it in the spelling the server resolves.
   const [allowedTools, setAllowedTools] = useState(() =>
     document.allowedTools.map(toolDeclaration),
   );
   // Derived, never authored: the portable name is the skill's identity.
   const skillId = document.portableName.replaceAll('-', '_');
   const [title, setTitle] = useState(
-    extension.title ??
-      document.portableName
-        .split('-')
-        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-        .join(' '),
+    () => extension.title ?? defaultTitle(document.portableName),
   );
   const [triggers, setTriggers] = useState(extension.triggers ?? []);
   const [aliases, setAliases] = useState(extension.aliases ?? []);
@@ -545,38 +458,31 @@ export default function PluginSkillEditor({
   );
 
   // Every edit stages straight into the parent's in-memory package; nothing
-  // reaches the server until Publish. The ref keeps the mount-time push (which
-  // is identical to what the parent already holds) from being reported as an
-  // edit.
+  // reaches the server until Publish. Only a state that differs from the last
+  // one staged is pushed, starting from the skill as it opened, so opening a
+  // skill -- or StrictMode re-running this effect -- is never an edit.
+  const staged = {
+    document: { ...stagedDocument, description: description.trim() },
+    extension: {
+      title: title.trim() || undefined,
+      triggers,
+      aliases,
+      parameters: typedParameters,
+    },
+  };
+  const stagedKey = JSON.stringify(staged);
   const stagedRef = useRef(onChange);
   stagedRef.current = onChange;
-  const mountedRef = useRef(false);
+  const pushedRef = useRef<string | null>(null);
+  const [openedKey] = useState(() =>
+    JSON.stringify(normalizeSkill(document, extension)),
+  );
   useEffect(() => {
-    if (!mountedRef.current) {
-      mountedRef.current = true;
-      return;
-    }
-    stagedRef.current(
-      { ...document, description: description.trim(), body, allowedTools },
-      {
-        // Not written: the id derives from the portable name, and a manifest
-        // that repeats it is flagged as redundant on publish (AGT-040).
-        title: title.trim() || undefined,
-        triggers,
-        aliases,
-        parameters: typedParameters,
-      },
-    );
-  }, [
-    description,
-    body,
-    allowedTools,
-    skillId,
-    title,
-    triggers,
-    aliases,
-    JSON.stringify(typedParameters),
-  ]);
+    if (stagedKey === (pushedRef.current ?? openedKey)) return;
+    pushedRef.current = stagedKey;
+    const next = JSON.parse(stagedKey) as typeof staged;
+    stagedRef.current(next.document, next.extension);
+  }, [openedKey, stagedKey]);
 
   const handleBodyChange = useCallback(
     (value: string | undefined) => setBody(value ?? ''),
@@ -584,71 +490,77 @@ export default function PluginSkillEditor({
   );
 
   return (
-    <Stack spacing={2.5}>
-      {problem && <Alert severity="error">{problem}</Alert>}
+    <Stack spacing={{ xs: 3, md: 4 }}>
       <Box>
-        <Typography variant="h2" sx={{ mb: 0.5 }}>
+        <Typography
+          variant="h2"
+          sx={{ fontSize: { xs: 24, md: 29 }, overflowWrap: 'anywhere' }}
+        >
           {title || document.portableName}
         </Typography>
-        <Typography color="text.secondary" sx={{ fontFamily: fontFamilyMono }}>
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={{ fontFamily: fontFamilyMono, mt: 0.5, overflowWrap: 'anywhere' }}
+        >
           skills/{document.portableName}/SKILL.md
         </Typography>
+        {/* Derived, never authored: the portable name is the skill's
+            identity and fixes the others, so none of these is an input. */}
+        <IdentityFacts>
+          <IdentityFact label="Portable name" value={document.portableName} />
+          <IdentityFact label="Skill ID" value={skillId} />
+          {qualifiedName && (
+            <IdentityFact label="Tool name" value={qualifiedName} />
+          )}
+        </IdentityFacts>
       </Box>
+      {problem && <Alert severity="error">{problem}</Alert>}
 
-      {/* A grid, not a row Stack: the help affordance makes two of these three
-          controls wider than their input, and flex sizing then starved them. */}
-      <Box
-        sx={{
-          display: 'grid',
-          gap: 2,
-          gridTemplateColumns: {
-            xs: '1fr',
-            md: 'repeat(3, minmax(0, 1fr))',
-          },
-        }}
+      <EditorSection
+        title="Discovery"
+        description="How an agent finds this skill and decides it applies. The description is written to the SKILL.md front matter."
       >
-        <FieldWithHelp
-          label="Portable name"
-          tooltip="This is both the skill directory and front matter name. It cannot be changed after creation."
-        >
+        <Stack spacing={2}>
           <TextField
-            label="Portable name"
-            value={document.portableName}
-            disabled
+            label="Display title"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
             fullWidth
           />
-        </FieldWithHelp>
-        <FieldWithHelp
-          label="Skill ID"
-          tooltip="Derived from the portable name — a skill has one identity. Rename the skill to change it."
-        >
-          <TextField label="Skill ID" value={skillId} disabled fullWidth />
-        </FieldWithHelp>
-        <TextField
-          label="Display title"
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          fullWidth
-        />
-      </Box>
-      <FieldWithHelp
-        label="Description"
-        tooltip="This description is written to the SKILL.md front matter and used during skill discovery."
+          <FieldWithHelp
+            label="Description"
+            tooltip="This description is written to the SKILL.md front matter and used during skill discovery."
+          >
+            <TextField
+              label="Description"
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              multiline
+              minRows={2}
+              required
+              fullWidth
+            />
+          </FieldWithHelp>
+          <StringListEditor
+            label="Triggers"
+            values={triggers}
+            onChange={setTriggers}
+            tooltip="Trigger phrases help the agent recognize when this skill applies. Press Enter after each phrase."
+          />
+          <StringListEditor
+            label="Aliases"
+            values={aliases}
+            onChange={setAliases}
+            tooltip="Aliases preserve alternate or previous names for this skill. Press Enter after each alias."
+          />
+        </Stack>
+      </EditorSection>
+
+      <EditorSection
+        title="Instructions"
+        description="The SKILL.md body the agent follows once the skill is loaded."
       >
-        <TextField
-          label="Description"
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-          multiline
-          minRows={2}
-          required
-          fullWidth
-        />
-      </FieldWithHelp>
-      <Box>
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>
-          Instructions
-        </Typography>
         <MarkdownEditor
           value={body}
           onChange={handleBodyChange}
@@ -657,219 +569,176 @@ export default function PluginSkillEditor({
             .filter((parameter) => parameter.name.trim())
             .map((parameter) => ({ name: parameter.name.trim() }))}
         />
-      </Box>
+      </EditorSection>
 
-      <FieldWithHelp
-        label="Allowed tools"
-        tooltip="These dependencies are written to the standard allowed-tools front matter field. They disclose tools but do not grant permissions."
-      >
-        <Box
-          sx={{
-            alignItems: 'center',
-            border: 1,
-            borderColor: 'divider',
-            borderRadius: 1,
-            display: 'flex',
-            gap: 1,
-            justifyContent: 'space-between',
-            minHeight: 56,
-            px: 1.5,
-            py: 1,
-          }}
-        >
-          <Box
-            sx={{
-              display: 'flex',
-              flex: 1,
-              flexWrap: 'wrap',
-              gap: 0.5,
-              minWidth: 0,
-            }}
-          >
-            {allowedTools.length ? (
-              allowedTools.map((name) => (
-                <Chip
-                  key={name}
-                  label={name}
-                  size="small"
-                  variant="outlined"
-                  sx={{ maxWidth: '100%' }}
-                />
-              ))
-            ) : (
-              <Typography variant="body2" color="text.secondary">
-                No tools selected
-              </Typography>
-            )}
-          </Box>
+      <EditorSection
+        title="Allowed tools"
+        description="Dependencies written to the allowed-tools front matter field. They disclose tools to the agent; they do not grant permissions."
+        action={
           <Button
             variant="outlined"
             size="small"
             startIcon={<BuildIcon fontSize="small" />}
             onClick={() => setAllowedToolsOpen(true)}
-            sx={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+            sx={{ whiteSpace: 'nowrap' }}
           >
             Choose tools
           </Button>
-        </Box>
+        }
+      >
+        {allowedTools.length ? (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+            {allowedTools.map((name) => (
+              <Chip
+                key={name}
+                label={name}
+                size="small"
+                variant="outlined"
+                onDelete={() =>
+                  setAllowedTools((current) =>
+                    current.filter((item) => item !== name),
+                  )
+                }
+                deleteIcon={<CancelIcon titleAccess={`Remove ${name}`} />}
+                sx={{ fontFamily: fontFamilyMono, maxWidth: '100%' }}
+              />
+            ))}
+          </Box>
+        ) : (
+          <EmptyLine>No tools selected</EmptyLine>
+        )}
         {externalServers.length > 0 && (
-          <Alert severity="info" sx={{ mt: 1 }}>
+          <Alert severity="info" sx={{ mt: 1.5 }}>
             {externalServers.length === 1
               ? `${externalServers[0]} is an external MCP server. This package needs an mcp.json entry naming it, or the skill stays unavailable.`
               : `${externalServers.join(', ')} are external MCP servers. This package needs an mcp.json entry naming each of them, or the skill stays unavailable.`}
           </Alert>
         )}
-      </FieldWithHelp>
-      <StringListEditor
-        label="Triggers"
-        values={triggers}
-        onChange={setTriggers}
-        tooltip="Trigger phrases help the agent recognize when this skill applies. Press Enter after each phrase."
-      />
-      <StringListEditor
-        label="Aliases"
-        values={aliases}
-        onChange={setAliases}
-        tooltip="Aliases preserve alternate or previous names for this skill. Press Enter after each alias."
-      />
+      </EditorSection>
 
-      <Divider />
-      <Box>
-        <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
-          <Typography variant="subtitle2">Inputs</Typography>
-          <Tooltip
-            title="Values a caller passes for one invocation. They are rendered into an Inputs block after the instructions, so the instructions themselves stay the same for every run — refer to an input by name rather than substituting it."
-            placement="top"
-            arrow
-            describeChild
-          >
-            <IconButton aria-label="Help for inputs" size="small">
-              <HelpOutlineIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <IconButton
+      <EditorSection
+        title="Inputs"
+        description="Values a caller passes for one invocation. They are rendered into an Inputs block after the instructions, so refer to an input by name rather than substituting it."
+        action={
+          <Button
+            variant="outlined"
             size="small"
-            aria-label="Add input"
+            startIcon={<AddCircleOutlineIcon />}
             onClick={() => setParameters((items) => [...items, newParameter()])}
           >
-            <AddCircleOutlineIcon fontSize="small" />
-          </IconButton>
-        </Stack>
-        {parameters.length === 0 && (
-          <Typography variant="body2" color="text.secondary">
-            No inputs.
-          </Typography>
-        )}
-        {parameters.map((parameter, index) => (
-          <Box
-            key={parameter.key}
-            sx={{
-              border: 1,
-              borderColor: 'divider',
-              borderRadius: 1,
-              p: 1.5,
-              mb: 1.5,
-            }}
-          >
+            Add input
+          </Button>
+        }
+      >
+        {parameters.length === 0 && <EmptyLine>No inputs.</EmptyLine>}
+        <Stack spacing={1.5}>
+          {parameters.map((parameter, index) => (
             <Box
+              key={parameter.key}
               sx={{
-                display: 'grid',
-                gridTemplateColumns: {
-                  xs: '1fr',
-                  lg: 'minmax(180px, 2fr) minmax(110px, 1fr) minmax(140px, 1fr) auto auto',
-                },
-                gap: 1.5,
-                alignItems: 'start',
+                border: 1,
+                borderColor: 'divider',
+                borderRadius: 1,
+                p: { xs: 1.5, md: 2 },
               }}
             >
-              <TextField
-                label="Name"
-                value={parameter.name}
-                onChange={(event) =>
-                  updateParameter(index, 'name', event.target.value)
-                }
-                size="small"
-                required
-              />
-              <FormControl size="small">
-                <InputLabel>Type</InputLabel>
-                <Select
-                  label="Type"
-                  value={parameter.type}
-                  onChange={(event) =>
-                    updateParameter(
-                      index,
-                      'type',
-                      event.target.value as ToolParamDef['type'],
-                    )
-                  }
-                >
-                  <MenuItem value="string">string</MenuItem>
-                  <MenuItem value="integer">integer</MenuItem>
-                  <MenuItem value="float">float</MenuItem>
-                  <MenuItem value="boolean">boolean</MenuItem>
-                </Select>
-              </FormControl>
-              <TextField
-                label="Default"
-                value={parameter.defaultText}
-                onChange={(event) =>
-                  updateParameter(index, 'defaultText', event.target.value)
-                }
-                size="small"
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={parameter.required}
-                    onChange={(event) =>
-                      updateParameter(index, 'required', event.target.checked)
-                    }
-                    size="small"
-                  />
-                }
-                label="Required"
-              />
-              <IconButton
-                size="small"
-                aria-label="Remove input"
-                onClick={() =>
-                  setParameters((items) =>
-                    items.filter((_, itemIndex) => itemIndex !== index),
-                  )
-                }
+              <Box
+                sx={{
+                  display: 'grid',
+                  gridTemplateColumns: {
+                    xs: '1fr 1fr',
+                    lg: 'minmax(180px, 2fr) minmax(110px, 1fr) minmax(140px, 1fr) auto auto',
+                  },
+                  gap: 1.5,
+                  alignItems: 'center',
+                }}
               >
-                <RemoveCircleOutlineIcon fontSize="small" />
-              </IconButton>
+                <TextField
+                  label="Name"
+                  value={parameter.name}
+                  onChange={(event) =>
+                    updateParameter(index, 'name', event.target.value)
+                  }
+                  size="small"
+                  required
+                  sx={{ gridColumn: { xs: '1 / -1', lg: 'auto' } }}
+                  slotProps={{
+                    htmlInput: { style: { fontFamily: fontFamilyMono } },
+                  }}
+                />
+                <FormControl size="small">
+                  <InputLabel>Type</InputLabel>
+                  <Select
+                    label="Type"
+                    value={parameter.type}
+                    onChange={(event) =>
+                      updateParameter(
+                        index,
+                        'type',
+                        event.target.value as ToolParamDef['type'],
+                      )
+                    }
+                  >
+                    <MenuItem value="string">string</MenuItem>
+                    <MenuItem value="integer">integer</MenuItem>
+                    <MenuItem value="float">float</MenuItem>
+                    <MenuItem value="boolean">boolean</MenuItem>
+                  </Select>
+                </FormControl>
+                <TextField
+                  label="Default"
+                  value={parameter.defaultText}
+                  onChange={(event) =>
+                    updateParameter(index, 'defaultText', event.target.value)
+                  }
+                  size="small"
+                />
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={parameter.required}
+                      onChange={(event) =>
+                        updateParameter(index, 'required', event.target.checked)
+                      }
+                      size="small"
+                    />
+                  }
+                  label="Required"
+                />
+                <Box sx={{ justifySelf: 'end' }}>
+                  <Tooltip title="Remove input">
+                    <IconButton
+                      aria-label="Remove input"
+                      onClick={() =>
+                        setParameters((items) =>
+                          items.filter((_, itemIndex) => itemIndex !== index),
+                        )
+                      }
+                    >
+                      <RemoveCircleOutlineIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+              </Box>
+              <TextField
+                label="Description"
+                value={parameter.description}
+                onChange={(event) =>
+                  updateParameter(index, 'description', event.target.value)
+                }
+                size="small"
+                fullWidth
+                sx={{ mt: 1.5 }}
+              />
             </Box>
-            <TextField
-              label="Description"
-              value={parameter.description}
-              onChange={(event) =>
-                updateParameter(index, 'description', event.target.value)
-              }
-              size="small"
-              fullWidth
-              sx={{ mt: 1.5 }}
-            />
-          </Box>
-        ))}
-      </Box>
+          ))}
+        </Stack>
+      </EditorSection>
 
-      <Divider />
-      <Box>
-        <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-          <Typography variant="subtitle2">Supporting files</Typography>
-          <Tooltip
-            title="Add a reference, executable script, or asset beneath this skill's package directory."
-            placement="top"
-            arrow
-            describeChild
-          >
-            <IconButton aria-label="Help for supporting files" size="small">
-              <HelpOutlineIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
+      <EditorSection
+        title="Supporting files"
+        description="References, executable scripts and assets beneath this skill's package directory."
+        action={
           <Button
             variant="outlined"
             size="small"
@@ -878,52 +747,85 @@ export default function PluginSkillEditor({
           >
             Add file
           </Button>
-        </Stack>
-        <Stack spacing={0.5} sx={{ mt: 1.5 }}>
-          {supportingFiles.length === 0 && (
-            <Typography variant="body2" color="text.secondary">
-              No supporting files.
-            </Typography>
-          )}
-          {supportingFiles.map((file) => (
-            <Stack
-              key={file.path}
-              direction="row"
-              spacing={1}
-              sx={{ alignItems: 'center', py: 0.5 }}
-            >
-              <Typography
-                variant="body2"
-                sx={{ fontFamily: fontFamilyMono, flex: 1 }}
+        }
+      >
+        {supportingFiles.length === 0 ? (
+          <EmptyLine>No supporting files.</EmptyLine>
+        ) : (
+          <Box
+            component="ul"
+            sx={{
+              border: 1,
+              borderColor: 'divider',
+              borderRadius: 1,
+              listStyle: 'none',
+              m: 0,
+              p: 0,
+            }}
+          >
+            {supportingFiles.map((file, index) => (
+              <Box
+                component="li"
+                key={file.path}
+                sx={{
+                  alignItems: 'center',
+                  borderTop: index ? 1 : 0,
+                  borderColor: 'divider',
+                  display: 'flex',
+                  gap: 1.5,
+                  minHeight: 48,
+                  pl: 2,
+                  pr: 0.5,
+                }}
               >
-                {file.path.split('/').slice(-2).join('/')}
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                {file.size} bytes
-              </Typography>
-              <IconButton
-                size="small"
-                color="error"
-                aria-label={`Delete ${file.path}`}
-                onClick={() => void onDeleteFile(file)}
-              >
-                <DeleteIcon fontSize="small" />
-              </IconButton>
-            </Stack>
-          ))}
-        </Stack>
-      </Box>
+                <Typography
+                  variant="body2"
+                  sx={{
+                    flex: 1,
+                    fontFamily: fontFamilyMono,
+                    minWidth: 0,
+                    overflowWrap: 'anywhere',
+                    py: 1,
+                  }}
+                >
+                  {file.path.split('/').slice(-2).join('/')}
+                </Typography>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {formatBytes(file.size)}
+                </Typography>
+                <Tooltip title="Remove file">
+                  <IconButton
+                    color="error"
+                    aria-label={`Delete ${file.path}`}
+                    onClick={() => void onDeleteFile(file)}
+                  >
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Box>
+            ))}
+          </Box>
+        )}
+      </EditorSection>
 
-      <Divider />
-      <Stack direction="row" sx={{ justifyContent: 'flex-start' }}>
-        <Button
-          color="error"
-          startIcon={<DeleteIcon />}
-          onClick={() => void onDeleteSkill()}
-        >
-          Remove skill
-        </Button>
-      </Stack>
+      <EditorSection
+        title="Remove skill"
+        description="Removes this skill and every file in its directory. Nothing changes until you publish."
+        action={
+          <Button
+            color="error"
+            variant="outlined"
+            startIcon={<DeleteIcon />}
+            onClick={() => void onDeleteSkill()}
+          >
+            Remove skill
+          </Button>
+        }
+      />
 
       <SupportingFileDialog
         key={newFileOpen ? 'open' : 'closed'}
