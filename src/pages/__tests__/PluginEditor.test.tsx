@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import {
   cleanup,
   fireEvent,
@@ -132,8 +133,8 @@ describe('PluginEditor', () => {
       'security-review',
     );
     expect(
-      screen.getByRole('textbox', { name: /seizu namespace/i }),
-    ).toHaveValue('security_review');
+      screen.getByRole('group', { name: 'Seizu namespace' }),
+    ).toHaveTextContent('security_review');
     expect(screen.queryByText('Plugin-relative path')).not.toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: 'Back to Agent Plugins' }),
@@ -142,8 +143,8 @@ describe('PluginEditor', () => {
     fireEvent.click(screen.getByText('Review repository'));
 
     expect(
-      await screen.findByRole('textbox', { name: /skill id/i }),
-    ).toHaveValue('review_repository');
+      await screen.findByRole('group', { name: 'Skill ID' }),
+    ).toHaveTextContent('review_repository');
     expect(screen.getByRole('textbox', { name: /description/i })).toHaveValue(
       'Review a repository',
     );
@@ -158,12 +159,33 @@ describe('PluginEditor', () => {
     const allowedToolsDialog = screen.getByRole('dialog', {
       name: 'Allowed tools',
     });
-    expect(within(allowedToolsDialog).getByText('Graph')).toBeInTheDocument();
+    expect(
+      within(allowedToolsDialog).getByRole('heading', { name: 'Graph' }),
+    ).toBeInTheDocument();
     expect(
       within(allowedToolsDialog).getByRole('checkbox', {
         name: /Query mcp__seizu__graph__query/,
       }),
     ).toBeChecked();
+    const toolFilter = within(allowedToolsDialog).getByRole('textbox', {
+      name: 'Filter tools',
+    });
+    fireEvent.change(toolFilter, { target: { value: 'no such tool' } });
+    expect(
+      within(allowedToolsDialog).queryByRole('checkbox', {
+        name: /Query mcp__seizu__graph__query/,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(allowedToolsDialog).getByText('No tools match “no such tool”.'),
+    ).toBeInTheDocument();
+    fireEvent.change(toolFilter, { target: { value: 'graph QUERY' } });
+    expect(
+      within(allowedToolsDialog).getByRole('checkbox', {
+        name: /Query mcp__seizu__graph__query/,
+      }),
+    ).toBeChecked();
+    fireEvent.change(toolFilter, { target: { value: '' } });
     expect(
       within(allowedToolsDialog).getByRole('button', { name: 'Save' }),
     ).toBeInTheDocument();
@@ -261,7 +283,7 @@ describe('PluginEditor', () => {
     await screen.findByRole('heading', { name: 'Plugin details' });
 
     fireEvent.click(screen.getByText('Review repository'));
-    await screen.findByRole('textbox', { name: /skill id/i });
+    await screen.findByRole('group', { name: 'Skill ID' });
     fireEvent.change(screen.getByRole('textbox', { name: /description/i }), {
       target: { value: 'Review a repository closely' },
     });
@@ -289,18 +311,66 @@ describe('PluginEditor', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Back to Agent Plugins' }),
     );
+    const discard = screen.getByRole('dialog', {
+      name: 'Discard unpublished changes?',
+    });
+    fireEvent.click(
+      within(discard).getByRole('button', { name: 'Keep editing' }),
+    );
+    // The page stays aria-hidden until the dialog's exit transition ends.
     expect(
-      screen.getByRole('dialog', { name: 'Discard unpublished changes?' }),
-    ).toBeInTheDocument();
+      await screen.findByRole('textbox', { name: /package name/i }),
+    ).toHaveValue('security-review-2');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(
+      within(
+        screen.getByRole('dialog', { name: 'Discard unpublished changes?' }),
+      ).getByRole('button', { name: 'Discard' }),
+    );
+    expect(screen.getByText('Plugins list')).toBeInTheDocument();
   });
 
   it('leaves without a prompt when nothing was edited', async () => {
     render(<PluginEditor />, { wrapper: Wrapper });
     await screen.findByRole('heading', { name: 'Plugin details' });
 
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Back to Agent Plugins' }),
-    );
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.getByText('Plugins list')).toBeInTheDocument();
+  });
+
+  it('does not count opening a skill as an edit', async () => {
+    // StrictMode re-runs effects, and the fixture's legacy allowed-tools
+    // spelling is normalized on open: neither is a change.
+    render(
+      <StrictMode>
+        <PluginEditor />
+      </StrictMode>,
+      { wrapper: Wrapper },
+    );
+    await screen.findByRole('heading', { name: 'Plugin details' });
+    fireEvent.click(screen.getByText('Review repository'));
+    expect(
+      await screen.findByRole('group', { name: 'Skill ID' }),
+    ).toHaveTextContent('review_repository');
+
+    expect(
+      screen.getByText('No unpublished changes · revision 4 is current'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Edited')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole('textbox', { name: /description/i }), {
+      target: { value: 'Review a repository carefully' },
+    });
+    expect(screen.getByText('1 unpublished change')).toBeInTheDocument();
+    expect(screen.getByText(/publishes as revision 5$/)).toBeInTheDocument();
+    expect(screen.getByText('Edited')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: /description/i }), {
+      target: { value: 'Review a repository' },
+    });
+    expect(screen.getByText(/No unpublished changes/)).toBeInTheDocument();
+    expect(screen.queryByText('Edited')).not.toBeInTheDocument();
   });
 });
