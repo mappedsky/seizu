@@ -28,6 +28,7 @@ const ScheduledChatHistory = lazy(
 const Toolsets = lazy(() => import('src/pages/Toolsets'));
 const ToolsetTools = lazy(() => import('src/pages/ToolsetTools'));
 const ToolsetHistory = lazy(() => import('src/pages/ToolsetHistory'));
+const ToolEditor = lazy(() => import('src/pages/ToolEditor'));
 const ToolHistory = lazy(() => import('src/pages/ToolHistory'));
 const Skillsets = lazy(() => import('src/pages/Skillsets'));
 const SkillsetSkills = lazy(() => import('src/pages/SkillsetSkills'));
@@ -102,6 +103,11 @@ const routes = [
       },
       { path: 'toolsets', element: <Toolsets /> },
       { path: 'toolsets/:toolsetId/tools', element: <ToolsetTools /> },
+      { path: 'toolsets/:toolsetId/tools/new', element: <ToolEditor /> },
+      {
+        path: 'toolsets/:toolsetId/tools/:toolId/edit',
+        element: <ToolEditor />,
+      },
       { path: 'toolsets/:toolsetId/history', element: <ToolsetHistory /> },
       {
         path: 'toolsets/:toolsetId/tools/:toolId/history',
