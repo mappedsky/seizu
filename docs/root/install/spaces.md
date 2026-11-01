@@ -23,11 +23,12 @@ A space can nominate one of its reports as its **overview** — the report shown
 space. It is a pointer, nothing more: the nominated report stays an ordinary report that can be
 edited, cloned, published, moved, or deleted like any other, with no special rules attached to it.
 
-Set it from the star action next to any report in the space sidebar, or clear it from the same menu.
-Requires `spaces:write`.
+Set it with **Set as space overview** on any report's menu, in the space sidebar or on the contents
+page, and clear it from the same menu. The overview is marked with an amber star. Requires
+`spaces:write`.
 
-Having no overview is a normal state, and it is what a new space starts in. The detail page then shows
-the space name and prompts you to pick one.
+Having no overview is a normal state, and it is what a new space starts in. Opening the space then
+shows its contents page (see below) instead.
 
 The pointer is resolved **lazily**, which is what keeps the nominated report ordinary. If it is moved
 out of the space or deleted, the space simply reads as having no overview — nothing needs to be cleaned
@@ -75,20 +76,34 @@ check can never read a space as empty when it is not.
 Sub-spaces exist only as grouping labels inside the space detail page's sidebar. They have no detail
 page, no description, and no content of their own.
 
-- **Create** one with **New sub-space** in the space sidebar's footer.
-- **Rename** or **delete** one from the menu on its heading.
-- Deleting a sub-space keeps its reports in the space; they move to the ungrouped list at the top.
+- **Create** one with **New sub-space** in the space sidebar's footer or on the contents page.
+- **Rename** or **delete** one from the menu on its heading. The same menu offers **Add reports
+  here…** and **New report here…**, which file straight into that sub-space.
+- Deleting a sub-space keeps its reports in the space; they move to the top level.
 - Deleting the space removes its sub-spaces along with it.
 
 An empty sub-space still shows its heading so it stays manageable.
 
 ## Filing reports into a space
 
-From the **Reports** list, use **Move to space…** on any report. From inside a report, the same action
-is in the overflow menu next to **Edit Report**. From inside a space, **New report** in the sidebar's
-footer creates a report already filed in that space — published, since space members are public.
+From inside a space, **Add reports** (in the sidebar's footer and on the contents page) opens a
+picker listing every report you can see that is not already in the space, grouped as *Not in a
+space*, *In another space* and *Drafts*. Search it, select several, choose a sub-space under **File
+into**, and add them in one step:
 
-**Move to space…** is disabled on a draft, with a tooltip saying to publish it first, and the Reports
+- A report in another space **moves** here; the picker says which space it leaves.
+- A **draft is published** as it is added, since space members are public; the picker warns before
+  you commit. Only a draft's owner can publish it, so other people's drafts are listed but cannot be
+  selected.
+- If some reports fail, they stay selected with the reason shown, so a retry is one click.
+
+**New report** creates a report already filed in the space (and, optionally, a sub-space) —
+published, for the same reason.
+
+From the **Reports** list, **Move to space…** on any report files it from the other direction. From
+inside a report, the same action is in the overflow menu next to **Edit Report**.
+
+On the Reports list, **Move to space…** is disabled on a draft, with a tooltip saying to publish it first, and the Reports
 list's bulk **Move to space** is disabled while the selection contains any draft. **Unpublish** is
 disabled on a report that is in a space.
 
@@ -99,17 +114,46 @@ whenever the space changes — matching the API rule that a sub-space must belon
 action. The API uses replace semantics: the request describes the report's desired final state rather
 than a partial update.
 
-Within a space, the sidebar's per-report menu offers **Set as space overview**, **Move to
-sub-space…** and **Remove from space**.
+### Moving reports between sub-spaces
+
+Within a space there are three ways to regroup reports, all needing `reports:write`:
+
+- **Drag** a report onto a sub-space. On the contents page, drag by the grip at the left of the
+  row; in the sidebar, drag the row itself. Every sub-space that would accept the report is outlined
+  while you drag, and the top level appears as a target even when it is empty. Dragging a selected
+  row on the contents page moves the whole selection. From the keyboard, focus a row's grip, press
+  Space or Enter, use the arrow keys to step between sub-spaces, and press Space or Enter to drop
+  (Escape cancels).
+- **Select** reports on the contents page — row checkboxes, or the checkbox on a sub-space heading
+  for all of its reports — and use **Move to…** or **Remove from space** in the bar that appears.
+- **Each report's menu** names every other sub-space directly (**Move to Network**, **Move to top
+  level**). A space with more than six sub-spaces offers **Move to sub-space…**, which opens a list,
+  instead.
+
+A moved report shows in its new place immediately. The moves are then saved one at a time and the
+space reloads once at the end; a report that could not be moved returns to where it was, with the
+reason shown. Each report's menu also offers **Set as space overview** and **Remove from space**.
 
 Cloning a report inside a space produces a clone in the same space and sub-space.
 
 ## The space detail page
 
-`/app/spaces/<space_id>` renders the space's overview report, if one is set. The sidebar is headed by
-the space name and lists every report in it — ungrouped first, then one group per sub-space — with the
-overview report marked by a star. Its footer holds **New sub-space**, **New report**, and **Go to all
-reports**.
+`/app/spaces/<space_id>` renders the space's overview report, if one is set, and its contents page
+otherwise. `/app/spaces/<space_id>/contents` always shows the contents page; the sidebar's header,
+the space name, links to it.
+
+The **contents page** carries the space's name and description (editable with **Edit**), its report
+and sub-space counts, and every member report grouped by sub-space with its last update. Empty
+sub-spaces show inline **Add reports** and **New report** actions, and an empty space explains what to
+do first.
+
+The sidebar lists every report in the space — top level first, then one group per sub-space — with
+the overview report marked by a star. Its footer holds **Add reports**, **New report** and **New
+sub-space**, each shown only to users who hold the permission it needs.
+
+The **Spaces** index lists each space with its description, report count and its most recently
+updated reports, each linking straight into the space. Delete is disabled while a space still holds
+reports.
 
 Selecting a report navigates to `/app/spaces/<space_id>/reports/<report_id>`, so in-space reports are
 deep-linkable and browser back works. Opening a report that is not in the space shows an explicit

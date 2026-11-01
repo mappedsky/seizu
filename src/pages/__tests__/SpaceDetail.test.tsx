@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react';
 import { useEffect } from 'react';
 import userEvent from '@testing-library/user-event';
@@ -13,6 +14,7 @@ import SpaceDetail from 'src/pages/SpaceDetail';
 import * as spacesApiModule from 'src/hooks/useSpacesApi';
 import * as reportsApiModule from 'src/hooks/useReportsApi';
 import * as permissionsModule from 'src/hooks/usePermissions';
+import * as currentUserModule from 'src/hooks/useCurrentUser';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissions: jest.fn(),
@@ -99,6 +101,24 @@ const TREE = {
   ],
 };
 
+// Reports outside sp1, as the add-reports drawer sees them.
+const CANDIDATES = [
+  ...TREE.reports,
+  { ...report('u1', 'Unfiled Report'), space_id: null },
+  { ...report('e1', 'Elsewhere Report'), space_id: 'sp2' },
+  {
+    ...report('d1', 'My Draft'),
+    space_id: null,
+    access: { scope: 'private' as const },
+  },
+  {
+    ...report('d2', 'Their Draft'),
+    space_id: null,
+    created_by: 'bob',
+    access: { scope: 'private' as const },
+  },
+];
+
 function LocationTracker() {
   const location = useLocation();
   return <div data-testid="location">{location.pathname}</div>;
@@ -114,6 +134,18 @@ function renderAt(path: string) {
             element={
               <>
                 <SpaceDetail ReportPaneComponent={MountTrackingReportPane} />
+                <LocationTracker />
+              </>
+            }
+          />
+          <Route
+            path="/app/spaces/:spaceId/contents"
+            element={
+              <>
+                <SpaceDetail
+                  view="contents"
+                  ReportPaneComponent={MountTrackingReportPane}
+                />
                 <LocationTracker />
               </>
             }
@@ -140,6 +172,9 @@ describe('SpaceDetail', () => {
   let mockUseSubspaceMutations: jest.Mock;
   let mockUseSpaceMutations: jest.Mock;
   let setSpaceOverview: jest.Mock;
+  let mockUseReportsList: jest.Mock;
+  let mockUseSpacesList: jest.Mock;
+  let mockUseCurrentUser: jest.Mock;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -162,6 +197,39 @@ describe('SpaceDetail', () => {
       spacesApiModule,
       'useSpaceMutations',
     ) as unknown as jest.Mock;
+    // The add-reports drawer reads these; stub them so no suite inherits a
+    // real fetch or another file's leftover spy.
+    mockUseReportsList = jest.spyOn(
+      reportsApiModule,
+      'useReportsList',
+    ) as unknown as jest.Mock;
+    mockUseSpacesList = jest.spyOn(
+      spacesApiModule,
+      'useSpacesList',
+    ) as unknown as jest.Mock;
+    mockUseCurrentUser = jest.spyOn(
+      currentUserModule,
+      'useCurrentUser',
+    ) as unknown as jest.Mock;
+    mockUseReportsList.mockReturnValue({
+      reports: CANDIDATES,
+      total: CANDIDATES.length,
+      page: 1,
+      perPage: 500,
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+    });
+    mockUseSpacesList.mockReturnValue({
+      spaces: [
+        TREE.space,
+        { ...TREE.space, space_id: 'sp2', name: 'Identity' },
+      ],
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+    });
+    mockUseCurrentUser.mockReturnValue({ user_id: 'alice' });
     mockUsePermissions.mockReturnValue(() => true);
     mockUseSpaceTree.mockReturnValue({
       tree: TREE,
@@ -193,6 +261,9 @@ describe('SpaceDetail', () => {
     mockUseSpaceTree.mockRestore?.();
     mockUseSubspaceMutations.mockRestore?.();
     mockUseSpaceMutations.mockRestore?.();
+    mockUseReportsList.mockRestore?.();
+    mockUseSpacesList.mockRestore?.();
+    mockUseCurrentUser.mockRestore?.();
   });
 
   it('renders the pinned overview report by default', () => {
@@ -296,7 +367,7 @@ describe('SpaceDetail', () => {
       screen.getByRole('button', { name: 'New sub-space' }),
     );
     expect(scroll).not.toContainElement(
-      screen.getByRole('button', { name: 'Go to all reports' }),
+      screen.getByRole('button', { name: 'Add reports' }),
     );
   });
 
@@ -426,11 +497,13 @@ describe('SpaceDetail', () => {
 
     renderAt('/app/spaces/sp1');
 
-    // No report is rendered; the page names the action instead of guessing.
+    // No report is rendered: the space's own page shows, and names the
+    // action instead of guessing an overview.
     expect(screen.queryByTestId('report-pane')).toBeNull();
     expect(
-      screen.getByText(/Set a report as this space's overview/),
+      screen.getByRole('heading', { level: 1, name: 'Cloud Security' }),
     ).toBeInTheDocument();
+    expect(screen.getByText(/No overview yet/)).toBeInTheDocument();
   });
 
   it('creates a report filed in the space', async () => {
@@ -453,7 +526,7 @@ describe('SpaceDetail', () => {
 
     // Created and filed in one call — no leave-and-come-back.
     await waitFor(() => {
-      expect(createReport).toHaveBeenCalledWith('Fresh', 'sp1');
+      expect(createReport).toHaveBeenCalledWith('Fresh', 'sp1', null);
     });
   });
 
@@ -464,33 +537,51 @@ describe('SpaceDetail', () => {
   it('offers the footer actions as one group', () => {
     renderAt('/app/spaces/sp1');
 
-    for (const label of ['New sub-space', 'New report', 'Go to all reports']) {
+    for (const label of ['Add reports', 'New report', 'New sub-space']) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument();
     }
   });
 
-  it('keeps Go to all reports available without write permissions', () => {
+  it('drops the footer actions without write permissions', () => {
     mockUsePermissions.mockReturnValue(() => false);
 
     renderAt('/app/spaces/sp1');
 
-    expect(
-      screen.getByRole('button', { name: 'Go to all reports' }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add reports' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'New sub-space' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'New report' })).toBeNull();
   });
 
-  it('navigates to the reports list from the footer', () => {
-    renderAt('/app/spaces/sp1');
+  // -------------------------------------------------------------------------
+  // Contents page
+  // -------------------------------------------------------------------------
 
-    fireEvent.click(screen.getByRole('button', { name: 'Go to all reports' }));
+  it('shows the contents page at /contents even with an overview pinned', () => {
+    renderAt('/app/spaces/sp1/contents');
 
-    expect(screen.getByTestId('location')).toHaveTextContent('/app/reports');
+    expect(screen.queryByTestId('report-pane')).toBeNull();
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Cloud Security' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'Network' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Nothing in Empty Group yet.')).toBeInTheDocument();
   });
 
-  it('does not duplicate the create action in the empty state', () => {
-    // The sidebar footer carries New report; the main region only explains.
+  it('navigates to the contents page from the panel header', () => {
+    renderAt('/app/spaces/sp1/reports/r2');
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Cloud Security contents' }),
+    );
+
+    expect(screen.getByTestId('location')).toHaveTextContent(
+      '/app/spaces/sp1/contents',
+    );
+  });
+
+  it('invites adding reports to an empty space', () => {
     mockUseSpaceTree.mockReturnValue({
       tree: {
         ...TREE,
@@ -505,10 +596,279 @@ describe('SpaceDetail', () => {
 
     renderAt('/app/spaces/sp1');
 
-    expect(screen.getByText(/Create one from the sidebar/)).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'New report' })).toHaveLength(
-      1,
+    expect(
+      screen.getByRole('button', { name: 'Add existing reports' }),
+    ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // Adding existing reports
+  // -------------------------------------------------------------------------
+
+  it('lists only reports outside the space, flagging drafts and moves', async () => {
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    await user.click(screen.getByRole('button', { name: 'Add reports' }));
+
+    const drawer = await screen.findByRole('presentation');
+    expect(within(drawer).queryByText('Loose Report')).toBeNull();
+    expect(within(drawer).getByText('Unfiled Report')).toBeInTheDocument();
+    expect(
+      within(drawer).getByText('In Identity — moves here'),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).getByText('Draft — published when added'),
+    ).toBeInTheDocument();
+    // Another user's draft is shown but cannot be picked.
+    expect(
+      within(drawer).getByRole('button', { name: /Their Draft/ }),
+    ).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('publishes a selected draft before filing it into the chosen sub-space', async () => {
+    const setReportSpace = jest.fn().mockResolvedValue(undefined);
+    const updateReportVisibility = jest.fn().mockResolvedValue(undefined);
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace,
+      updateReportVisibility,
+    });
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    await user.click(screen.getByRole('button', { name: 'Add reports' }));
+    const drawer = await screen.findByRole('presentation');
+    await user.click(within(drawer).getByRole('button', { name: /My Draft/ }));
+    await user.click(
+      within(drawer).getByRole('button', { name: /Unfiled Report/ }),
     );
+    expect(
+      within(drawer).getByText(/1 draft will be published/),
+    ).toBeInTheDocument();
+
+    await user.click(within(drawer).getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'Network' }));
+    await user.click(
+      within(drawer).getByRole('button', { name: 'Add 2 reports' }),
+    );
+
+    await waitFor(() => {
+      expect(setReportSpace).toHaveBeenCalledTimes(2);
+    });
+    expect(updateReportVisibility).toHaveBeenCalledTimes(1);
+    expect(updateReportVisibility).toHaveBeenCalledWith('d1', 'public');
+    // Per-item broadcasts are off; the batch reloads once at the end.
+    expect(setReportSpace).toHaveBeenCalledWith('d1', 'sp1', 'ss1', {
+      notify: false,
+    });
+    expect(setReportSpace).toHaveBeenCalledWith('u1', 'sp1', 'ss1', {
+      notify: false,
+    });
+    // The draft is published before it is filed, never after.
+    const draftFiling = setReportSpace.mock.calls.findIndex(
+      ([id]) => id === 'd1',
+    );
+    expect(updateReportVisibility.mock.invocationCallOrder[0]).toBeLessThan(
+      setReportSpace.mock.invocationCallOrder[draftFiling],
+    );
+  });
+
+  it('reloads the report lists once per batch, after the last report', async () => {
+    const setReportSpace = jest.fn().mockResolvedValue(undefined);
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace,
+      updateReportVisibility: jest.fn().mockResolvedValue(undefined),
+    });
+    const notify = jest.spyOn(reportsApiModule, 'notifyReportsUpdated');
+    try {
+      const user = userEvent.setup({ delay: null });
+      renderAt('/app/spaces/sp1');
+
+      await user.click(screen.getByRole('button', { name: 'Add reports' }));
+      const drawer = await screen.findByRole('presentation');
+      await user.click(
+        within(drawer).getByRole('button', { name: /Unfiled Report/ }),
+      );
+      await user.click(
+        within(drawer).getByRole('button', { name: /Elsewhere Report/ }),
+      );
+      await user.click(
+        within(drawer).getByRole('button', { name: 'Add 2 reports' }),
+      );
+
+      await waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
+      expect(setReportSpace).toHaveBeenCalledTimes(2);
+      expect(notify.mock.invocationCallOrder[0]).toBeGreaterThan(
+        setReportSpace.mock.invocationCallOrder[1],
+      );
+    } finally {
+      notify.mockRestore();
+    }
+  });
+
+  it('keeps failed reports selected and says which failed', async () => {
+    const setReportSpace = jest
+      .fn()
+      .mockRejectedValue(new Error('Report is not public'));
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace,
+      updateReportVisibility: jest.fn(),
+    });
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    await user.click(screen.getByRole('button', { name: 'Add reports' }));
+    const drawer = await screen.findByRole('presentation');
+    await user.click(
+      within(drawer).getByRole('button', { name: /Unfiled Report/ }),
+    );
+    await user.click(
+      within(drawer).getByRole('button', { name: 'Add 1 report' }),
+    );
+
+    expect(
+      await within(drawer).findByText('Unfiled Report: Report is not public'),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).getByRole('button', { name: 'Add 1 report' }),
+    ).toBeEnabled();
+  });
+
+  it('starts the picker on a sub-space opened from its menu', async () => {
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    await user.click(screen.getAllByLabelText('Sub-space actions')[0]);
+    await user.click(
+      screen.getByRole('menuitem', { name: 'Add reports here…' }),
+    );
+
+    const drawer = await screen.findByRole('presentation');
+    expect(within(drawer).getByRole('combobox')).toHaveTextContent('Network');
+  });
+
+  // -------------------------------------------------------------------------
+  // Moving reports between sub-spaces
+  // -------------------------------------------------------------------------
+
+  it('offers each other sub-space as a one-click move target', async () => {
+    const setReportSpace = jest.fn().mockResolvedValue(undefined);
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace,
+    });
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    // r1 is at the top level, so the top level is not offered.
+    await user.click(screen.getAllByLabelText('Report actions')[0]);
+    expect(
+      screen.queryByRole('menuitem', { name: 'Move to top level' }),
+    ).toBeNull();
+    await user.click(screen.getByRole('menuitem', { name: 'Move to Network' }));
+
+    await waitFor(() => {
+      expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', 'ss1', {
+        notify: false,
+      });
+    });
+  });
+
+  it('shows a moved report in its new sub-space before the reload', async () => {
+    let finish: () => void = () => {};
+    const setReportSpace = jest.fn(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace,
+    });
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    await user.click(screen.getAllByLabelText('Report actions')[0]);
+    await user.click(
+      screen.getByRole('menuitem', { name: 'Move to Empty Group' }),
+    );
+
+    // Still in flight, yet already drawn under Empty Group in the sidebar.
+    const scroll = screen.getByTestId('space-reports-scroll');
+    const lists = within(scroll).getAllByRole('list');
+    const emptyGroup = lists.find((list) =>
+      within(list).queryByText('Empty Group'),
+    );
+    expect(
+      within(emptyGroup!).getByRole('button', { name: 'Loose Report' }),
+    ).toBeInTheDocument();
+    finish();
+  });
+
+  it('moves a selection in one batch from the contents page', async () => {
+    const setReportSpace = jest.fn().mockResolvedValue(undefined);
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace,
+    });
+    const notify = jest.spyOn(reportsApiModule, 'notifyReportsUpdated');
+    try {
+      const user = userEvent.setup({ delay: null });
+      renderAt('/app/spaces/sp1/contents');
+
+      await user.click(
+        screen.getByRole('checkbox', { name: 'Select Loose Report' }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: 'Select Grouped Report' }),
+      );
+      const bar = screen.getByRole('region', { name: 'Selected reports' });
+      expect(bar).toHaveTextContent('2 reports selected');
+
+      await user.click(within(bar).getByRole('button', { name: 'Move to…' }));
+      await user.click(screen.getByRole('menuitem', { name: 'Empty Group' }));
+
+      await waitFor(() => expect(notify).toHaveBeenCalledTimes(1));
+      expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', 'ss2', {
+        notify: false,
+      });
+      expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp1', 'ss2', {
+        notify: false,
+      });
+      expect(
+        screen.queryByRole('region', { name: 'Selected reports' }),
+      ).toBeNull();
+    } finally {
+      notify.mockRestore();
+    }
+  });
+
+  it('selects a whole sub-space from its heading', async () => {
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1/contents');
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select every report in Network' }),
+    );
+
+    expect(
+      screen.getByRole('checkbox', { name: 'Select Grouped Report' }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole('region', { name: 'Selected reports' }),
+    ).toHaveTextContent('1 report selected');
+  });
+
+  it('offers no selection or drag handles without reports:write', () => {
+    mockUsePermissions.mockReturnValue(
+      (permission: string) => permission !== 'reports:write',
+    );
+
+    renderAt('/app/spaces/sp1/contents');
+
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Move / })).toBeNull();
   });
 
   it('marks the overview report with a star rather than a highlight', () => {
