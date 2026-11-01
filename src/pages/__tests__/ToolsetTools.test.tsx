@@ -1,31 +1,17 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import ToolsetTools from 'src/pages/ToolsetTools';
 import * as toolsetsApiModule from 'src/hooks/useToolsetsApi';
 import * as permissionsModule from 'src/hooks/usePermissions';
 
-jest.mock('src/hooks/usePermissions', () => ({
-  usePermissions: jest.fn(),
-}));
-
-jest.mock('src/hooks/useToolsetsApi', () => ({
-  useToolsList: jest.fn(),
-  useToolMutations: jest.fn(),
-}));
-
 jest.mock('src/components/UserDisplay', () => ({
   __esModule: true,
   default: ({ userId }: { userId: string }) => <>{userId}</>,
 }));
 
-const mockUsePermissions =
-  permissionsModule.usePermissions as jest.MockedFunction<
-    typeof permissionsModule.usePermissions
-  >;
-const mockUseToolsList = toolsetsApiModule.useToolsList as unknown as jest.Mock;
-const mockUseToolMutations =
-  toolsetsApiModule.useToolMutations as unknown as jest.Mock;
+let mockUseToolsList: jest.SpyInstance;
+let spies: jest.SpyInstance[] = [];
 const theme = createTheme();
 
 const TOOL: toolsetsApiModule.ToolItem = {
@@ -62,6 +48,14 @@ function Wrapper({ children }: { children: React.ReactNode }) {
             path="/app/toolsets/:toolsetId/tools"
             element={<>{children}</>}
           />
+          <Route
+            path="/app/toolsets/:toolsetId/tools/new"
+            element={<div>new tool editor</div>}
+          />
+          <Route
+            path="/app/toolsets/:toolsetId/tools/:toolId/edit"
+            element={<div>edit tool editor</div>}
+          />
         </Routes>
       </ThemeProvider>
     </MemoryRouter>
@@ -86,23 +80,33 @@ function ExternalWrapper({ children }: { children: React.ReactNode }) {
 describe('ToolsetTools', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockUsePermissions.mockReturnValue((permission: string) =>
-      permission.startsWith('tools:'),
-    );
-    mockUseToolsList.mockReturnValue({
-      tools: [TOOL],
-      loading: false,
-      error: null,
-      refresh: jest.fn(),
-    });
-    mockUseToolMutations.mockReturnValue({
-      createTool: jest.fn(),
-      updateTool: jest.fn(),
-      deleteTool: jest.fn(),
-    });
+    mockUseToolsList = jest
+      .spyOn(toolsetsApiModule, 'useToolsList')
+      .mockReturnValue({
+        tools: [TOOL],
+        loading: false,
+        error: null,
+        refresh: jest.fn(),
+      });
+    spies = [
+      mockUseToolsList,
+      jest
+        .spyOn(permissionsModule, 'usePermissions')
+        .mockReturnValue((permission: string) =>
+          permission.startsWith('tools:'),
+        ),
+      jest.spyOn(toolsetsApiModule, 'useToolMutations').mockReturnValue({
+        createTool: jest.fn(),
+        updateTool: jest.fn(),
+        deleteTool: jest.fn(),
+      }),
+    ];
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    spies.forEach((spy) => spy.mockRestore());
+  });
 
   it('renders tool update metadata and parameter count columns consistently', () => {
     render(<ToolsetTools />, { wrapper: Wrapper });
@@ -113,6 +117,14 @@ describe('ToolsetTools', () => {
     expect(screen.getByText('Recent CVEs')).toBeInTheDocument();
     expect(screen.getByText('v3')).toBeInTheDocument();
     expect(screen.getByText('bob')).toBeInTheDocument();
+  });
+
+  it('opens the editor page to create a tool', () => {
+    render(<ToolsetTools />, { wrapper: Wrapper });
+
+    fireEvent.click(screen.getByRole('button', { name: 'New tool' }));
+
+    expect(screen.getByText('new tool editor')).toBeInTheDocument();
   });
 
   it('renders external MCP tools as read-only', () => {

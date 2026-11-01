@@ -92,7 +92,7 @@ Click a toolset row (or **View Tools** from the **⋮** menu) to view and manage
 
 ### Creating a tool
 
-Click **New tool**. The form includes:
+Click **New tool** to open the tool editor. It has these fields:
 
 | Field | Description |
 |-------|-------------|
@@ -105,9 +105,17 @@ Click **New tool**. The form includes:
 
 Cypher is validated before saving — queries with syntax errors or write operations are rejected.
 
+As you edit, the page shows:
+
+- **How agents see it**: the tool's callable name, its argument signature (types, defaults, and `?` for optional arguments), and its description, exactly as chat, workflows, and MCP clients receive them.
+- **Parameter checks**: every `$parameter` the query uses is listed under it. One that is not declared gets a **Declare** button. A declared parameter that the query never uses is flagged.
+- **Try it**: runs the unsaved draft read-only with test arguments, filling in defaults for anything left blank, as an agent call would. It needs the `query:execute` permission.
+
+Leaving with unsaved edits asks before discarding them.
+
 ### Editing a tool
 
-Open the **⋮** menu on a tool row and select **Edit**. An optional **comment** records the reason for the change.
+Open the **⋮** menu on a tool row and select **Edit**. This opens the same editor. The ID is fixed. An optional **version comment** records the reason for the change.
 
 ### Deleting a tool
 

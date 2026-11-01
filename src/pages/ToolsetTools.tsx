@@ -1,29 +1,7 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import {
-  Alert,
-  Box,
-  Button,
-  Checkbox,
-  Chip,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  Divider,
-  FormControl,
-  FormControlLabel,
-  IconButton,
-  InputLabel,
-  MenuItem,
-  Select,
-  Switch,
-  TextField,
-  Typography,
-} from '@mui/material';
-import ConstellationSpinner from 'src/components/ConstellationSpinner';
+import { Box, Button, Chip, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
-import AddCircleOutlineIcon from '@mui/icons-material/AddCircle';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import BadgeIcon from '@mui/icons-material/Badge';
 import HubIcon from '@mui/icons-material/Hub';
@@ -31,7 +9,6 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import HistoryIcon from '@mui/icons-material/History';
 import VisibilityIcon from '@mui/icons-material/Visibility';
-import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircle';
 import PersonOutlineIcon from '@mui/icons-material/Person';
 import ToggleOnIcon from '@mui/icons-material/ToggleOn';
 import ToggleOffIcon from '@mui/icons-material/ToggleOff';
@@ -40,9 +17,6 @@ import {
   useToolMutations,
   mcpNameForTool,
   ToolItem,
-  ToolParamDef,
-  CreateToolRequest,
-  UpdateToolRequest,
 } from 'src/hooks/useToolsetsApi';
 import ListTable, {
   ListTableColumn,
@@ -64,7 +38,6 @@ import UserDisplay from 'src/components/UserDisplay';
 import { usePermissions } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
-import { fontFamilyMono } from 'src/theme/typography';
 
 // ---------------------------------------------------------------------------
 // Built-in toolset detection
@@ -84,11 +57,6 @@ const isExternalToolset = (id: string | undefined | null): boolean =>
 
 const isReadOnlyToolset = (id: string | undefined | null): boolean =>
   isBuiltinToolset(id) || isExternalToolset(id);
-
-const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
-// Cap each slug component so the full "toolset__tool" MCP name stays <= 64 chars
-// (31 + "__" + 31). Mirrors MAX_SLUG_COMPONENT_LEN in mcp_config.py.
-const MAX_SLUG_LEN = 31;
 
 const descriptionColumnSx = { ...listTableSecondaryCellSx, width: '22%' };
 const paramsColumnSx = { ...listTableSecondaryCellSx, width: 96 };
@@ -119,336 +87,6 @@ function toolViewData(item: ToolItem): ToolViewData {
 }
 
 // ---------------------------------------------------------------------------
-// Param form state
-// ---------------------------------------------------------------------------
-
-type ParamFormState = {
-  name: string;
-  type: ToolParamDef['type'];
-  description: string;
-  required: boolean;
-  default_str: string;
-};
-
-const EMPTY_PARAM: ParamFormState = {
-  name: '',
-  type: 'string',
-  description: '',
-  required: true,
-  default_str: '',
-};
-
-function paramToFormState(p: ToolParamDef): ParamFormState {
-  return {
-    name: p.name,
-    type: p.type,
-    description: p.description ?? '',
-    required: p.required,
-    default_str:
-      p.default !== null && p.default !== undefined ? String(p.default) : '',
-  };
-}
-
-function formStateToParam(p: ParamFormState): ToolParamDef {
-  let defaultVal: unknown = null;
-  if (p.default_str.trim() !== '') {
-    if (p.type === 'integer') {
-      defaultVal = parseInt(p.default_str, 10);
-    } else if (p.type === 'float') {
-      defaultVal = parseFloat(p.default_str);
-    } else if (p.type === 'boolean') {
-      defaultVal = p.default_str.toLowerCase() === 'true';
-    } else {
-      defaultVal = p.default_str;
-    }
-  }
-  return {
-    name: p.name,
-    type: p.type,
-    description: p.description,
-    required: p.required,
-    default: defaultVal,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Create/Edit dialog
-// ---------------------------------------------------------------------------
-
-interface ToolDialogProps {
-  open: boolean;
-  onClose: () => void;
-  onSave: (req: CreateToolRequest | UpdateToolRequest) => Promise<void>;
-  initial: ToolItem | null;
-}
-
-function ToolDialog({ open, onClose, onSave, initial }: ToolDialogProps) {
-  const [toolId, setToolId] = useState(initial?.tool_id ?? '');
-  const [name, setName] = useState(initial?.name ?? '');
-  const [description, setDescription] = useState(initial?.description ?? '');
-  const [cypher, setCypher] = useState(initial?.cypher ?? '');
-  const [enabled, setEnabled] = useState(initial?.enabled ?? true);
-  const [params, setParams] = useState<ParamFormState[]>(
-    (initial?.parameters ?? []).map(paramToFormState),
-  );
-  const [comment, setComment] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const handleClose = () => {
-    setError(null);
-    onClose();
-  };
-
-  const handleSave = async () => {
-    setError(null);
-    if (!name.trim()) {
-      setError('Name is required.');
-      return;
-    }
-    if (!cypher.trim()) {
-      setError('Cypher query is required.');
-      return;
-    }
-    if (!initial && !LOWER_SNAKE_ID.test(toolId.trim())) {
-      setError('ID must be lower_snake_case.');
-      return;
-    }
-    if (!initial && toolId.trim().length > MAX_SLUG_LEN) {
-      setError(`ID must be at most ${MAX_SLUG_LEN} characters.`);
-      return;
-    }
-    for (const p of params) {
-      if (!LOWER_SNAKE_ID.test(p.name.trim())) {
-        setError('All parameter names must be lower_snake_case.');
-        return;
-      }
-    }
-    const req: CreateToolRequest | UpdateToolRequest = {
-      ...(initial ? {} : { tool_id: toolId.trim() }),
-      name: name.trim(),
-      description: description.trim(),
-      cypher: cypher.trim(),
-      parameters: params.map(formStateToParam),
-      enabled,
-      ...(initial ? { comment: comment.trim() || null } : {}),
-    };
-    setSaving(true);
-    try {
-      await onSave(req);
-      handleClose();
-    } catch (err) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setError((err as any)?.message ?? 'Failed to save.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const addParam = () => setParams((ps) => [...ps, { ...EMPTY_PARAM }]);
-  const removeParam = (i: number) =>
-    setParams((ps) => ps.filter((_, idx) => idx !== i));
-  const updateParam = <K extends keyof ParamFormState>(
-    i: number,
-    key: K,
-    val: ParamFormState[K],
-  ) =>
-    setParams((ps) =>
-      ps.map((p, idx) => (idx === i ? { ...p, [key]: val } : p)),
-    );
-
-  return (
-    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
-      <DialogTitle>{initial ? 'Edit Tool' : 'New Tool'}</DialogTitle>
-      <DialogContent dividers>
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {error}
-          </Alert>
-        )}
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {!initial && (
-            <TextField
-              label="ID"
-              value={toolId}
-              onChange={(e) => setToolId(e.target.value)}
-              fullWidth
-              required
-              helperText="lower_snake_case"
-            />
-          )}
-          <TextField
-            label="Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            fullWidth
-            required
-          />
-          <TextField
-            label="Description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            fullWidth
-            multiline
-            minRows={2}
-          />
-          <TextField
-            label="Cypher Query"
-            value={cypher}
-            onChange={(e) => setCypher(e.target.value)}
-            fullWidth
-            required
-            multiline
-            minRows={5}
-            slotProps={{
-              htmlInput: {
-                style: { fontFamily: fontFamilyMono, fontSize: 13 },
-              },
-            }}
-          />
-          <FormControlLabel
-            control={
-              <Switch
-                checked={enabled}
-                onChange={(e) => setEnabled(e.target.checked)}
-              />
-            }
-            label="Enabled"
-          />
-
-          <Divider />
-
-          <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-              <Typography variant="subtitle2">Parameters</Typography>
-              <IconButton
-                aria-label="Add parameter"
-                size="small"
-                onClick={addParam}
-              >
-                <AddCircleOutlineIcon fontSize="small" />
-              </IconButton>
-            </Box>
-            {params.length === 0 && (
-              <Typography variant="body2" color="text.secondary">
-                No parameters. Click + to add one.
-              </Typography>
-            )}
-            {params.map((p, i) => (
-              <Box
-                key={i}
-                sx={{
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  borderRadius: 1,
-                  p: 1.5,
-                  mb: 1.5,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 1,
-                }}
-              >
-                <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
-                  <TextField
-                    label="Name"
-                    value={p.name}
-                    onChange={(e) => updateParam(i, 'name', e.target.value)}
-                    size="small"
-                    sx={{ flex: 2 }}
-                    required
-                  />
-                  <FormControl size="small" sx={{ flex: 1 }}>
-                    <InputLabel>Type</InputLabel>
-                    <Select
-                      label="Type"
-                      value={p.type}
-                      onChange={(e) =>
-                        updateParam(
-                          i,
-                          'type',
-                          e.target.value as ToolParamDef['type'],
-                        )
-                      }
-                    >
-                      <MenuItem value="string">string</MenuItem>
-                      <MenuItem value="integer">integer</MenuItem>
-                      <MenuItem value="float">float</MenuItem>
-                      <MenuItem value="boolean">boolean</MenuItem>
-                    </Select>
-                  </FormControl>
-                  <TextField
-                    label="Default"
-                    value={p.default_str}
-                    onChange={(e) =>
-                      updateParam(i, 'default_str', e.target.value)
-                    }
-                    size="small"
-                    sx={{ flex: 1 }}
-                    placeholder="optional"
-                  />
-                  <FormControlLabel
-                    control={
-                      <Checkbox
-                        checked={p.required}
-                        onChange={(e) =>
-                          updateParam(i, 'required', e.target.checked)
-                        }
-                        size="small"
-                      />
-                    }
-                    label="Required"
-                    sx={{ flexShrink: 0 }}
-                  />
-                  <IconButton
-                    aria-label={`Remove parameter ${p.name || i + 1}`}
-                    size="small"
-                    onClick={() => removeParam(i)}
-                    sx={{ mt: 0.5, flexShrink: 0 }}
-                  >
-                    <RemoveCircleOutlineIcon fontSize="small" />
-                  </IconButton>
-                </Box>
-                <TextField
-                  label="Description"
-                  value={p.description}
-                  onChange={(e) =>
-                    updateParam(i, 'description', e.target.value)
-                  }
-                  size="small"
-                  fullWidth
-                />
-              </Box>
-            ))}
-          </Box>
-
-          {initial && (
-            <>
-              <Divider />
-              <TextField
-                label="Comment (optional)"
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                fullWidth
-                size="small"
-                placeholder="Describe what changed…"
-              />
-            </>
-          )}
-        </Box>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={handleClose} disabled={saving}>
-          Cancel
-        </Button>
-        <Button onClick={handleSave} variant="contained" disabled={saving}>
-          {saving ? <ConstellationSpinner size={20} /> : 'Save'}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
@@ -463,30 +101,14 @@ function ToolsetTools() {
   const { tools, loading, error, refresh } = useToolsList(toolsetId ?? null);
   const mutations = useToolMutations(toolsetId ?? '');
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<ToolItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ToolItem | null>(null);
   const [detailItem, setDetailItem] = useState<ToolViewData | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const openCreate = () => {
-    setEditTarget(null);
-    setDialogOpen(true);
-  };
+  const openCreate = () => navigate(`/app/toolsets/${toolsetId}/tools/new`);
 
-  const openEdit = (item: ToolItem) => {
-    setEditTarget(item);
-    setDialogOpen(true);
-  };
-
-  const handleSave = async (req: CreateToolRequest | UpdateToolRequest) => {
-    if (editTarget) {
-      await mutations.updateTool(editTarget.tool_id, req as UpdateToolRequest);
-    } else {
-      await mutations.createTool(req as CreateToolRequest);
-    }
-    refresh();
-  };
+  const openEdit = (item: ToolItem) =>
+    navigate(`/app/toolsets/${toolsetId}/tools/${item.tool_id}/edit`);
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
@@ -782,16 +404,6 @@ function ToolsetTools() {
           />
         </ListViewState>
       </Box>
-
-      {!isReadOnly && (
-        <ToolDialog
-          key={editTarget?.tool_id ?? 'new'}
-          open={dialogOpen}
-          onClose={() => setDialogOpen(false)}
-          onSave={handleSave}
-          initial={editTarget}
-        />
-      )}
 
       <ToolDetailDialog
         open={!!detailItem}
