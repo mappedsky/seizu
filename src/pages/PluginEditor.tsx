@@ -5,28 +5,43 @@ import {
   Alert,
   Box,
   Button,
+  ButtonBase,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
+  Drawer,
   IconButton,
-  List,
-  ListItemButton,
-  ListItemText,
   Stack,
   TextField,
   Tooltip,
   Typography,
+  useMediaQuery,
 } from '@mui/material';
-import AddIcon from '@mui/icons-material/Add';
+import { alpha, useTheme } from '@mui/material/styles';
+import { visuallyHidden } from '@mui/utils';
+import AccountTreeIcon from '@mui/icons-material/AccountTree';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircle';
+import CloseIcon from '@mui/icons-material/Close';
+import ErrorOutlineIcon from '@mui/icons-material/Error';
 import PublishIcon from '@mui/icons-material/Publish';
+import UnfoldMoreIcon from '@mui/icons-material/UnfoldMore';
+import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
+import {
+  EditorSection,
+  IdentityFact,
+  IdentityFacts,
+} from 'src/components/EditorSection';
 import FieldWithHelp from 'src/components/FieldWithHelp';
-import PluginSkillEditor from 'src/components/PluginSkillEditor';
+import PluginPackageTree, {
+  PackageTreeNode,
+} from 'src/components/PluginPackageTree';
+import PluginSkillEditor, {
+  normalizeSkill,
+} from 'src/components/PluginSkillEditor';
 import { DASHBOARD_NAVBAR_HEIGHT } from 'src/components/dashboardLayoutConstants';
 import {
   PluginDiagnostic,
@@ -47,15 +62,8 @@ import {
   serializeManifest,
   serializeSkillDocument,
 } from 'src/pluginAuthoring';
+import { hueFor } from 'src/theme/brand';
 import { fontFamilyMono } from 'src/theme/typography';
-
-// The rail is a fixed 260px, so its rows must ellipsize: a long skill title or
-// a long `plugin__skill` name would otherwise scroll the whole panel sideways.
-const railRowSx = { minWidth: 0, my: 0.25 };
-const railRowSlotProps = {
-  primary: { noWrap: true },
-  secondary: { noWrap: true, sx: { fontFamily: fontFamilyMono, fontSize: 12 } },
-} as const;
 
 const MANIFEST_PATH = 'plugin.json';
 const SKILL_FILE_RE = /^skills\/[^/]+\/SKILL\.md$/;
@@ -139,9 +147,45 @@ function packagePayload(
 }
 
 /** A cheap identity for the staged package, for unsaved-change detection. */
-function packageFingerprint(payload: StagedFilePayload[]): string {
-  return JSON.stringify(payload);
+function filesOf(skill: StagedSkill, supporting: StagedFile[]): StagedFile[] {
+  const prefix = `skills/${skill.document.portableName}/`;
+  return supporting.filter((file) => file.path.startsWith(prefix));
 }
+
+/** The manifest without its per-skill entries, which belong to each skill. */
+function manifestCore(manifest: PluginManifest): string {
+  const core = cloneManifest(manifest);
+  seizuExtension(core).skills = {};
+  return serializeManifest(core);
+}
+
+/**
+ * A skill's document, manifest entry and files, for per-skill change marks.
+ * Compared as the skill editor stages them, so the defaults and spelling it
+ * applies on opening a skill do not read as an edit.
+ */
+function skillSignature(skill: StagedSkill, supporting: StagedFile[]): string {
+  const { document, extension } = normalizeSkill(
+    skill.document,
+    skill.extension,
+  );
+  return JSON.stringify([
+    serializeSkillDocument(document),
+    extension,
+    filesOf(skill, supporting).map((file) => [
+      file.path,
+      file.sha256 ?? `staged:${file.size}`,
+    ]),
+  ]);
+}
+
+/** The published package, as the change marks compare against it. */
+interface Baseline {
+  manifest: string;
+  skills: Record<string, string>;
+}
+
+const EMPTY_BASELINE: Baseline = { manifest: '', skills: {} };
 
 function NewSkillDialog({
   open,
@@ -284,120 +328,307 @@ function PluginManifestEditor({
   };
 
   return (
-    <Stack spacing={2.5}>
+    <Stack spacing={{ xs: 3, md: 4 }}>
       <Box>
-        <Typography variant="h2">Plugin details</Typography>
-        <Typography color="text.secondary">
-          These fields are written to the Agent Plugins 1.0.0 plugin.json
-          manifest. Other extension namespaces are preserved.
+        <Typography variant="h2" sx={{ fontSize: { xs: 24, md: 29 } }}>
+          Plugin details
         </Typography>
+        <Typography color="text.secondary" variant="body2" sx={{ mt: 0.5 }}>
+          Written to the Agent Plugins 1.0.0 plugin.json manifest. Other
+          extension namespaces are preserved.
+        </Typography>
+        <IdentityFacts>
+          <IdentityFact
+            label="Seizu namespace"
+            value={deriveSeizuId(manifest.name ?? '') ?? '—'}
+          />
+          <IdentityFact label="Schema" value={manifest.$schema ?? '—'} />
+        </IdentityFacts>
       </Box>
-      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-        <TextField label="Schema" value={manifest.$schema} disabled fullWidth />
-        <TextField
-          label="Seizu namespace"
-          value={deriveSeizuId(manifest.name ?? '') ?? '—'}
-          helperText="Derived from the package name"
-          disabled
-          fullWidth
-        />
-      </Stack>
-      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-        <TextField
-          label="Package name"
-          value={manifest.name ?? ''}
-          onChange={(event) => update({ name: event.target.value })}
-          error={!manifest.name?.trim()}
-          helperText={!manifest.name?.trim() ? 'Package name is required.' : ''}
-          required
-          fullWidth
-        />
-        <TextField
-          label="Version"
-          value={manifest.version ?? ''}
-          onChange={(event) => update({ version: event.target.value })}
-          error={!manifest.version?.trim()}
-          helperText={!manifest.version?.trim() ? 'Version is required.' : ''}
-          required
-          fullWidth
-        />
-      </Stack>
-      <TextField
-        label="Description"
-        value={manifest.description ?? ''}
-        onChange={(event) => update({ description: event.target.value })}
-        multiline
-        minRows={2}
-        fullWidth
-      />
-      <Divider />
-      <Typography variant="subtitle2">Author</Typography>
-      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-        <TextField
-          label="Name"
-          value={author.name ?? ''}
-          onChange={(event) => updateAuthor({ name: event.target.value })}
-          fullWidth
-        />
-        <TextField
-          label="Email"
-          value={author.email ?? ''}
-          onChange={(event) => updateAuthor({ email: event.target.value })}
-          fullWidth
-        />
-        <TextField
-          label="URL"
-          value={author.url ?? ''}
-          onChange={(event) => updateAuthor({ url: event.target.value })}
-          fullWidth
-        />
-      </Stack>
-      <Divider />
-      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
-        <TextField
-          label="Homepage"
-          value={manifest.homepage ?? ''}
-          onChange={(event) => update({ homepage: event.target.value })}
-          fullWidth
-        />
-        <TextField
-          label="Repository"
-          value={manifest.repository ?? ''}
-          onChange={(event) => update({ repository: event.target.value })}
-          fullWidth
-        />
-        <TextField
-          label="License"
-          value={manifest.license ?? ''}
-          onChange={(event) => update({ license: event.target.value })}
-          fullWidth
-        />
-      </Stack>
-      <FieldWithHelp
-        label="Keywords"
-        tooltip="Enter multiple keywords separated by commas."
+
+      <EditorSection
+        title="Package"
+        description="The package name also fixes the Seizu namespace every skill's tool name starts with."
       >
-        <TextField
-          label="Keywords"
-          value={(manifest.keywords ?? []).join(', ')}
-          onChange={(event) =>
-            update({
-              keywords: event.target.value
-                .split(',')
-                .map((keyword) => keyword.trim())
-                .filter(Boolean),
-            })
-          }
-          fullWidth
-        />
-      </FieldWithHelp>
+        <Stack spacing={2}>
+          <Box sx={twoColumnSx}>
+            <TextField
+              label="Package name"
+              value={manifest.name ?? ''}
+              onChange={(event) => update({ name: event.target.value })}
+              error={!manifest.name?.trim()}
+              helperText={
+                !manifest.name?.trim() ? 'Package name is required.' : ''
+              }
+              required
+              fullWidth
+            />
+            <TextField
+              label="Version"
+              value={manifest.version ?? ''}
+              onChange={(event) => update({ version: event.target.value })}
+              error={!manifest.version?.trim()}
+              helperText={
+                !manifest.version?.trim() ? 'Version is required.' : ''
+              }
+              required
+              fullWidth
+            />
+          </Box>
+          <TextField
+            label="Description"
+            value={manifest.description ?? ''}
+            onChange={(event) => update({ description: event.target.value })}
+            multiline
+            minRows={2}
+            fullWidth
+          />
+        </Stack>
+      </EditorSection>
+
+      <EditorSection title="Author">
+        <Box sx={threeColumnSx}>
+          <TextField
+            label="Name"
+            value={author.name ?? ''}
+            onChange={(event) => updateAuthor({ name: event.target.value })}
+            fullWidth
+          />
+          <TextField
+            label="Email"
+            value={author.email ?? ''}
+            onChange={(event) => updateAuthor({ email: event.target.value })}
+            fullWidth
+          />
+          <TextField
+            label="URL"
+            value={author.url ?? ''}
+            onChange={(event) => updateAuthor({ url: event.target.value })}
+            fullWidth
+          />
+        </Box>
+      </EditorSection>
+
+      <EditorSection
+        title="Links and discovery"
+        description="Where the package comes from and how it is found once exported."
+      >
+        <Stack spacing={2}>
+          <Box sx={threeColumnSx}>
+            <TextField
+              label="Homepage"
+              value={manifest.homepage ?? ''}
+              onChange={(event) => update({ homepage: event.target.value })}
+              fullWidth
+            />
+            <TextField
+              label="Repository"
+              value={manifest.repository ?? ''}
+              onChange={(event) => update({ repository: event.target.value })}
+              fullWidth
+            />
+            <TextField
+              label="License"
+              value={manifest.license ?? ''}
+              onChange={(event) => update({ license: event.target.value })}
+              fullWidth
+            />
+          </Box>
+          <FieldWithHelp
+            label="Keywords"
+            tooltip="Enter multiple keywords separated by commas."
+          >
+            <TextField
+              label="Keywords"
+              value={(manifest.keywords ?? []).join(', ')}
+              onChange={(event) =>
+                update({
+                  keywords: event.target.value
+                    .split(',')
+                    .map((keyword) => keyword.trim())
+                    .filter(Boolean),
+                })
+              }
+              fullWidth
+            />
+          </FieldWithHelp>
+        </Stack>
+      </EditorSection>
     </Stack>
+  );
+}
+
+const twoColumnSx = {
+  display: 'grid',
+  gap: 2,
+  gridTemplateColumns: { xs: '1fr', sm: 'minmax(0, 2fr) minmax(0, 1fr)' },
+} as const;
+
+const threeColumnSx = {
+  display: 'grid',
+  gap: 2,
+  gridTemplateColumns: { xs: '1fr', lg: 'repeat(3, minmax(0, 1fr))' },
+} as const;
+
+/** Where a diagnostic belongs in the package tree. */
+function diagnosticTarget(
+  item: PluginDiagnostic,
+  skills: StagedSkill[],
+): string {
+  const owner = skills.find(
+    (skill) =>
+      (item.skill &&
+        (item.skill === skill.document.portableName ||
+          item.skill === effectiveSkillId(skill))) ||
+      item.path?.startsWith(`skills/${skill.document.portableName}/`),
+  );
+  return owner ? owner.path : MANIFEST_PATH;
+}
+
+function ChecksPanel({
+  message,
+  diagnostics,
+  skills,
+  onSelect,
+}: {
+  message: string | null;
+  diagnostics: PluginDiagnostic[];
+  skills: StagedSkill[];
+  onSelect: (path: string) => void;
+}) {
+  const theme = useTheme();
+  const errors = diagnostics.filter((item) => item.severity === 'error');
+  const warnings = diagnostics.length - errors.length;
+  const tone = errors.length
+    ? theme.palette.error.main
+    : warnings
+      ? theme.palette.warning.main
+      : hueFor('aurora', theme.palette.mode);
+  const Icon = errors.length
+    ? ErrorOutlineIcon
+    : warnings
+      ? WarningAmberIcon
+      : CheckCircleOutlineIcon;
+  const counts = [
+    errors.length &&
+      `${errors.length} ${errors.length === 1 ? 'error' : 'errors'}`,
+    warnings && `${warnings} ${warnings === 1 ? 'warning' : 'warnings'}`,
+  ].filter(Boolean);
+
+  return (
+    <Box
+      role="status"
+      sx={{
+        border: 1,
+        borderColor: alpha(tone, 0.45),
+        borderRadius: 1,
+        overflow: 'hidden',
+      }}
+    >
+      <Box
+        sx={{
+          alignItems: 'center',
+          bgcolor: alpha(tone, 0.08),
+          display: 'flex',
+          gap: 1.5,
+          px: 2,
+          py: 1.5,
+        }}
+      >
+        <Icon sx={{ color: tone, flexShrink: 0 }} />
+        <Typography variant="body2" sx={{ flex: 1, fontWeight: 600 }}>
+          {message ?? 'Package checks'}
+        </Typography>
+        {counts.length > 0 && (
+          <Typography
+            variant="caption"
+            sx={{ color: 'text.secondary', flexShrink: 0 }}
+          >
+            {counts.join(' · ')}
+          </Typography>
+        )}
+      </Box>
+      {diagnostics.length > 0 && (
+        <Box component="ul" sx={{ listStyle: 'none', m: 0, p: 0 }}>
+          {diagnostics.map((item) => {
+            const target = diagnosticTarget(item, skills);
+            const itemTone =
+              item.severity === 'error'
+                ? theme.palette.error.main
+                : theme.palette.warning.main;
+            return (
+              <Box
+                component="li"
+                key={`${item.code}-${item.path || ''}-${item.skill || ''}-${item.message}`}
+                sx={{ borderTop: 1, borderColor: 'divider' }}
+              >
+                <ButtonBase
+                  onClick={() => onSelect(target)}
+                  sx={{
+                    alignItems: 'flex-start',
+                    display: 'flex',
+                    gap: 1.5,
+                    justifyContent: 'flex-start',
+                    px: 2,
+                    py: 1.25,
+                    textAlign: 'left',
+                    width: '100%',
+                    '&:hover': { bgcolor: 'action.hover' },
+                    '&.Mui-focusVisible': {
+                      outline: `2px solid ${theme.palette.primary.main}`,
+                      outlineOffset: -2,
+                    },
+                  }}
+                >
+                  <Box
+                    aria-hidden
+                    sx={{
+                      bgcolor: itemTone,
+                      borderRadius: '50%',
+                      flexShrink: 0,
+                      height: 8,
+                      mt: '7px',
+                      width: 8,
+                    }}
+                  />
+                  <Box sx={{ minWidth: 0 }}>
+                    {item.path && (
+                      <Typography
+                        variant="caption"
+                        component="div"
+                        sx={{
+                          color: 'text.secondary',
+                          fontFamily: fontFamilyMono,
+                          overflowWrap: 'anywhere',
+                        }}
+                      >
+                        {item.path}
+                      </Typography>
+                    )}
+                    <Typography variant="body2">
+                      <Box component="span" sx={visuallyHidden}>
+                        {item.severity}:{' '}
+                      </Box>
+                      {item.message}
+                    </Typography>
+                  </Box>
+                </ButtonBase>
+              </Box>
+            );
+          })}
+        </Box>
+      )}
+    </Box>
   );
 }
 
 export default function PluginEditor() {
   const { pluginId = '' } = useParams();
   const navigate = useNavigate();
+  const theme = useTheme();
+  // Below md the package tree moves into a drawer and the publish actions
+  // into a bar pinned to the bottom of the screen.
+  const compact = useMediaQuery(theme.breakpoints.down('md'));
   const api = usePluginMutations();
   const { tools: catalog, error: catalogError } = useToolCatalog();
 
@@ -405,7 +636,7 @@ export default function PluginEditor() {
   const [manifest, setManifest] = useState<PluginManifest | null>(null);
   const [skills, setSkills] = useState<StagedSkill[]>([]);
   const [supporting, setSupporting] = useState<StagedFile[]>([]);
-  const [baseline, setBaseline] = useState('');
+  const [baseline, setBaseline] = useState<Baseline>(EMPTY_BASELINE);
   const [selectedPath, setSelectedPath] = useState<string>(MANIFEST_PATH);
   const [diagnostics, setDiagnostics] = useState<PluginDiagnostic[]>([]);
   const [message, setMessage] = useState<string | null>(null);
@@ -413,6 +644,7 @@ export default function PluginEditor() {
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<'validate' | 'publish' | null>(null);
   const [newSkillOpen, setNewSkillOpen] = useState(false);
+  const [contentsOpen, setContentsOpen] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [deleteSkillTarget, setDeleteSkillTarget] =
     useState<StagedSkill | null>(null);
@@ -422,7 +654,26 @@ export default function PluginEditor() {
   const busy = pending !== null;
 
   const payload = manifest ? packagePayload(manifest, skills, supporting) : [];
-  const dirty = manifest !== null && packageFingerprint(payload) !== baseline;
+
+  // What the tree marks and the header counts: the manifest's own fields, and
+  // each skill with its extension entry and its files. These cover everything
+  // the editor can change, so they also decide whether there is anything to
+  // publish.
+  const manifestEdited =
+    manifest !== null && manifestCore(manifest) !== baseline.manifest;
+  const skillChange = (skill: StagedSkill): 'new' | 'modified' | null => {
+    const before = baseline.skills[skill.path];
+    if (before === undefined) return 'new';
+    return before === skillSignature(skill, supporting) ? null : 'modified';
+  };
+  const removedSkills = Object.keys(baseline.skills).filter(
+    (path) => !skills.some((skill) => skill.path === path),
+  ).length;
+  const changeCount =
+    (manifestEdited ? 1 : 0) +
+    skills.filter((skill) => skillChange(skill) !== null).length +
+    removedSkills;
+  const dirty = changeCount > 0;
 
   const duplicateSkillId = (() => {
     const seen = new Set<string>();
@@ -488,11 +739,15 @@ export default function PluginEditor() {
       setManifest(nextManifest);
       setSkills(nextSkills);
       setSupporting(nextSupporting);
-      setBaseline(
-        packageFingerprint(
-          packagePayload(nextManifest, nextSkills, nextSupporting),
+      setBaseline({
+        manifest: manifestCore(nextManifest),
+        skills: Object.fromEntries(
+          nextSkills.map((skill) => [
+            skill.path,
+            skillSignature(skill, nextSupporting),
+          ]),
         ),
-      );
+      });
       setSelectedPath(MANIFEST_PATH);
     } catch (reason) {
       setError((reason as Error).message);
@@ -522,9 +777,7 @@ export default function PluginEditor() {
 
   const selectedSkill = skills.find((skill) => skill.path === selectedPath);
   const skillSupportingFiles = selectedSkill
-    ? supporting.filter((file) =>
-        file.path.startsWith(`skills/${selectedSkill.document.portableName}/`),
-      )
+    ? filesOf(selectedSkill, supporting)
     : [];
 
   const updateSkill = (
@@ -659,275 +912,478 @@ export default function PluginEditor() {
     navigate('/app/plugins');
   };
 
+  const select = (path: string) => {
+    setSelectedPath(path);
+    setContentsOpen(false);
+  };
+
+  // Diagnostics are attributed to the node they concern, so the tree shows
+  // where the problems are before the panel is read.
+  const tally = (path: string) => {
+    const owned = diagnostics.filter(
+      (item) => diagnosticTarget(item, skills) === path,
+    );
+    const errors = owned.filter((item) => item.severity === 'error').length;
+    return { errors, warnings: owned.length - errors };
+  };
+  const plural = (count: number, word: string) =>
+    `${count} ${word}${count === 1 ? '' : 's'}`;
+  const anchorNode: PackageTreeNode = {
+    path: MANIFEST_PATH,
+    title: 'Plugin details',
+    identity: MANIFEST_PATH,
+    meta: manifest?.version ? [`version ${manifest.version}`] : [],
+    change: manifestEdited ? 'modified' : null,
+    ...tally(MANIFEST_PATH),
+  };
+  const skillNodes: PackageTreeNode[] = skills.map((skill) => {
+    const files = filesOf(skill, supporting).length;
+    const inputs = skill.extension.parameters?.length ?? 0;
+    return {
+      path: skill.path,
+      title: skill.extension.title || skill.document.portableName,
+      identity: effectiveSkillId(skill),
+      tooltip: `${pluginId}__${effectiveSkillId(skill)}`,
+      meta: [
+        ...(inputs ? [plural(inputs, 'input')] : []),
+        ...(files ? [plural(files, 'file')] : []),
+      ],
+      change: skillChange(skill),
+      ...tally(skill.path),
+    };
+  });
+  const selectedNode =
+    skillNodes.find((node) => node.path === selectedPath) ?? anchorNode;
+
+  const tree = (
+    <PluginPackageTree
+      anchor={anchorNode}
+      skills={skillNodes}
+      selectedPath={selectedPath}
+      onSelect={select}
+      onAddSkill={() => {
+        setContentsOpen(false);
+        setNewSkillOpen(true);
+      }}
+      addDisabled={busy || loading}
+    />
+  );
+
+  const ember = hueFor('ember', theme.palette.mode);
+  // Whether there is anything to publish, then the stored revision: the one
+  // Publish would create, or the current one when there is nothing to publish.
+  // A server revision number, not the manifest's version.
+  const status = (
+    <>
+      {dirty ? (
+        <strong>{plural(changeCount, 'unpublished change')}</strong>
+      ) : (
+        'No unpublished changes'
+      )}
+      {baseRevision !== null &&
+        (dirty
+          ? ` · publishes as revision ${baseRevision + 1}`
+          : ` · revision ${baseRevision} is current`)}
+    </>
+  );
+
+  // Cancel leaves without publishing; with staged edits it asks first.
+  const actions = (
+    <>
+      <Button onClick={leave} disabled={busy} sx={{ px: compact ? 1 : 2 }}>
+        Cancel
+      </Button>
+      <Button
+        variant="outlined"
+        startIcon={compact ? undefined : <CheckCircleOutlineIcon />}
+        onClick={() => void validate()}
+        disabled={busy || loading}
+        fullWidth={compact}
+        sx={{ px: compact ? 1 : undefined }}
+      >
+        {pending === 'validate' ? (
+          <ConstellationSpinner size={20} />
+        ) : (
+          'Validate'
+        )}
+      </Button>
+      <Button
+        variant="contained"
+        startIcon={compact ? undefined : <PublishIcon />}
+        onClick={() => void publish()}
+        disabled={busy || loading || !dirty || !!duplicateSkillId}
+        fullWidth={compact}
+      >
+        {pending === 'publish' ? <ConstellationSpinner size={20} /> : 'Publish'}
+      </Button>
+    </>
+  );
+
+  const editor = (
+    <Stack spacing={2.5}>
+      {error && <Alert severity="error">{error}</Alert>}
+      {duplicateSkillId && (
+        <Alert severity="error">
+          Two skills share the Seizu skill ID{' '}
+          <strong>{duplicateSkillId}</strong>. Give each one a distinct ID
+          before publishing.
+        </Alert>
+      )}
+      {catalogError && (
+        <Alert severity="warning">
+          Tool catalog could not be loaded: {catalogError.message}
+        </Alert>
+      )}
+      {(message || diagnostics.length > 0) && (
+        <ChecksPanel
+          message={message}
+          diagnostics={diagnostics}
+          skills={skills}
+          onSelect={select}
+        />
+      )}
+
+      {loading ? (
+        <Box sx={{ display: 'flex', justifyContent: 'center', p: 6 }}>
+          <ConstellationSpinner />
+        </Box>
+      ) : (
+        <>
+          {selectedPath === MANIFEST_PATH && manifest && (
+            <PluginManifestEditor manifest={manifest} onChange={setManifest} />
+          )}
+          {selectedSkill && (
+            <PluginSkillEditor
+              key={selectedSkill.path}
+              document={selectedSkill.document}
+              extension={selectedSkill.extension}
+              catalog={catalog}
+              qualifiedName={`${pluginId}__${effectiveSkillId(selectedSkill)}`}
+              supportingFiles={skillSupportingFiles.map((file) => ({
+                path: file.path,
+                media_type: file.mediaType,
+                size: file.size,
+                sha256: file.sha256 ?? '',
+                executable: file.executable,
+                etag: file.sha256 ?? '',
+              }))}
+              onChange={(document, extension) =>
+                updateSkill(selectedSkill.path, document, extension)
+              }
+              onUpload={async (directory, file) =>
+                addSupportingFile(
+                  directory,
+                  file.name,
+                  new Uint8Array(await file.arrayBuffer()),
+                  file.type || 'application/octet-stream',
+                )
+              }
+              onCreateTextFile={async (directory, filename, content) =>
+                addSupportingFile(
+                  directory,
+                  filename,
+                  new TextEncoder().encode(content),
+                  'text/plain',
+                )
+              }
+              onDeleteFile={async (file) =>
+                setDeleteFileTarget(
+                  supporting.find((item) => item.path === file.path) ?? null,
+                )
+              }
+              onDeleteSkill={async () => setDeleteSkillTarget(selectedSkill)}
+            />
+          )}
+        </>
+      )}
+    </Stack>
+  );
+
   return (
     <>
       <PageTitle>{`Edit ${pluginId} | Seizu`}</PageTitle>
       <Box
-        sx={{
-          display: 'flex',
-          flexDirection: 'column',
-          height: `calc(100vh - ${DASHBOARD_NAVBAR_HEIGHT}px)`,
-          overflow: 'hidden',
-        }}
+        sx={
+          compact
+            ? { pb: 12 }
+            : {
+                display: 'flex',
+                flexDirection: 'column',
+                height: `calc(100vh - ${DASHBOARD_NAVBAR_HEIGHT}px)`,
+                overflow: 'hidden',
+              }
+        }
       >
         <Box
+          component="header"
           sx={{
-            alignItems: { xs: 'stretch', md: 'center' },
-            bgcolor: 'background.default',
-            borderBottom: 1,
+            alignItems: 'center',
+            borderBottom: compact ? 0 : 1,
             borderColor: 'divider',
             display: 'flex',
-            flexDirection: { xs: 'column', md: 'row' },
             flexShrink: 0,
-            gap: 1.5,
-            justifyContent: 'space-between',
-            px: { xs: 2, md: 3 },
-            py: 1.5,
-            position: 'sticky',
-            top: 0,
-            zIndex: 10,
+            gap: { xs: 1, md: 2 },
+            pl: { xs: 1, md: 2 },
+            pr: { xs: 2, md: 3 },
+            pt: { xs: 2, md: 2.5 },
+            pb: { xs: 1.5, md: 2.5 },
           }}
         >
-          <Box>
-            <Button
-              size="small"
-              startIcon={<ArrowBackIcon />}
+          <Tooltip title="Back to Agent Plugins">
+            <IconButton
+              aria-label="Back to Agent Plugins"
               onClick={leave}
-              sx={{ mb: 0.5, ml: -1 }}
+              sx={{ alignSelf: 'flex-start', mt: { xs: 0, md: 0.25 } }}
             >
-              Back to Agent Plugins
-            </Button>
-            <Typography variant="h1">Edit {pluginId}</Typography>
-            <Typography color="text.secondary" variant="body2">
-              {dirty
-                ? 'Unpublished changes are held in this tab. Publish applies the whole package at once.'
-                : `Published revision v${baseRevision ?? '—'}. Edits apply only when you publish.`}
-            </Typography>
-          </Box>
-          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
-            <Button
-              variant="outlined"
-              startIcon={<CheckCircleOutlineIcon />}
-              onClick={() => void validate()}
-              disabled={busy || loading}
-            >
-              {pending === 'validate' ? (
-                <ConstellationSpinner size={20} />
-              ) : (
-                'Validate'
-              )}
-            </Button>
-            <Button
-              variant="contained"
-              startIcon={<PublishIcon />}
-              onClick={() => void publish()}
-              disabled={busy || loading || !dirty || !!duplicateSkillId}
-            >
-              {pending === 'publish' ? (
-                <ConstellationSpinner size={20} />
-              ) : (
-                'Publish'
-              )}
-            </Button>
-          </Stack>
-        </Box>
-
-        <Box
-          sx={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}
-        >
-          <Box
-            sx={{
-              borderRight: 1,
-              borderColor: 'divider',
-              display: 'flex',
-              flexDirection: 'column',
-              flexShrink: 0,
-              overflow: 'hidden',
-              width: 260,
-            }}
-          >
+              <ArrowBackIcon />
+            </IconButton>
+          </Tooltip>
+          <Box sx={{ flex: 1, minWidth: 0 }}>
             <Box
               sx={{
-                alignItems: 'center',
-                borderBottom: 1,
-                borderColor: 'divider',
+                alignItems: 'baseline',
+                columnGap: 1.5,
                 display: 'flex',
-                flexShrink: 0,
-                justifyContent: 'space-between',
-                minHeight: 40,
-                px: 1.5,
+                flexWrap: 'wrap',
               }}
             >
               <Typography
-                variant="caption"
+                variant="h1"
+                noWrap
+                sx={{ fontSize: { xs: 26, md: 35 }, maxWidth: '100%' }}
+              >
+                {manifest?.name || pluginId}
+              </Typography>
+              <Typography
+                variant="body2"
+                noWrap
                 sx={{
                   color: 'text.secondary',
-                  fontWeight: 700,
-                  letterSpacing: 0.8,
+                  fontFamily: fontFamilyMono,
+                  maxWidth: '100%',
                 }}
               >
-                PACKAGE CONTENT
+                {pluginId}
               </Typography>
-              <Tooltip title="Add skill" placement="right">
-                <span>
-                  <IconButton
-                    size="small"
-                    aria-label="Add skill"
-                    onClick={() => setNewSkillOpen(true)}
-                    disabled={busy || loading}
-                  >
-                    <AddIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
             </Box>
-            <List
-              disablePadding
-              sx={{ flex: 1, overflowX: 'hidden', overflowY: 'auto' }}
+            <Box
+              sx={{
+                alignItems: 'flex-start',
+                display: 'flex',
+                gap: 1,
+                mt: 0.75,
+              }}
             >
-              <ListItemButton
-                selected={selectedPath === MANIFEST_PATH}
-                onClick={() => setSelectedPath(MANIFEST_PATH)}
+              <Box
+                aria-hidden
+                sx={{
+                  bgcolor: dirty ? ember : theme.palette.primary.main,
+                  borderRadius: '50%',
+                  flexShrink: 0,
+                  height: 8,
+                  // Centered on the first line when the status wraps.
+                  mt: `calc((${theme.typography.body2.lineHeight}em - 8px) / 2)`,
+                  width: 8,
+                }}
+              />
+              <Typography
+                variant="body2"
+                sx={{ color: 'text.secondary', minWidth: 0 }}
               >
-                <ListItemText
-                  primary="Plugin details"
-                  secondary={MANIFEST_PATH}
-                  sx={railRowSx}
-                  slotProps={railRowSlotProps}
-                />
-              </ListItemButton>
-              {skills.map((skill) => {
-                const label =
-                  skill.extension.title || skill.document.portableName;
-                const qualifiedName = `${pluginId}__${effectiveSkillId(skill)}`;
-                return (
-                  <Tooltip
-                    key={skill.path}
-                    title={`${label} — ${qualifiedName}`}
-                    placement="right"
-                    enterDelay={500}
-                  >
-                    <ListItemButton
-                      selected={selectedPath === skill.path}
-                      onClick={() => setSelectedPath(skill.path)}
-                    >
-                      <ListItemText
-                        primary={label}
-                        secondary={qualifiedName}
-                        sx={railRowSx}
-                        slotProps={railRowSlotProps}
-                      />
-                    </ListItemButton>
-                  </Tooltip>
-                );
-              })}
-            </List>
+                {status}
+              </Typography>
+            </Box>
           </Box>
-
-          <Box
-            sx={{
-              flex: 1,
-              minWidth: 0,
-              overflowY: 'auto',
-              p: { xs: 2, md: 3 },
-            }}
-          >
-            <Stack spacing={2}>
-              {error && <Alert severity="error">{error}</Alert>}
-              {duplicateSkillId && (
-                <Alert severity="error">
-                  Two skills share the Seizu skill ID{' '}
-                  <strong>{duplicateSkillId}</strong>. Give each one a distinct
-                  ID before publishing.
-                </Alert>
-              )}
-              {catalogError && (
-                <Alert severity="warning">
-                  Tool catalog could not be loaded: {catalogError.message}
-                </Alert>
-              )}
-              {message && (
-                <Alert
-                  severity={
-                    diagnostics.some((item) => item.severity === 'error')
-                      ? 'error'
-                      : 'info'
-                  }
-                >
-                  {message}
-                </Alert>
-              )}
-              {diagnostics.map((item) => (
-                <Alert
-                  key={`${item.code}-${item.path || ''}-${item.skill || ''}-${item.message}`}
-                  severity={item.severity}
-                >
-                  {item.path ? `${item.path}: ` : ''}
-                  {item.message}
-                </Alert>
-              ))}
-
-              {loading ? (
-                <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-                  <ConstellationSpinner />
-                </Box>
-              ) : (
-                <>
-                  {selectedPath === MANIFEST_PATH && manifest && (
-                    <PluginManifestEditor
-                      manifest={manifest}
-                      onChange={setManifest}
-                    />
-                  )}
-                  {selectedSkill && (
-                    <PluginSkillEditor
-                      key={selectedSkill.path}
-                      document={selectedSkill.document}
-                      extension={selectedSkill.extension}
-                      catalog={catalog}
-                      supportingFiles={skillSupportingFiles.map((file) => ({
-                        path: file.path,
-                        media_type: file.mediaType,
-                        size: file.size,
-                        sha256: file.sha256 ?? '',
-                        executable: file.executable,
-                        etag: file.sha256 ?? '',
-                      }))}
-                      onChange={(document, extension) =>
-                        updateSkill(selectedSkill.path, document, extension)
-                      }
-                      onUpload={async (directory, file) =>
-                        addSupportingFile(
-                          directory,
-                          file.name,
-                          new Uint8Array(await file.arrayBuffer()),
-                          file.type || 'application/octet-stream',
-                        )
-                      }
-                      onCreateTextFile={async (directory, filename, content) =>
-                        addSupportingFile(
-                          directory,
-                          filename,
-                          new TextEncoder().encode(content),
-                          'text/plain',
-                        )
-                      }
-                      onDeleteFile={async (file) =>
-                        setDeleteFileTarget(
-                          supporting.find((item) => item.path === file.path) ??
-                            null,
-                        )
-                      }
-                      onDeleteSkill={async () =>
-                        setDeleteSkillTarget(selectedSkill)
-                      }
-                    />
-                  )}
-                </>
-              )}
+          {!compact && (
+            <Stack direction="row" spacing={1.5} sx={{ flexShrink: 0 }}>
+              {actions}
             </Stack>
-          </Box>
+          )}
         </Box>
+
+        {compact ? (
+          <>
+            <Box
+              sx={{
+                bgcolor: 'background.default',
+                borderBottom: 1,
+                borderTop: 1,
+                borderColor: 'divider',
+                px: 2,
+                py: 1,
+              }}
+            >
+              <ButtonBase
+                onClick={() => setContentsOpen(true)}
+                aria-haspopup="dialog"
+                aria-label={`Package contents: ${selectedNode.title}`}
+                sx={{
+                  alignItems: 'center',
+                  border: 1,
+                  borderColor: 'divider',
+                  borderRadius: 1,
+                  display: 'flex',
+                  gap: 1.5,
+                  justifyContent: 'flex-start',
+                  minHeight: 52,
+                  px: 1.5,
+                  textAlign: 'left',
+                  width: '100%',
+                  '&.Mui-focusVisible': {
+                    outline: `2px solid ${theme.palette.primary.main}`,
+                  },
+                }}
+              >
+                <Box
+                  aria-hidden
+                  sx={{
+                    bgcolor: selectedNode.change
+                      ? ember
+                      : theme.palette.primary.main,
+                    borderRadius: '50%',
+                    flexShrink: 0,
+                    height: 12,
+                    width: 12,
+                  }}
+                />
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography variant="body2" noWrap sx={{ fontWeight: 700 }}>
+                    {selectedNode.title}
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    noWrap
+                    component="div"
+                    sx={{ color: 'text.secondary', fontFamily: fontFamilyMono }}
+                  >
+                    {selectedNode.identity}
+                  </Typography>
+                </Box>
+                <Typography
+                  variant="caption"
+                  sx={{ color: 'text.secondary', flexShrink: 0 }}
+                >
+                  {plural(skills.length, 'skill')}
+                </Typography>
+                <UnfoldMoreIcon sx={{ color: 'text.secondary' }} />
+              </ButtonBase>
+            </Box>
+            <Box sx={{ px: 2, py: 3 }}>{editor}</Box>
+            <Box
+              sx={{
+                bgcolor: 'background.default',
+                borderTop: 1,
+                borderColor: 'divider',
+                bottom: 0,
+                display: 'grid',
+                gap: { xs: 1, sm: 1.5 },
+                gridTemplateColumns: 'auto auto 1fr 1fr',
+                left: 0,
+                pb: 'calc(12px + env(safe-area-inset-bottom))',
+                position: 'fixed',
+                pt: 1.5,
+                px: 2,
+                right: 0,
+                zIndex: theme.zIndex.appBar,
+              }}
+            >
+              {/* The switcher scrolls away with the page; this keeps the
+                  package tree one tap away from anywhere in a long skill. */}
+              <Tooltip title="Package contents">
+                <IconButton
+                  aria-label="Open package contents"
+                  onClick={() => setContentsOpen(true)}
+                  sx={{ border: 1, borderColor: 'divider', borderRadius: 1 }}
+                >
+                  <AccountTreeIcon />
+                </IconButton>
+              </Tooltip>
+              {actions}
+            </Box>
+            <Drawer
+              anchor="bottom"
+              open={contentsOpen}
+              onClose={() => setContentsOpen(false)}
+              slotProps={{
+                paper: {
+                  'aria-label': 'Package contents',
+                  sx: {
+                    backgroundImage: 'none',
+                    bgcolor: 'background.default',
+                    borderTopLeftRadius: 12,
+                    borderTopRightRadius: 12,
+                    maxHeight: '80vh',
+                    pb: 'env(safe-area-inset-bottom)',
+                  },
+                },
+              }}
+            >
+              <Box
+                sx={{
+                  alignItems: 'center',
+                  borderBottom: 1,
+                  borderColor: 'divider',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  pl: 2,
+                  pr: 1,
+                  py: 1,
+                }}
+              >
+                <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                  Package contents
+                </Typography>
+                <IconButton
+                  aria-label="Close package contents"
+                  onClick={() => setContentsOpen(false)}
+                >
+                  <CloseIcon />
+                </IconButton>
+              </Box>
+              <Box sx={{ overflowY: 'auto' }}>{tree}</Box>
+            </Drawer>
+          </>
+        ) : (
+          <Box
+            sx={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}
+          >
+            <Box
+              sx={{
+                borderRight: 1,
+                borderColor: 'divider',
+                display: 'flex',
+                flexDirection: 'column',
+                flexShrink: 0,
+                width: 300,
+              }}
+            >
+              <Box
+                sx={{
+                  alignItems: 'baseline',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  pt: 2,
+                  px: 2.5,
+                }}
+              >
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                  Package contents
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {plural(skills.length, 'skill')}
+                </Typography>
+              </Box>
+              <Box sx={{ flex: 1, overflowX: 'hidden', overflowY: 'auto' }}>
+                {tree}
+              </Box>
+            </Box>
+            <Box sx={{ flex: 1, minWidth: 0, overflowY: 'auto' }}>
+              <Box sx={{ maxWidth: 1080, px: { md: 4, xl: 6 }, py: 4 }}>
+                {editor}
+              </Box>
+            </Box>
+          </Box>
+        )}
 
         <NewSkillDialog
           key={newSkillOpen ? 'open' : 'closed'}
@@ -959,6 +1415,7 @@ export default function PluginEditor() {
           open={leaveOpen}
           title="Discard unpublished changes?"
           confirmLabel="Discard"
+          cancelLabel="Keep editing"
           onClose={() => setLeaveOpen(false)}
           onConfirm={() => navigate('/app/plugins')}
         >

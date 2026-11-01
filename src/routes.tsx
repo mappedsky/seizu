@@ -43,6 +43,7 @@ const PluginEditor = lazy(() => import('src/pages/PluginEditor'));
 const PluginHistory = lazy(() => import('src/pages/PluginHistory'));
 const ModelProfiles = lazy(() => import('src/pages/ModelProfiles'));
 const ModelProfileHistory = lazy(() => import('src/pages/ModelProfileHistory'));
+const ModelProfileEditor = lazy(() => import('src/pages/ModelProfileEditor'));
 const ChatConnections = lazy(() => import('src/pages/ChatConnections'));
 
 function LegacyWorkflowRedirect({ history = false }: { history?: boolean }) {
@@ -119,6 +120,11 @@ const routes = [
       { path: 'roles', element: <Roles /> },
       { path: 'roles/:roleId/history', element: <RoleHistory /> },
       { path: 'model-profiles', element: <ModelProfiles /> },
+      { path: 'model-profiles/new', element: <ModelProfileEditor /> },
+      {
+        path: 'model-profiles/:profileId/edit',
+        element: <ModelProfileEditor />,
+      },
       {
         path: 'model-profiles/:profileId/history',
         element: <ModelProfileHistory />,

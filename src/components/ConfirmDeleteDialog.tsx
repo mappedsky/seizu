@@ -18,6 +18,8 @@ interface ConfirmDeleteDialogProps {
   title?: string;
   children: ReactNode;
   confirmLabel?: string;
+  /** The dismiss button, when "Cancel" would read as the action itself. */
+  cancelLabel?: string;
   deleting?: boolean;
   error?: string | null;
   onClose: () => void;
@@ -29,6 +31,7 @@ export default function ConfirmDeleteDialog({
   title = 'Delete?',
   children,
   confirmLabel = 'Delete',
+  cancelLabel = 'Cancel',
   deleting = false,
   error = null,
   onClose,
@@ -47,7 +50,7 @@ export default function ConfirmDeleteDialog({
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose} disabled={deleting}>
-          Cancel
+          {cancelLabel}
         </Button>
         <Button
           variant="contained"
