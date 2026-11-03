@@ -125,7 +125,10 @@ function SpaceDetail({
         onMove={(reports, subspaceId) =>
           void manage.moveReports(reports, subspaceId)
         }
-        enabled={manage.canWriteReports && !manage.moving}
+        onReorder={manage.reorderSubspace}
+        enabled={
+          (manage.canWriteReports || manage.canWriteSpaces) && !manage.moving
+        }
       >
         <Box
           sx={{

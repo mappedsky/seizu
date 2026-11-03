@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
-import { useDndContext } from '@dnd-kit/core';
+import {
+  SortableContext,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
 import {
   Box,
   Button,
@@ -14,7 +17,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { alpha } from '@mui/material/styles';
+import { alpha, type Theme } from '@mui/material/styles';
 import CloseIcon from '@mui/icons-material/Close';
 import DragIndicatorIcon from '@mui/icons-material/DragIndicator';
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove';
@@ -30,8 +33,11 @@ import { listTableTruncateSx } from 'src/components/ListTable';
 import SpaceConstellation from 'src/components/spaces/SpaceConstellation';
 import {
   dropTargetSx,
+  subspaceSortIds,
+  useFiling,
   useReportDrag,
   useSubspaceDrop,
+  useSubspaceSort,
 } from 'src/components/spaces/spaceDnd';
 import type { SpaceManagement } from 'src/components/spaces/useSpaceManagement';
 import type { ReportListItem } from 'src/hooks/useReportsApi';
@@ -45,6 +51,8 @@ interface SpaceContentsProps {
 }
 
 const MEASURE = '72ch';
+
+const dark = (theme: Theme) => theme.palette.mode === 'dark';
 /** Row lead-in before the checkbox: row padding, grip, gap. */
 const ROW_PAD = 4;
 const GRIP_WIDTH = 28;
@@ -90,8 +98,7 @@ export default function SpaceContents({
   // Derived, not synced: a report that left the space drops out of the
   // selection the moment the tree stops listing it.
   const selected = reports.filter((r) => selectedIds.has(r.report_id));
-  const { active } = useDndContext();
-  const dragging = active !== null;
+  const filing = useFiling();
 
   const selection: Selection = {
     enabled: manage.canWriteReports,
@@ -212,9 +219,9 @@ export default function SpaceContents({
               make it the page this space opens on.
             </Typography>
           )}
-          {/* The top level stays a drop target while dragging, even empty. */}
-          {(topLevel.length > 0 || subspaces.length === 0 || dragging) && (
-            <ReportSection
+          {/* The top level stays a drop target while filing, even empty. */}
+          {(topLevel.length > 0 || subspaces.length === 0 || filing) && (
+            <TopLevelSection
               title={subspaces.length > 0 ? 'Top level' : 'Reports'}
               reports={topLevel}
               overviewId={overviewId}
@@ -223,20 +230,28 @@ export default function SpaceContents({
               selection={selection}
             />
           )}
-          {subspaces.map((subspace) => (
-            <ReportSection
-              key={subspace.subspace_id}
-              title={subspace.name}
-              subspace={subspace}
-              reports={reports.filter(
-                (r) => r.subspace_id === subspace.subspace_id,
-              )}
-              overviewId={overviewId}
-              manage={manage}
-              reportPath={reportPath}
-              selection={selection}
-            />
-          ))}
+          {subspaces.length > 0 && (
+            <SortableContext
+              items={subspaceSortIds('contents', subspaces)}
+              strategy={verticalListSortingStrategy}
+            >
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {subspaces.map((subspace) => (
+                  <SubspacePanel
+                    key={subspace.subspace_id}
+                    subspace={subspace}
+                    reports={reports.filter(
+                      (r) => r.subspace_id === subspace.subspace_id,
+                    )}
+                    overviewId={overviewId}
+                    manage={manage}
+                    reportPath={reportPath}
+                    selection={selection}
+                  />
+                ))}
+              </Box>
+            </SortableContext>
+          )}
         </Box>
       )}
 
@@ -412,9 +427,107 @@ function ActionBar({ manage }: { manage: SpaceManagement }) {
   );
 }
 
-function ReportSection({
+function SectionCount({ count }: { count: number }) {
+  return (
+    <Typography
+      variant="body2"
+      color="text.secondary"
+      sx={{ fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}
+    >
+      {count}
+    </Typography>
+  );
+}
+
+function DropHint() {
+  return (
+    <Typography
+      variant="body2"
+      color="primary"
+      sx={{ fontWeight: 600, flexShrink: 0 }}
+    >
+      Drop to move here
+    </Typography>
+  );
+}
+
+/** Select every report in a section, sitting in the rows' checkbox column. */
+function SelectAll({
+  reports,
   title,
-  subspace,
+  selection,
+}: {
+  reports: ReportListItem[];
+  title: string;
+  selection: Selection;
+}) {
+  if (reports.length === 0) {
+    // Nothing to select, but the heading keeps its column.
+    return <Box aria-hidden sx={{ flexShrink: 0, width: CHECKBOX_WIDTH }} />;
+  }
+  const picked = reports.filter(selection.has).length;
+  return (
+    <Checkbox
+      size="small"
+      checked={picked > 0 && picked === reports.length}
+      indeterminate={picked > 0 && picked < reports.length}
+      onChange={() => selection.toggleAll(reports)}
+      slotProps={{
+        input: { 'aria-label': `Select every report in ${title}` },
+      }}
+      sx={{ p: 0.5, flexShrink: 0 }}
+    />
+  );
+}
+
+function ReportList({
+  reports,
+  overviewId,
+  manage,
+  reportPath,
+  selection,
+  framed,
+}: {
+  reports: ReportListItem[];
+  overviewId: string | null;
+  manage: SpaceManagement;
+  reportPath: (reportId: string) => string;
+  selection: Selection;
+  /** Inside a panel: the panel's edge closes the list, not a rule. */
+  framed: boolean;
+}) {
+  return (
+    <Box
+      component="ul"
+      sx={{
+        listStyle: 'none',
+        m: 0,
+        p: 0,
+        ...(framed
+          ? { '& > li:last-of-type': { borderBottom: 0 } }
+          : { borderTop: 1, borderColor: 'divider' }),
+      }}
+    >
+      {reports.map((report) => (
+        <ReportRow
+          key={report.report_id}
+          report={report}
+          isOverview={report.report_id === overviewId}
+          manage={manage}
+          href={reportPath(report.report_id)}
+          selection={selection}
+        />
+      ))}
+    </Box>
+  );
+}
+
+/**
+ * The reports filed in no sub-space. Unframed, so they read as the space's
+ * loose contents, apart from the sub-space panels below.
+ */
+function TopLevelSection({
+  title,
   reports,
   overviewId,
   manage,
@@ -422,20 +535,14 @@ function ReportSection({
   selection,
 }: {
   title: string;
-  subspace?: SubspaceItem;
   reports: ReportListItem[];
   overviewId: string | null;
   manage: SpaceManagement;
   reportPath: (reportId: string) => string;
   selection: Selection;
 }) {
-  const headingId = `space-section-${subspace?.subspace_id ?? 'top'}`;
-  const drop = useSubspaceDrop(
-    'contents',
-    subspace?.subspace_id ?? null,
-    subspace?.name ?? 'the top level',
-  );
-  const picked = reports.filter(selection.has).length;
+  const headingId = 'space-section-top';
+  const drop = useSubspaceDrop('contents', null, 'the top level');
   return (
     <Box
       component="section"
@@ -450,33 +557,14 @@ function ReportSection({
         sx={{
           display: 'flex',
           alignItems: 'center',
-          gap: 1,
+          gap: `${ROW_GAP}px`,
           mb: 1,
           minHeight: 32,
+          pl: selection.enabled ? `${ROW_PAD + GRIP_WIDTH + ROW_GAP}px` : 1.5,
         }}
       >
-        {selection.enabled && reports.length > 0 && (
-          <Checkbox
-            size="small"
-            checked={picked > 0 && picked === reports.length}
-            indeterminate={picked > 0 && picked < reports.length}
-            onChange={() => selection.toggleAll(reports)}
-            slotProps={{
-              input: { 'aria-label': `Select every report in ${title}` },
-            }}
-            // In the rows' checkbox column, past the grip.
-            sx={{ p: 0.5, ml: `${ROW_PAD + GRIP_WIDTH + ROW_GAP}px` }}
-          />
-        )}
-        {selection.enabled && reports.length === 0 && (
-          // Nothing to select, but the heading keeps its column.
-          <Box
-            aria-hidden
-            sx={{
-              flexShrink: 0,
-              width: ROW_PAD + GRIP_WIDTH + ROW_GAP + CHECKBOX_WIDTH,
-            }}
-          />
+        {selection.enabled && (
+          <SelectAll reports={reports} title={title} selection={selection} />
         )}
         <Typography
           id={headingId}
@@ -486,33 +574,170 @@ function ReportSection({
         >
           {title}
         </Typography>
-        <Typography
-          variant="body2"
-          color="text.secondary"
-          sx={{ fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}
-        >
-          {reports.length}
-        </Typography>
+        <SectionCount count={reports.length} />
         <Box sx={{ flex: 1 }} />
-        {drop.isOver && (
-          <Typography
-            variant="body2"
-            color="primary"
-            sx={{ fontWeight: 600, flexShrink: 0 }}
-          >
-            Drop to move here
-          </Typography>
+        {drop.isOver && <DropHint />}
+      </Box>
+
+      {reports.length === 0 ? (
+        <EmptySection manage={manage} />
+      ) : (
+        <ReportList
+          reports={reports}
+          overviewId={overviewId}
+          manage={manage}
+          reportPath={reportPath}
+          selection={selection}
+          framed={false}
+        />
+      )}
+    </Box>
+  );
+}
+
+/**
+ * One sub-space: a framed panel with its own header bar, reorderable by the
+ * grip at the header's start and a drop target for reports.
+ */
+function SubspacePanel({
+  subspace,
+  reports,
+  overviewId,
+  manage,
+  reportPath,
+  selection,
+}: {
+  subspace: SubspaceItem;
+  reports: ReportListItem[];
+  overviewId: string | null;
+  manage: SpaceManagement;
+  reportPath: (reportId: string) => string;
+  selection: Selection;
+}) {
+  const headingId = `space-section-${subspace.subspace_id}`;
+  const drop = useSubspaceDrop('contents', subspace.subspace_id, subspace.name);
+  const canReorder = manage.canWriteSpaces;
+  const sort = useSubspaceSort(
+    'contents',
+    subspace,
+    !canReorder || manage.moving,
+  );
+  // One element is both the reports' drop target and the sub-space's slot.
+  const setRef = (node: HTMLElement | null) => {
+    drop.setNodeRef(node);
+    sort.setNodeRef(node);
+  };
+  const leadPad = canReorder || selection.enabled;
+
+  return (
+    <Paper
+      variant="outlined"
+      component="section"
+      aria-labelledby={headingId}
+      ref={setRef}
+      style={sort.style}
+      sx={[
+        dropTargetSx(drop.live, drop.wouldMove, drop.isOver),
+        (theme) => ({
+          // After the drop-target look, which would otherwise square it off.
+          borderRadius: 1.5,
+          position: 'relative',
+          overflow: 'clip',
+          // The header band is the panel's lid: a clear step above the rows
+          // in both themes.
+          '& > .subspace-header': {
+            bgcolor: alpha(
+              theme.palette.primary.main,
+              dark(theme) ? 0.12 : 0.07,
+            ),
+            borderColor: alpha(
+              theme.palette.primary.main,
+              dark(theme) ? 0.25 : 0.18,
+            ),
+          },
+          // Lifted while it travels, above the panels sliding aside under it.
+          ...(sort.isDragging && {
+            zIndex: 2,
+            borderColor: 'primary.main',
+            boxShadow: `0 16px 36px ${alpha(theme.palette.common.black, dark(theme) ? 0.5 : 0.22)}`,
+            cursor: 'grabbing',
+          }),
+          '& .subspace-grip': { opacity: 0.55 },
+          '&:hover .subspace-grip, & .subspace-grip:focus-visible': {
+            opacity: 1,
+          },
+        }),
+      ]}
+    >
+      <Box
+        className="subspace-header"
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: `${ROW_GAP}px`,
+          minHeight: 48,
+          pl: leadPad ? `${ROW_PAD}px` : 1.5,
+          pr: 0.5,
+          borderBottom: 1,
+          borderColor: 'divider',
+        }}
+      >
+        {canReorder ? (
+          <Tooltip title="Drag to reorder" placement="top" disableInteractive>
+            <IconButton
+              ref={sort.setActivatorNodeRef}
+              className="subspace-grip"
+              size="small"
+              aria-label={`Reorder ${subspace.name}`}
+              {...sort.attributes}
+              {...sort.listeners}
+              sx={{
+                cursor: 'grab',
+                transition: 'opacity 150ms ease-out',
+                touchAction: 'none',
+                width: GRIP_WIDTH,
+                flexShrink: 0,
+                p: 0,
+              }}
+            >
+              <DragIndicatorIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        ) : (
+          selection.enabled && (
+            <Box aria-hidden sx={{ width: GRIP_WIDTH, flexShrink: 0 }} />
+          )
         )}
-        {subspace && manage.canWriteReports && reports.length > 0 && (
+        {selection.enabled && (
+          <SelectAll
+            reports={reports}
+            title={subspace.name}
+            selection={selection}
+          />
+        )}
+        <Typography
+          id={headingId}
+          variant="h5"
+          component="h2"
+          sx={{ minWidth: 0, overflowWrap: 'anywhere', py: 0.5 }}
+        >
+          {subspace.name}
+        </Typography>
+        <SectionCount count={reports.length} />
+        <Box sx={{ flex: 1 }} />
+        {drop.isOver && <DropHint />}
+        {manage.canWriteReports && reports.length > 0 && (
           <Button
             size="small"
             startIcon={<LibraryAddOutlinedIcon fontSize="small" />}
             onClick={() => manage.openAddReports(subspace.subspace_id)}
+            // On a phone the name needs the room; the menu offers it too.
+            sx={{ flexShrink: 0, display: { xs: 'none', sm: 'inline-flex' } }}
           >
             Add
           </Button>
         )}
-        {subspace && (manage.canWriteSpaces || manage.canWriteReports) && (
+        {(manage.canWriteSpaces || manage.canWriteReports) && (
           <RowMenu
             actions={manage.subspaceActions(subspace)}
             label={`${subspace.name} actions`}
@@ -522,31 +747,18 @@ function ReportSection({
       </Box>
 
       {reports.length === 0 ? (
-        <EmptySection subspace={subspace} manage={manage} />
+        <EmptyPanel subspace={subspace} manage={manage} />
       ) : (
-        <Box
-          component="ul"
-          sx={{
-            listStyle: 'none',
-            m: 0,
-            p: 0,
-            borderTop: 1,
-            borderColor: 'divider',
-          }}
-        >
-          {reports.map((report) => (
-            <ReportRow
-              key={report.report_id}
-              report={report}
-              isOverview={report.report_id === overviewId}
-              manage={manage}
-              href={reportPath(report.report_id)}
-              selection={selection}
-            />
-          ))}
-        </Box>
+        <ReportList
+          reports={reports}
+          overviewId={overviewId}
+          manage={manage}
+          reportPath={reportPath}
+          selection={selection}
+          framed
+        />
       )}
-    </Box>
+    </Paper>
   );
 }
 
@@ -692,13 +904,37 @@ function ReportRow({
   );
 }
 
-function EmptySection({
-  subspace,
+function EmptyActions({
+  subspaceId,
   manage,
 }: {
-  subspace?: SubspaceItem;
+  subspaceId: string | null;
   manage: SpaceManagement;
 }) {
+  if (!manage.canWriteReports) return null;
+  return (
+    <Box sx={{ display: 'flex', gap: 1 }}>
+      <Button
+        size="small"
+        variant="outlined"
+        startIcon={<LibraryAddOutlinedIcon fontSize="small" />}
+        onClick={() => manage.openAddReports(subspaceId)}
+      >
+        Add reports
+      </Button>
+      <Button
+        size="small"
+        startIcon={<PostAddOutlinedIcon fontSize="small" />}
+        onClick={() => manage.openCreateReport(subspaceId)}
+      >
+        New report
+      </Button>
+    </Box>
+  );
+}
+
+/** The empty top level, shown only as a target while a drag is live. */
+function EmptySection({ manage }: { manage: SpaceManagement }) {
   return (
     <Box
       sx={(theme) => ({
@@ -717,31 +953,40 @@ function EmptySection({
         color="text.secondary"
         sx={{ flex: 1, minWidth: 200 }}
       >
-        {subspace
-          ? `Nothing in ${subspace.name} yet.`
-          : 'No reports at the top level.'}
+        No reports at the top level.
       </Typography>
-      {manage.canWriteReports && (
-        <Box sx={{ display: 'flex', gap: 1 }}>
-          <Button
-            size="small"
-            variant="outlined"
-            startIcon={<LibraryAddOutlinedIcon fontSize="small" />}
-            onClick={() => manage.openAddReports(subspace?.subspace_id ?? null)}
-          >
-            Add reports
-          </Button>
-          <Button
-            size="small"
-            startIcon={<PostAddOutlinedIcon fontSize="small" />}
-            onClick={() =>
-              manage.openCreateReport(subspace?.subspace_id ?? null)
-            }
-          >
-            New report
-          </Button>
-        </Box>
-      )}
+      <EmptyActions subspaceId={null} manage={manage} />
+    </Box>
+  );
+}
+
+/** An empty sub-space's body: the panel already frames it. */
+function EmptyPanel({
+  subspace,
+  manage,
+}: {
+  subspace: SubspaceItem;
+  manage: SpaceManagement;
+}) {
+  return (
+    <Box
+      sx={{
+        px: 1.5,
+        py: 1.5,
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: 1.5,
+      }}
+    >
+      <Typography
+        variant="body2"
+        color="text.secondary"
+        sx={{ flex: 1, minWidth: 200 }}
+      >
+        Nothing in {subspace.name} yet.
+      </Typography>
+      <EmptyActions subspaceId={subspace.subspace_id} manage={manage} />
     </Box>
   );
 }

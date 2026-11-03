@@ -167,6 +167,7 @@ def mock_store():
         "get_subspace": None,
         "create_subspace": None,
         "update_subspace": None,
+        "reorder_subspaces": None,
         "delete_subspace": True,
         "set_space_overview": None,
     }

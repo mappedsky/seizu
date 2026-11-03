@@ -279,6 +279,10 @@ async def update_subspace(subspace_id: str, name: str, updated_by: str) -> Subsp
     return await get_store().update_subspace(subspace_id=subspace_id, name=name, updated_by=updated_by)
 
 
+async def reorder_subspaces(space_id: str, subspace_ids: list[str]) -> list[SubspaceItem] | None:
+    return await get_store().reorder_subspaces(space_id=space_id, subspace_ids=subspace_ids)
+
+
 async def delete_subspace(subspace_id: str) -> bool:
     return await get_store().delete_subspace(subspace_id)
 

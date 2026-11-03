@@ -80,6 +80,7 @@ const TREE = {
       subspace_id: 'ss1',
       space_id: 'sp1',
       name: 'Network',
+      position: 0,
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
       created_by: 'alice',
@@ -89,6 +90,7 @@ const TREE = {
       subspace_id: 'ss2',
       space_id: 'sp1',
       name: 'Empty Group',
+      position: 1,
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
       created_by: 'alice',
@@ -241,6 +243,7 @@ describe('SpaceDetail', () => {
       createSubspace: jest.fn(),
       updateSubspace: jest.fn(),
       deleteSubspace: jest.fn(),
+      reorderSubspaces: jest.fn().mockResolvedValue([]),
     });
     setSpaceOverview = jest.fn().mockResolvedValue(undefined);
     mockUseSpaceMutations.mockReturnValue({
@@ -869,6 +872,81 @@ describe('SpaceDetail', () => {
 
     expect(screen.queryByRole('checkbox')).toBeNull();
     expect(screen.queryByRole('button', { name: /^Move / })).toBeNull();
+  });
+
+  function sectionHeadings() {
+    return screen
+      .getAllByRole('heading', { level: 2 })
+      .map((heading) => heading.textContent);
+  }
+
+  function mockReorder(reorderSubspaces: jest.Mock) {
+    mockUseSubspaceMutations.mockReturnValue({
+      createSubspace: jest.fn(),
+      updateSubspace: jest.fn(),
+      deleteSubspace: jest.fn(),
+      reorderSubspaces,
+    });
+  }
+
+  it('moves a sub-space up from its menu, drawn before the save lands', async () => {
+    let finish: () => void = () => {};
+    const reorderSubspaces = jest.fn(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    mockReorder(reorderSubspaces);
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1/contents');
+    expect(sectionHeadings()).toEqual(['Top level', 'Network', 'Empty Group']);
+
+    // Already first: nowhere further up to go.
+    await user.click(screen.getByRole('button', { name: 'Network actions' }));
+    expect(screen.getByRole('menuitem', { name: 'Move up' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+    await user.keyboard('{Escape}');
+
+    await user.click(
+      screen.getByRole('button', { name: 'Empty Group actions' }),
+    );
+    await user.click(screen.getByRole('menuitem', { name: 'Move up' }));
+
+    // The whole order is sent, and drawn while the save is in flight.
+    expect(reorderSubspaces).toHaveBeenCalledWith(['ss2', 'ss1']);
+    expect(sectionHeadings()).toEqual(['Top level', 'Empty Group', 'Network']);
+    finish();
+  });
+
+  it('puts the order back and says so when a reorder fails', async () => {
+    const reorderSubspaces = jest
+      .fn()
+      .mockRejectedValue(new Error('subspace_ids must list every sub-space'));
+    mockReorder(reorderSubspaces);
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1/contents');
+
+    await user.click(screen.getByRole('button', { name: 'Network actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Move down' }));
+
+    expect(
+      await screen.findByText(/Could not reorder sub-spaces/),
+    ).toBeInTheDocument();
+    expect(sectionHeadings()).toEqual(['Top level', 'Network', 'Empty Group']);
+  });
+
+  it('offers sub-space reorder grips only with spaces:write', () => {
+    renderAt('/app/spaces/sp1/contents');
+    expect(
+      screen.getByRole('button', { name: 'Reorder Network' }),
+    ).toBeInTheDocument();
+    cleanup();
+
+    mockUsePermissions.mockReturnValue(
+      (permission: string) => permission !== 'spaces:write',
+    );
+    renderAt('/app/spaces/sp1/contents');
+    expect(screen.queryByRole('button', { name: /^Reorder / })).toBeNull();
   });
 
   it('marks the overview report with a star rather than a highlight', () => {

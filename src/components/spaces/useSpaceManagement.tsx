@@ -20,6 +20,8 @@ import {
 } from '@mui/material';
 import StarIcon from '@mui/icons-material/Star';
 import StarBorderIcon from '@mui/icons-material/StarBorder';
+import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
+import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import DeleteIcon from '@mui/icons-material/Delete';
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove';
 import EditIcon from '@mui/icons-material/Edit';
@@ -70,6 +72,11 @@ export interface SpaceManagement {
   removeReports: (reports: ReportListItem[]) => Promise<void>;
   /** A batch move or removal is running. */
   moving: boolean;
+  /**
+   * Put a sub-space where another one is, shifting those between. Drawn at
+   * once; reverted with an error if the save fails.
+   */
+  reorderSubspace: (subspaceId: string, overSubspaceId: string) => void;
   /** spaces:write — sub-spaces, the overview pointer, the space itself. */
   canWriteSpaces: boolean;
   /** spaces:delete — deleting sub-spaces. */
@@ -108,7 +115,7 @@ export function useSpaceManagement(
   const spaceId = tree?.space.space_id ?? '';
   const { createReport, setReportSpace } = useReportsMutations();
   const { setSpaceOverview, updateSpace } = useSpaceMutations();
-  const { createSubspace, updateSubspace, deleteSubspace } =
+  const { createSubspace, updateSubspace, deleteSubspace, reorderSubspaces } =
     useSubspaceMutations(spaceId);
 
   const canWriteSpaces = hasPermission('spaces:write');
@@ -157,21 +164,39 @@ export function useSpaceManagement(
     removed: string[];
   }>({ base: null, moves: {}, removed: [] });
   const bulk = useBulkAction<ReportListItem>(reportKey);
+  // Optimistic sub-space order, pinned to its tree the same way.
+  const [pendingOrder, setPendingOrder] = useState<{
+    base: SpaceTree | null;
+    ids: string[];
+  }>({ base: null, ids: [] });
 
   const view = useMemo<SpaceTree | null>(() => {
-    if (!tree || pending.base !== tree) return tree;
-    const removed = new Set(pending.removed);
+    if (!tree) return tree;
+    const placed = pending.base === tree;
+    const ordered = pendingOrder.base === tree;
+    if (!placed && !ordered) return tree;
+    const removed = new Set(placed ? pending.removed : []);
+    const rank = new Map(pendingOrder.ids.map((id, index) => [id, index]));
     return {
       ...tree,
-      reports: tree.reports
-        .filter((r) => !removed.has(r.report_id))
-        .map((r) =>
-          r.report_id in pending.moves
-            ? { ...r, subspace_id: pending.moves[r.report_id] }
-            : r,
-        ),
+      subspaces: ordered
+        ? [...tree.subspaces].sort(
+            (a, b) =>
+              (rank.get(a.subspace_id) ?? Infinity) -
+              (rank.get(b.subspace_id) ?? Infinity),
+          )
+        : tree.subspaces,
+      reports: placed
+        ? tree.reports
+            .filter((r) => !removed.has(r.report_id))
+            .map((r) =>
+              r.report_id in pending.moves
+                ? { ...r, subspace_id: pending.moves[r.report_id] }
+                : r,
+            )
+        : tree.reports,
     };
-  }, [tree, pending]);
+  }, [tree, pending, pendingOrder]);
 
   const subspaceLabel = (subspaceId: string | null) =>
     subspaceId === null
@@ -303,6 +328,25 @@ export function useSpaceManagement(
     }
   };
 
+  const reorderSubspace = (subspaceId: string, overSubspaceId: string) => {
+    if (!tree || !view) return;
+    const ids = view.subspaces.map((s) => s.subspace_id);
+    const from = ids.indexOf(subspaceId);
+    const to = ids.indexOf(overSubspaceId);
+    if (from === -1 || to === -1 || from === to) return;
+    ids.splice(to, 0, ...ids.splice(from, 1));
+    setPendingOrder({ base: tree, ids });
+    // The full list every time, so overlapping saves agree on the last one.
+    reorderSubspaces(ids).catch((err) => {
+      setPendingOrder((prev) =>
+        prev.ids === ids ? { base: null, ids: [] } : prev,
+      );
+      setActionError(
+        `Could not reorder sub-spaces: ${messageOf(err, 'failed')}`,
+      );
+    });
+  };
+
   const handleCreateReport = async () => {
     if (!createName.trim() || !spaceId) return;
     setCreating(true);
@@ -430,6 +474,38 @@ export function useSpaceManagement(
     ];
   };
 
+  const orderActions = (subspace: SubspaceItem): RowMenuAction[] => {
+    const order = view?.subspaces ?? [];
+    if (order.length < 2) return [];
+    const index = order.findIndex(
+      (s) => s.subspace_id === subspace.subspace_id,
+    );
+    const blocked = canWriteSpaces
+      ? undefined
+      : 'You do not have permission to reorder sub-spaces';
+    return [
+      {
+        key: 'up',
+        label: 'Move up',
+        icon: <ArrowUpwardIcon fontSize="small" />,
+        onClick: () =>
+          reorderSubspace(subspace.subspace_id, order[index - 1].subspace_id),
+        disabled: !canWriteSpaces || index <= 0,
+        tooltip: blocked,
+        dividerBefore: true,
+      },
+      {
+        key: 'down',
+        label: 'Move down',
+        icon: <ArrowDownwardIcon fontSize="small" />,
+        onClick: () =>
+          reorderSubspace(subspace.subspace_id, order[index + 1].subspace_id),
+        disabled: !canWriteSpaces || index >= order.length - 1,
+        tooltip: blocked,
+      },
+    ];
+  };
+
   const subspaceActions = (subspace: SubspaceItem): RowMenuAction[] => [
     {
       key: 'add',
@@ -464,6 +540,7 @@ export function useSpaceManagement(
       disabled: !canWriteSpaces,
       dividerBefore: true,
     },
+    ...orderActions(subspace),
     {
       key: 'delete',
       label: 'Delete',
@@ -695,6 +772,7 @@ export function useSpaceManagement(
     moveReports,
     removeReports,
     moving: bulk.running,
+    reorderSubspace,
     canWriteSpaces,
     canDeleteSpaces,
     canWriteReports,

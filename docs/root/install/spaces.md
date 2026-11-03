@@ -79,6 +79,12 @@ page, no description, and no content of their own.
 - **Create** one with **New sub-space** in the space sidebar's footer or on the contents page.
 - **Rename** or **delete** one from the menu on its heading. The same menu offers **Add reports
   here…** and **New report here…**, which file straight into that sub-space.
+- **Reorder** them on the contents page by dragging the grip at the start of a sub-space's header,
+  or with **Move up** / **Move down** in its menu (in the sidebar too). The dragged sub-space follows
+  the pointer and the others slide aside to show where it will go. From the keyboard, focus the
+  grip, press Space or Enter, use the arrow keys, and press Space or Enter again to drop. The new
+  order shows at once and is saved for everyone; reordering needs `spaces:write`.
+- New sub-spaces are added at the end.
 - Deleting a sub-space keeps its reports in the space; they move to the top level.
 - Deleting the space removes its sub-spaces along with it.
 
@@ -143,9 +149,9 @@ otherwise. `/app/spaces/<space_id>/contents` always shows the contents page; the
 the space name, links to it.
 
 The **contents page** carries the space's name and description (editable with **Edit**), its report
-and sub-space counts, and every member report grouped by sub-space with its last update. Empty
-sub-spaces show inline **Add reports** and **New report** actions, and an empty space explains what to
-do first.
+and sub-space counts, and every member report with its last update: reports at the top level first,
+then one framed panel per sub-space, in the space's sub-space order. Empty sub-spaces show inline
+**Add reports** and **New report** actions, and an empty space explains what to do first.
 
 The sidebar lists every report in the space — top level first, then one group per sub-space — with
 the overview report marked by a star. Its footer holds **Add reports**, **New report** and **New
@@ -185,6 +191,7 @@ GET    /api/v1/spaces/<space_id>/tree
 GET    /api/v1/spaces/<space_id>/subspaces
 POST   /api/v1/spaces/<space_id>/subspaces
 PUT    /api/v1/spaces/<space_id>/subspaces/<subspace_id>
+PUT    /api/v1/spaces/<space_id>/subspace-order
 DELETE /api/v1/spaces/<space_id>/subspaces/<subspace_id>
 PUT    /api/v1/reports/<report_id>/space
 ```
@@ -199,6 +206,12 @@ resolve it against.
 `PUT .../overview` takes `{"report_id": ...}`; the target must be a report filed in that space, and
 `null` clears the pointer. Its response echoes `overview_report_id` — the value the caller just set —
 which is why it is the one non-tree endpoint that reports the pointer.
+
+Sub-spaces are listed in their display order, everywhere they appear. `PUT .../subspace-order` takes
+`{"subspace_ids": [...]}`, the space's complete sub-space list in its new order. A list that leaves
+one out, repeats one, or names one from another space returns **400** and changes nothing, so a
+client working from a stale list finds out rather than half-applying it. Each sub-space carries its
+`position`.
 
 Spaces are not versioned, so there are no `/versions` endpoints.
 
@@ -236,7 +249,7 @@ The `spaces` built-in group exposes the same surface to MCP clients and the chat
 |---|---|
 | `spaces__list`, `spaces__get`, `spaces__get_tree`, `spaces__list_subspaces` | `spaces:read` |
 | `spaces__create`, `spaces__update`, `spaces__set_overview` | `spaces:write` |
-| `spaces__create_subspace`, `spaces__update_subspace` | `spaces:write` |
+| `spaces__create_subspace`, `spaces__update_subspace`, `spaces__reorder_subspaces` | `spaces:write` |
 | `spaces__delete`, `spaces__delete_subspace` | `spaces:delete` |
 | `spaces__set_report_space` | `reports:write` |
 
@@ -304,6 +317,11 @@ stored report config — otherwise restoring an old version would relocate the r
 
 Ordering is handled for you: spaces and sub-spaces are created first (filing needs the space to exist),
 then reports, then membership, then the overview pointers (which need the report filed).
+
+**Sub-spaces take the order the YAML lists them in.** An existing space whose sub-spaces are in a
+different order is reordered to match; sub-spaces the YAML does not name keep their relative order
+after the declared ones (seeding deletes nothing). An export writes them in their current order, so
+an exported config re-seeds to the same layout.
 
 A report whose YAML omits `space` is **left where it is** rather than pulled out of its space — the same
 "only act when the key is present" rule `pinned` follows. Removing a report from a space is a deliberate

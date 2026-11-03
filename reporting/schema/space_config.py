@@ -59,10 +59,17 @@ class SubspaceItem(BaseModel):
     subspace_id: str
     space_id: str
     name: str
+    # Display order within the space, ascending; ties fall back to creation
+    # order. Written only by reorder_subspaces and create_subspace (appends).
+    position: int = 0
     created_at: str
     updated_at: str
     created_by: str
     updated_by: str | None = None
+
+
+class SubspaceOrderError(Exception):
+    """A reorder did not list the space's sub-spaces exactly once each."""
 
 
 class SpaceConflictError(Exception):
@@ -144,6 +151,16 @@ class UpdateSubspaceRequest(BaseModel):
     @classmethod
     def validate_name(cls, v: str) -> str:
         return _strip_name(v)
+
+
+class ReorderSubspacesRequest(BaseModel):
+    """Request body for PUT /api/v1/spaces/<id>/subspace-order.
+
+    ``subspace_ids`` is the space's complete sub-space list in its new order:
+    every sub-space exactly once, nothing from another space.
+    """
+
+    subspace_ids: list[str]
 
 
 class SetReportSpaceRequest(BaseModel):

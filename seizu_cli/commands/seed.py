@@ -631,8 +631,52 @@ def _seed_spaces(
                 f"    [green][created][/green] '{result['subspace_id']}'  name='{sub_def.name}'  yaml_key='{sub_key}'"
             )
 
+        if existing_subspaces and not _apply_subspace_order(
+            space_id, space_def, space_key, existing_subspaces, subspace_ids, dry_run
+        ):
+            return seeded
+
     console.print(f"  Spaces: created={created} updated={updated} skipped={skipped}")
     return seeded
+
+
+def _apply_subspace_order(
+    space_id: str,
+    space_def: Any,
+    space_key: str,
+    existing_subspaces: dict[str, dict[str, Any]],
+    subspace_ids: dict[tuple[str, str], str | None],
+    dry_run: bool,
+) -> bool:
+    """Order an existing space's sub-spaces as the YAML lists them.
+
+    Sub-spaces the YAML does not name keep their relative order after the
+    declared ones; seeding deletes nothing. A space this run created is
+    already in YAML order. Returns False if the request failed.
+    """
+    server_order = [item["subspace_id"] for item in existing_subspaces.values()]
+    declared = [subspace_ids.get((space_key, key)) for key in space_def.subspaces]
+    if any(subspace_id is None for subspace_id in declared):
+        # A dry run left a sub-space uncreated; there is nothing to order yet.
+        return True
+    declared_ids = [subspace_id for subspace_id in declared if subspace_id is not None]
+    current = server_order + [subspace_id for subspace_id in declared_ids if subspace_id not in server_order]
+    desired = declared_ids + [subspace_id for subspace_id in server_order if subspace_id not in declared_ids]
+    if desired == current:
+        return True
+    if dry_run:
+        console.print(f"    [yellow][dry-run][/yellow] would reorder sub-spaces of '{space_def.name}'")
+        return True
+    try:
+        state.get_client().put(
+            f"/api/v1/spaces/{space_id}/subspace-order",
+            json={"subspace_ids": desired},
+        )
+    except Exception as exc:
+        _die(exc)
+        return False
+    console.print(f"    [green][reordered][/green] sub-spaces of '{space_def.name}'")
+    return True
 
 
 def _apply_report_spaces(
