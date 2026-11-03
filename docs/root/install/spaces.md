@@ -151,10 +151,6 @@ The sidebar lists every report in the space — top level first, then one group 
 the overview report marked by a star. Its footer holds **Add reports**, **New report** and **New
 sub-space**, each shown only to users who hold the permission it needs.
 
-The **Spaces** index lists each space with its description, report count and its most recently
-updated reports, each linking straight into the space. Delete is disabled while a space still holds
-reports.
-
 Selecting a report navigates to `/app/spaces/<space_id>/reports/<report_id>`, so in-space reports are
 deep-linkable and browser back works. Opening a report that is not in the space shows an explicit
 message rather than silently redirecting.

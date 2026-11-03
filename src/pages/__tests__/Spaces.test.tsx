@@ -10,7 +10,6 @@ import { ThemeProvider, createTheme } from '@mui/material/styles';
 import Spaces from 'src/pages/Spaces';
 import * as spacesApiModule from 'src/hooks/useSpacesApi';
 import * as permissionsModule from 'src/hooks/usePermissions';
-import * as reportsApiModule from 'src/hooks/useReportsApi';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissions: jest.fn(),
@@ -60,24 +59,7 @@ function Wrapper({ children }: { children: React.ReactNode }) {
   );
 }
 
-function member(reportId: string, name: string, spaceId: string | null) {
-  return {
-    report_id: reportId,
-    name,
-    current_version: 1,
-    created_at: '2026-01-01T00:00:00Z',
-    updated_at: '2026-01-01T00:00:00Z',
-    created_by: 'alice',
-    updated_by: 'alice',
-    access: { scope: 'public' as const },
-    pinned: false,
-    space_id: spaceId,
-    subspace_id: null,
-  };
-}
-
 describe('Spaces', () => {
-  let mockUseReportsList: jest.Mock;
   let createSpace: jest.Mock;
   let updateSpace: jest.Mock;
   let deleteSpace: jest.Mock;
@@ -90,20 +72,6 @@ describe('Spaces', () => {
     updateSpace = jest.fn().mockResolvedValue(SPACES[0]);
     deleteSpace = jest.fn().mockResolvedValue(undefined);
     mockUsePermissions.mockReturnValue(() => true);
-    // spyOn, not jest.mock: useReportsApi is shared by many suites.
-    mockUseReportsList = jest.spyOn(
-      reportsApiModule,
-      'useReportsList',
-    ) as unknown as jest.Mock;
-    mockUseReportsList.mockReturnValue({
-      reports: [],
-      total: 0,
-      page: 1,
-      perPage: 500,
-      loading: false,
-      error: null,
-      refresh: jest.fn(),
-    });
     mockUseSpacesList.mockReturnValue({
       spaces: SPACES,
       loading: false,
@@ -117,10 +85,7 @@ describe('Spaces', () => {
     });
   });
 
-  afterEach(() => {
-    cleanup();
-    mockUseReportsList.mockRestore?.();
-  });
+  afterEach(cleanup);
 
   it('renders the space list', () => {
     render(<Spaces />, { wrapper: Wrapper });
@@ -139,9 +104,8 @@ describe('Spaces', () => {
 
     render(<Spaces />, { wrapper: Wrapper });
 
-    expect(screen.getByText('No spaces yet')).toBeInTheDocument();
     expect(
-      screen.getByRole('button', { name: /create the first space/i }),
+      screen.getByText('No spaces yet. Create one above.'),
     ).toBeInTheDocument();
   });
 
@@ -169,49 +133,6 @@ describe('Spaces', () => {
     await waitFor(() => {
       expect(createSpace).toHaveBeenCalledWith('Identity', '');
     });
-  });
-
-  it("names each space's member reports, linking into the space", () => {
-    mockUseReportsList.mockReturnValue({
-      reports: [
-        member('r1', 'Public Buckets', 'sp1'),
-        member('r2', 'Unfiled', null),
-      ],
-      total: 2,
-      page: 1,
-      perPage: 500,
-      loading: false,
-      error: null,
-      refresh: jest.fn(),
-    });
-
-    render(<Spaces />, { wrapper: Wrapper });
-
-    expect(screen.getByText('1 report')).toBeInTheDocument();
-    expect(
-      screen.getByRole('link', { name: 'Public Buckets' }),
-    ).toHaveAttribute('href', '/app/spaces/sp1/reports/r1');
-    expect(screen.queryByText('Unfiled')).toBeNull();
-  });
-
-  it('disables delete while a space still holds reports', () => {
-    mockUseReportsList.mockReturnValue({
-      reports: [member('r1', 'Public Buckets', 'sp1')],
-      total: 1,
-      page: 1,
-      perPage: 500,
-      loading: false,
-      error: null,
-      refresh: jest.fn(),
-    });
-
-    render(<Spaces />, { wrapper: Wrapper });
-
-    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
-    expect(screen.getByRole('menuitem', { name: 'Delete' })).toHaveAttribute(
-      'aria-disabled',
-      'true',
-    );
   });
 
   it('surfaces the 409 detail when deleting a non-empty space', async () => {
