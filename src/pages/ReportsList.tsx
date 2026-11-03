@@ -818,8 +818,12 @@ function ReportsList() {
           currentSubspaceId={null}
           onClose={() => setBulkMoveOpen(false)}
           onConfirm={async (spaceId, subspaceId) => {
+            // runBulk reloads once at the end; per-item broadcasts would
+            // reload every mounted list once per report.
             await runBulk('Move to space', selectedReports, (report) =>
-              setReportSpace(report.report_id, spaceId, subspaceId),
+              setReportSpace(report.report_id, spaceId, subspaceId, {
+                notify: false,
+              }),
             );
           }}
         />

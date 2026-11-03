@@ -488,7 +488,10 @@ describe('ReportsList', () => {
     await user.click(screen.getByRole('button', { name: 'Move' }));
 
     await waitFor(() => {
-      expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', null);
+      // The list reloads once after the batch, not once per report.
+      expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', null, {
+        notify: false,
+      });
     });
   });
 

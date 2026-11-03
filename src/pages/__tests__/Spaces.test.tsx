@@ -128,7 +128,7 @@ describe('Spaces', () => {
     fireEvent.change(screen.getByRole('textbox', { name: /^name/i }), {
       target: { value: 'Identity' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create space' }));
 
     await waitFor(() => {
       expect(createSpace).toHaveBeenCalledWith('Identity', '');

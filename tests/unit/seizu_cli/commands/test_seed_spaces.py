@@ -598,3 +598,76 @@ def test_export_still_writes_a_skillset_that_only_has_a_projection(mock_client: 
     written = seed.schema.load_file(str(config))
     assert set(written.skillsets) == {"incident_response"}
     assert written.skillsets["incident_response"].skills["review_alert"].tools_required == ["graph__query"]
+
+
+_ORDERED_CONFIG = """
+spaces:
+  security:
+    name: Security
+    subspaces:
+      identity:
+        name: Identity
+      vulns:
+        name: Vulnerabilities
+""".lstrip()
+
+
+def _existing_subspaces(*names: str) -> dict[str, Any]:
+    return {
+        "subspaces": [
+            {"subspace_id": f"ss-{name.lower()}", "space_id": "s1", "name": name, "position": index}
+            for index, name in enumerate(names)
+        ]
+    }
+
+
+def test_seed_orders_existing_subspaces_as_the_yaml_lists_them(mock_client: MagicMock, tmp_path: Path) -> None:
+    """Undeclared sub-spaces keep their place after the declared ones; nothing is deleted."""
+    config = tmp_path / "c.yaml"
+    config.write_text(_ORDERED_CONFIG)
+    mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
+        "/api/v1/spaces": {"spaces": [_space_row()]},
+        "/api/v1/spaces/s1/subspaces": _existing_subspaces("Vulnerabilities", "Extra", "Identity"),
+        "/api/v1/spaces/s1/tree": {"space": _space_row(), "subspaces": [], "reports": []},
+        "/api/v1/reports": {"reports": []},
+    }[path]
+
+    seed.seed_cmd(str(config), force=False, dry_run=False)
+
+    puts = {call.args[0]: call.kwargs.get("json") for call in mock_client.put.call_args_list}
+    assert puts["/api/v1/spaces/s1/subspace-order"] == {
+        "subspace_ids": ["ss-identity", "ss-vulnerabilities", "ss-extra"]
+    }
+
+
+def test_seed_leaves_subspaces_already_in_yaml_order_alone(mock_client: MagicMock, tmp_path: Path) -> None:
+    config = tmp_path / "c.yaml"
+    config.write_text(_ORDERED_CONFIG)
+    mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
+        "/api/v1/spaces": {"spaces": [_space_row()]},
+        "/api/v1/spaces/s1/subspaces": _existing_subspaces("Identity", "Vulnerabilities", "Extra"),
+        "/api/v1/spaces/s1/tree": {"space": _space_row(), "subspaces": [], "reports": []},
+        "/api/v1/reports": {"reports": []},
+    }[path]
+
+    seed.seed_cmd(str(config), force=False, dry_run=False)
+
+    assert all(call.args[0] != "/api/v1/spaces/s1/subspace-order" for call in mock_client.put.call_args_list)
+
+
+def test_seed_dry_run_does_not_reorder(mock_client: MagicMock, tmp_path: Path) -> None:
+    config = tmp_path / "c.yaml"
+    config.write_text(_ORDERED_CONFIG)
+    mock_client.get.side_effect = lambda path: {
+        "/api/v1/model-profiles": {"profiles": []},
+        "/api/v1/spaces": {"spaces": [_space_row()]},
+        "/api/v1/spaces/s1/subspaces": _existing_subspaces("Vulnerabilities", "Identity"),
+        "/api/v1/spaces/s1/tree": {"space": _space_row(), "subspaces": [], "reports": []},
+        "/api/v1/reports": {"reports": []},
+    }[path]
+
+    seed.seed_cmd(str(config), force=False, dry_run=True)
+
+    mock_client.put.assert_not_called()

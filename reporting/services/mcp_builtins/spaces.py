@@ -21,12 +21,14 @@ from reporting.schema.confirmations import ActionConfirmationTarget
 from reporting.schema.space_config import (
     CreateSpaceRequest,
     CreateSubspaceRequest,
+    ReorderSubspacesRequest,
     SetReportSpaceRequest,
     SetSpaceOverviewRequest,
     SpaceConflictError,
     SpaceDeleteResult,
     SpaceListItem,
     SubspaceItem,
+    SubspaceOrderError,
     UpdateSpaceRequest,
     UpdateSubspaceRequest,
 )
@@ -232,6 +234,18 @@ async def _update_subspace(args: dict[str, Any], current_user: CurrentUser | Non
     return updated.model_dump()
 
 
+async def _reorder_subspaces(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
+    space_id = args["space_id"]
+    body = ReorderSubspacesRequest.model_validate({k: v for k, v in args.items() if k != "space_id"})
+    try:
+        reordered = await report_store.reorder_subspaces(space_id, body.subspace_ids)
+    except SubspaceOrderError as exc:
+        return {"error": str(exc)}
+    if reordered is None:
+        return {"error": "Space not found"}
+    return {"subspaces": [s.model_dump() for s in reordered]}
+
+
 async def _delete_subspace(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     space_id = args["space_id"]
     subspace_id = args["subspace_id"]
@@ -317,6 +331,10 @@ async def _confirm_subspace_create(args: dict[str, Any], current_user: CurrentUs
 
 async def _confirm_subspace_update(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget:
     return _target("update", "subspace", args["subspace_id"])
+
+
+async def _confirm_subspace_reorder(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget:
+    return _target("reorder_subspaces", "space", args["space_id"])
 
 
 async def _confirm_subspace_delete(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget:
@@ -468,6 +486,23 @@ GROUP_DEF = BuiltinGroup(
             handler=_update_subspace,
             requires_user=True,
             confirmation=_confirm_subspace_update,
+        ),
+        BuiltinTool(
+            name="spaces__reorder_subspaces",
+            group=GROUP,
+            description=(
+                "Set the display order of a space's sub-spaces. subspace_ids must list every sub-space of the "
+                "space exactly once, in the new order."
+            ),
+            input_schema=model_input_schema(
+                ReorderSubspacesRequest,
+                extra_properties=_space_id_prop(),
+                extra_required=["space_id"],
+            ),
+            required_permissions=[Permission.SPACES_WRITE.value],
+            handler=_reorder_subspaces,
+            collection_key="subspaces",
+            confirmation=_confirm_subspace_reorder,
         ),
         BuiltinTool(
             name="spaces__delete_subspace",

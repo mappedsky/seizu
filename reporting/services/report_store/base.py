@@ -592,6 +592,15 @@ class ReportStore(ABC):
         """Rename a sub-space. Returns None if it does not exist."""
 
     @abstractmethod
+    async def reorder_subspaces(self, space_id: str, subspace_ids: list[str]) -> list[SubspaceItem] | None:
+        """Set a space's sub-space order and return the reordered list.
+
+        ``subspace_ids`` must name every sub-space of the space exactly once,
+        or ``SubspaceOrderError`` is raised and nothing changes. Returns None
+        if the space does not exist.
+        """
+
+    @abstractmethod
     async def delete_subspace(self, subspace_id: str) -> bool:
         """Delete a sub-space. Returns False if it does not exist.
 

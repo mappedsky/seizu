@@ -454,3 +454,31 @@ async def test_every_mutating_space_tool_is_confirmation_gated():
             continue
         assert tool.confirmation is not None, f"{tool.name} is not confirmation-gated"
         assert not tool.chat_safe_without_confirmation, f"{tool.name} claims a no-confirmation exception"
+
+
+async def test_reorder_subspaces_returns_the_new_order():
+    with _patch(
+        "reorder_subspaces",
+        return_value=[_subspace("ss2", name="Identity"), _subspace("ss1")],
+    ) as mock_reorder:
+        data = await _call(
+            _build_mcp_server(),
+            "spaces__reorder_subspaces",
+            {"space_id": "s1", "subspace_ids": ["ss2", "ss1"]},
+        )
+
+    assert [s["subspace_id"] for s in data["subspaces"]] == ["ss2", "ss1"]
+    mock_reorder.assert_awaited_once_with("s1", ["ss2", "ss1"])
+
+
+async def test_reorder_subspaces_reports_an_incomplete_list():
+    from reporting.schema.space_config import SubspaceOrderError
+
+    with _patch("reorder_subspaces", side_effect=SubspaceOrderError("must list every sub-space")):
+        data = await _call(
+            _build_mcp_server(),
+            "spaces__reorder_subspaces",
+            {"space_id": "s1", "subspace_ids": ["ss1"]},
+        )
+
+    assert data == {"error": "must list every sub-space"}

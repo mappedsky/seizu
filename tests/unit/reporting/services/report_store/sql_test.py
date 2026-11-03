@@ -25,7 +25,7 @@ from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.plugins import PluginFile
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
-from reporting.schema.space_config import SpaceConflictError, SpaceDeleteResult, SubspaceItem
+from reporting.schema.space_config import SpaceConflictError, SpaceDeleteResult, SubspaceItem, SubspaceOrderError
 from reporting.services.plugin_packages import legacy_skillset_package
 from reporting.services.report_store import sql as sql_module
 from reporting.services.report_store.base import PluginRevisionConflict
@@ -2836,6 +2836,55 @@ async def test_subspace_crud(store):
     assert await store.delete_subspace(sub.subspace_id) is True
     assert await store.get_subspace(sub.subspace_id) is None
     assert await store.list_subspaces(space.space_id) == []
+
+
+async def test_subspaces_list_in_creation_order_and_append(store):
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+    first = await store.create_subspace(space_id=space.space_id, name="Network", created_by="u1")
+    second = await store.create_subspace(space_id=space.space_id, name="Identity", created_by="u1")
+    assert (first.position, second.position) == (0, 1)
+    assert [s.subspace_id for s in await store.list_subspaces(space.space_id)] == [
+        first.subspace_id,
+        second.subspace_id,
+    ]
+
+
+async def test_reorder_subspaces(store):
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+    a = await store.create_subspace(space_id=space.space_id, name="A", created_by="u1")
+    b = await store.create_subspace(space_id=space.space_id, name="B", created_by="u1")
+    c = await store.create_subspace(space_id=space.space_id, name="C", created_by="u1")
+
+    reordered = await store.reorder_subspaces(space.space_id, [c.subspace_id, a.subspace_id, b.subspace_id])
+
+    assert reordered is not None
+    assert [s.name for s in reordered] == ["C", "A", "B"]
+    assert [s.name for s in await store.list_subspaces(space.space_id)] == ["C", "A", "B"]
+    # Order is presentation: a reorder does not restamp who last edited.
+    assert {s.updated_at for s in reordered} == {a.updated_at, b.updated_at, c.updated_at}
+    # A sub-space created afterwards still goes last.
+    d = await store.create_subspace(space_id=space.space_id, name="D", created_by="u1")
+    assert [s.subspace_id for s in await store.list_subspaces(space.space_id)][-1] == d.subspace_id
+
+
+async def test_reorder_subspaces_rejects_anything_but_the_full_set(store):
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+    other = await store.create_space(name="Other", description="", created_by="u1")
+    a = await store.create_subspace(space_id=space.space_id, name="A", created_by="u1")
+    b = await store.create_subspace(space_id=space.space_id, name="B", created_by="u1")
+    foreign = await store.create_subspace(space_id=other.space_id, name="X", created_by="u1")
+
+    for bad in (
+        [a.subspace_id],
+        [a.subspace_id, a.subspace_id],
+        [a.subspace_id, b.subspace_id, foreign.subspace_id],
+        [b.subspace_id, foreign.subspace_id],
+    ):
+        with pytest.raises(SubspaceOrderError):
+            await store.reorder_subspaces(space.space_id, bad)
+
+    assert [s.name for s in await store.list_subspaces(space.space_id)] == ["A", "B"]
+    assert await store.reorder_subspaces("missing", []) is None
 
 
 async def test_update_and_delete_subspace_not_found(store):

@@ -74,6 +74,7 @@ from reporting.schema.space_config import (
     SpaceDeleteResult,
     SpaceListItem,
     SubspaceItem,
+    SubspaceOrderError,
 )
 from reporting.services.report_store.base import (
     PluginRevisionConflict,
@@ -170,6 +171,7 @@ class SubspaceRecord(SQLModel, table=True):  # type: ignore
     # this module declares no FKs and cascades by hand.
     space_id: str = Field(index=True)
     name: str
+    position: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
     created_at: str
     updated_at: str
     created_by: str
@@ -853,6 +855,7 @@ def _subspace_from_record(record: SubspaceRecord) -> SubspaceItem:
         subspace_id=record.subspace_id,
         space_id=record.space_id,
         name=record.name,
+        position=record.position,
         created_at=record.created_at,
         updated_at=record.updated_at,
         created_by=record.created_by,
@@ -2229,7 +2232,15 @@ class SQLModelReportStore(ReportStore):
 
     async def list_subspaces(self, space_id: str) -> list[SubspaceItem]:
         async with AsyncSession(_get_engine()) as session:
-            result = await session.execute(select(SubspaceRecord).where(SubspaceRecord.space_id == space_id))
+            result = await session.execute(
+                select(SubspaceRecord)
+                .where(SubspaceRecord.space_id == space_id)
+                .order_by(
+                    col(SubspaceRecord.position),
+                    col(SubspaceRecord.created_at),
+                    col(SubspaceRecord.subspace_id),
+                )
+            )
             return [_subspace_from_record(r) for r in result.scalars().all()]
 
     async def get_subspace(self, subspace_id: str) -> SubspaceItem | None:
@@ -2246,11 +2257,18 @@ class SQLModelReportStore(ReportStore):
         async with AsyncSession(_get_engine()) as session:
             if await session.get(SpaceRecord, space_id) is None:
                 return None
+            last = (
+                await session.execute(
+                    select(func.max(col(SubspaceRecord.position))).where(SubspaceRecord.space_id == space_id)
+                )
+            ).scalar_one_or_none()
             now = datetime.now(tz=UTC).isoformat()
             record = SubspaceRecord(
                 subspace_id=generate_report_id(),
                 space_id=space_id,
                 name=name,
+                # Appended: a new sub-space goes last.
+                position=0 if last is None else last + 1,
                 created_at=now,
                 updated_at=now,
                 created_by=created_by,
@@ -2278,6 +2296,34 @@ class SQLModelReportStore(ReportStore):
             await session.commit()
             await session.refresh(record)
             return _subspace_from_record(record)
+
+    async def reorder_subspaces(self, space_id: str, subspace_ids: list[str]) -> list[SubspaceItem] | None:
+        async with AsyncSession(_get_engine()) as session:
+            if await session.get(SpaceRecord, space_id) is None:
+                return None
+            # Locked so a sub-space created mid-reorder makes the list stale
+            # (and the call a SubspaceOrderError) rather than silently unordered.
+            records = (
+                (
+                    await session.execute(
+                        select(SubspaceRecord).where(SubspaceRecord.space_id == space_id).with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            by_id = {record.subspace_id: record for record in records}
+            if len(subspace_ids) != len(set(subspace_ids)) or set(subspace_ids) != set(by_id):
+                raise SubspaceOrderError("subspace_ids must list every sub-space of this space exactly once")
+            for position, subspace_id in enumerate(subspace_ids):
+                record = by_id[subspace_id]
+                # Order is presentation, not content: updated_at/updated_by
+                # stay as the last rename left them.
+                if record.position != position:
+                    record.position = position
+                    session.add(record)
+            await session.commit()
+        return await self.list_subspaces(space_id)
 
     async def delete_subspace(self, subspace_id: str) -> bool:
         async with AsyncSession(_get_engine()) as session:
