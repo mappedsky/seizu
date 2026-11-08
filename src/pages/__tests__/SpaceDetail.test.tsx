@@ -176,6 +176,7 @@ describe('SpaceDetail', () => {
   let setSpaceOverview: jest.Mock;
   let mockUseReportsList: jest.Mock;
   let mockUseSpacesList: jest.Mock;
+  let mockUseSubspacesList: jest.Mock;
   let mockUseCurrentUser: jest.Mock;
 
   beforeEach(() => {
@@ -209,6 +210,26 @@ describe('SpaceDetail', () => {
       spacesApiModule,
       'useSpacesList',
     ) as unknown as jest.Mock;
+    // The move-to-space dialog lists the chosen space's sub-spaces.
+    mockUseSubspacesList = jest.spyOn(
+      spacesApiModule,
+      'useSubspacesList',
+    ) as unknown as jest.Mock;
+    mockUseSubspacesList.mockImplementation((id: string | null) => ({
+      subspaces:
+        id === 'sp2'
+          ? [
+              {
+                ...TREE.subspaces[0],
+                subspace_id: 'ss9',
+                space_id: 'sp2',
+                name: 'Okta',
+              },
+            ]
+          : [],
+      loading: false,
+      error: null,
+    }));
     mockUseCurrentUser = jest.spyOn(
       currentUserModule,
       'useCurrentUser',
@@ -266,6 +287,7 @@ describe('SpaceDetail', () => {
     mockUseSpaceMutations.mockRestore?.();
     mockUseReportsList.mockRestore?.();
     mockUseSpacesList.mockRestore?.();
+    mockUseSubspacesList.mockRestore?.();
     mockUseCurrentUser.mockRestore?.();
   });
 
@@ -845,6 +867,124 @@ describe('SpaceDetail', () => {
     } finally {
       notify.mockRestore();
     }
+  });
+
+  it('moves a report to another space, offering only the other spaces', async () => {
+    const setReportSpace = jest.fn().mockResolvedValue(undefined);
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace,
+    });
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1/contents');
+
+    await user.click(screen.getAllByLabelText('Report actions')[0]);
+    await user.click(
+      screen.getByRole('menuitem', { name: 'Move to another space…' }),
+    );
+    const dialog = screen.getByRole('dialog', {
+      name: 'Move “Loose Report” to another space',
+    });
+    const move = within(dialog).getByRole('button', { name: 'Move' });
+    expect(move).toBeDisabled();
+
+    await user.click(within(dialog).getByRole('combobox', { name: 'Space' }));
+    expect(screen.queryByRole('option', { name: 'Cloud Security' })).toBeNull();
+    expect(screen.queryByRole('option', { name: 'None' })).toBeNull();
+    await user.click(screen.getByRole('option', { name: 'Identity' }));
+    await user.click(
+      within(dialog).getByRole('combobox', { name: 'Sub-space' }),
+    );
+    await user.click(screen.getByRole('option', { name: 'Okta' }));
+    await user.click(move);
+
+    await waitFor(() => {
+      expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp2', 'ss9', {
+        notify: false,
+      });
+    });
+    // Gone from this space at once, with a way to follow it.
+    expect(
+      screen.queryByRole('checkbox', { name: 'Select Loose Report' }),
+    ).toBeNull();
+    expect(
+      await screen.findByText('Moved “Loose Report” to Identity › Okta'),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Open space' }));
+    expect(screen.getByTestId('location')).toHaveTextContent(
+      '/app/spaces/sp2/contents',
+    );
+  });
+
+  it('follows the open report when it moves to another space', async () => {
+    const setReportSpace = jest.fn().mockResolvedValue(undefined);
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace,
+    });
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1/reports/r2');
+
+    const scroll = screen.getByTestId('space-reports-scroll');
+    const row = within(scroll)
+      .getByRole('button', { name: 'Grouped Report' })
+      .closest('li')!;
+    await user.click(within(row).getByLabelText('Report actions'));
+    await user.click(
+      screen.getByRole('menuitem', { name: 'Move to another space…' }),
+    );
+    const dialog = screen.getByRole('dialog');
+    await user.click(within(dialog).getByRole('combobox', { name: 'Space' }));
+    await user.click(screen.getByRole('option', { name: 'Identity' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Move' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('location')).toHaveTextContent(
+        '/app/spaces/sp2/reports/r2',
+      ),
+    );
+    expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp2', null, {
+      notify: false,
+    });
+  });
+
+  it('moves a selection to another space from the selection bar', async () => {
+    const setReportSpace = jest.fn().mockResolvedValue(undefined);
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace,
+    });
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1/contents');
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select Loose Report' }),
+    );
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select Grouped Report' }),
+    );
+    const bar = screen.getByRole('region', { name: 'Selected reports' });
+    await user.click(within(bar).getByRole('button', { name: 'Move to…' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Another space…' }));
+
+    const dialog = screen.getByRole('dialog', {
+      name: 'Move 2 reports to another space',
+    });
+    await user.click(within(dialog).getByRole('combobox', { name: 'Space' }));
+    await user.click(screen.getByRole('option', { name: 'Identity' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Move' }));
+
+    await waitFor(() => {
+      expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp2', null, {
+        notify: false,
+      });
+      expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp2', null, {
+        notify: false,
+      });
+    });
+    expect(
+      screen.queryByRole('region', { name: 'Selected reports' }),
+    ).toBeNull();
   });
 
   it('selects a whole sub-space from its heading', async () => {

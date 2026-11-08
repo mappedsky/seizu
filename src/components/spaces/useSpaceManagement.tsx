@@ -24,12 +24,16 @@ import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import DeleteIcon from '@mui/icons-material/Delete';
 import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove';
+import DriveFileMoveOutlinedIcon from '@mui/icons-material/DriveFileMoveOutlined';
 import EditIcon from '@mui/icons-material/Edit';
 import LibraryAddOutlinedIcon from '@mui/icons-material/LibraryAddOutlined';
 import PostAddOutlinedIcon from '@mui/icons-material/PostAddOutlined';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutlined';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
+import MoveToSpaceDialog, {
+  type MovePlacementNames,
+} from 'src/components/MoveToSpaceDialog';
 import type { RowMenuAction } from 'src/components/RowMenu';
 import AddReportsDrawer from 'src/components/spaces/AddReportsDrawer';
 import SpaceDialog from 'src/components/spaces/SpaceDialog';
@@ -70,6 +74,8 @@ export interface SpaceManagement {
   ) => Promise<void>;
   /** Take reports out of the space, one reload at the end. */
   removeReports: (reports: ReportListItem[]) => Promise<void>;
+  /** Pick another space (and sub-space) for these reports, then move them. */
+  openMoveToSpace: (reports: ReportListItem[]) => void;
   /** A batch move or removal is running. */
   moving: boolean;
   /**
@@ -122,7 +128,13 @@ export function useSpaceManagement(
   const canDeleteSpaces = hasPermission('spaces:delete');
   const canWriteReports = hasPermission('reports:write');
 
-  const [toast, setToast] = useState<string | null>(null);
+  const [toastState, setToastState] = useState<{
+    message: string;
+    /** Where the toast's “Open” action goes, when the change lands elsewhere. */
+    href?: string;
+  } | null>(null);
+  const setToast = (message: string | null, href?: string) =>
+    setToastState(message === null ? null : { message, href });
   const [actionError, setActionError] = useState<string | null>(null);
 
   // Add existing reports
@@ -151,6 +163,10 @@ export function useSpaceManagement(
 
   // Move within the space
   const [moveTarget, setMoveTarget] = useState<ReportListItem | null>(null);
+  // Move to another space
+  const [spaceMoveTargets, setSpaceMoveTargets] = useState<
+    ReportListItem[] | null
+  >(null);
 
   // Edit space
   const [editOpen, setEditOpen] = useState(false);
@@ -177,8 +193,15 @@ export function useSpaceManagement(
     if (!placed && !ordered) return tree;
     const removed = new Set(placed ? pending.removed : []);
     const rank = new Map(pendingOrder.ids.map((id, index) => [id, index]));
+    const overview = tree.space.overview_report_id;
     return {
       ...tree,
+      // The server blanks a pointer to a report that has left; so does the
+      // drawn tree, or the space root would briefly say the overview is gone.
+      space:
+        overview && removed.has(overview)
+          ? { ...tree.space, overview_report_id: null }
+          : tree.space,
       subspaces: ordered
         ? [...tree.subspaces].sort(
             (a, b) =>
@@ -328,6 +351,64 @@ export function useSpaceManagement(
     }
   };
 
+  const moveToSpace = async (
+    reports: ReportListItem[],
+    destSpaceId: string,
+    destSubspaceId: string | null,
+    names: MovePlacementNames,
+  ) => {
+    if (!tree || reports.length === 0 || destSpaceId === spaceId) return;
+    // Gone from this space as soon as the move starts, like a removal.
+    setPending((prev) => ({
+      base: tree,
+      moves: prev.base === tree ? prev.moves : {},
+      removed: [
+        ...(prev.base === tree ? prev.removed : []),
+        ...reports.map((r) => r.report_id),
+      ],
+    }));
+    const { succeeded, failed } = await bulk.run(
+      reports,
+      (report) =>
+        setReportSpace(report.report_id, destSpaceId, destSubspaceId, {
+          notify: false,
+        }),
+      notifyReportsUpdated,
+    );
+    if (failed.length > 0) {
+      setPending((prev) => ({
+        ...prev,
+        removed: prev.removed.filter(
+          (id) => !failed.some(({ item }) => item.report_id === id),
+        ),
+      }));
+      setActionError(
+        `${plural(failed.length, 'report')} could not be moved. ${reportFailures(failed)}`,
+      );
+    }
+    const destination = [names.spaceName ?? 'the space', names.subspaceName]
+      .filter(Boolean)
+      .join(' › ');
+    if (succeeded.length > 0) {
+      setToast(
+        succeeded.length === 1
+          ? `Moved “${succeeded[0].name}” to ${destination}`
+          : `Moved ${succeeded.length} reports to ${destination}`,
+        `/app/spaces/${destSpaceId}/contents`,
+      );
+    }
+    // The report on screen goes with its move: follow it to its new space.
+    if (openReportId && succeeded.some((r) => r.report_id === openReportId)) {
+      navigate(`/app/spaces/${destSpaceId}/reports/${openReportId}`, {
+        replace: true,
+      });
+    }
+  };
+
+  const openMoveToSpace = useCallback((reports: ReportListItem[]) => {
+    if (reports.length > 0) setSpaceMoveTargets(reports);
+  }, []);
+
   const reorderSubspace = (subspaceId: string, overSubspaceId: string) => {
     if (!tree || !view) return;
     const ids = view.subspaces.map((s) => s.subspace_id);
@@ -459,6 +540,17 @@ export function useSpaceManagement(
           : 'You do not have permission to change the space overview',
       },
       ...moveActions(report),
+      {
+        key: 'move-space',
+        label: 'Move to another space…',
+        icon: <DriveFileMoveOutlinedIcon fontSize="small" />,
+        onClick: () => openMoveToSpace([report]),
+        disabled: !canWriteReports || bulk.running,
+        tooltip: canWriteReports
+          ? undefined
+          : 'You do not have permission to move reports',
+        dividerBefore: (tree?.subspaces.length ?? 0) === 0,
+      },
       {
         key: 'remove',
         label: 'Remove from space',
@@ -721,6 +813,29 @@ export function useSpaceManagement(
         </DialogActions>
       </Dialog>
 
+      {spaceMoveTargets && (
+        <MoveToSpaceDialog
+          open
+          reportName={spaceMoveTargets[0].name}
+          title={
+            spaceMoveTargets.length === 1
+              ? `Move “${spaceMoveTargets[0].name}” to another space`
+              : `Move ${spaceMoveTargets.length} reports to another space`
+          }
+          currentSpaceId={null}
+          currentSubspaceId={null}
+          excludeSpaceId={spaceId}
+          onClose={() => setSpaceMoveTargets(null)}
+          onConfirm={async (destSpaceId, destSubspaceId, names) => {
+            if (!destSpaceId) return;
+            const reports = spaceMoveTargets;
+            setSpaceMoveTargets(null);
+            // Failures are reported per report by the batch, not in the dialog.
+            await moveToSpace(reports, destSpaceId, destSubspaceId, names);
+          }}
+        />
+      )}
+
       <ConfirmDeleteDialog
         open={!!deleteTarget}
         title="Delete sub-space?"
@@ -744,10 +859,25 @@ export function useSpaceManagement(
       />
 
       <Snackbar
-        open={!!toast}
-        autoHideDuration={4000}
+        open={!!toastState}
+        autoHideDuration={toastState?.href ? 6000 : 4000}
         onClose={() => setToast(null)}
-        message={toast}
+        message={toastState?.message}
+        action={
+          toastState?.href && (
+            <Button
+              color="primary"
+              size="small"
+              onClick={() => {
+                const href = toastState.href!;
+                setToast(null);
+                navigate(href);
+              }}
+            >
+              Open space
+            </Button>
+          )
+        }
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       />
       <Snackbar
@@ -771,6 +901,7 @@ export function useSpaceManagement(
     view,
     moveReports,
     removeReports,
+    openMoveToSpace,
     moving: bulk.running,
     reorderSubspace,
     canWriteSpaces,

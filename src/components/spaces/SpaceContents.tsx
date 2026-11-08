@@ -289,6 +289,13 @@ function SelectionBar({
     await manage.moveReports(selected, subspaceId);
   };
 
+  // The selection is left alone: a cancelled pick keeps it, and reports that
+  // do move drop out of it by leaving the space.
+  const moveElsewhere = () => {
+    setAnchor(null);
+    manage.openMoveToSpace(selected);
+  };
+
   return (
     <Paper
       role="region"
@@ -326,41 +333,42 @@ function SelectionBar({
       >
         {plural(selected.length, 'report')} selected
       </Typography>
-      {subspaces.length > 0 && (
-        <>
-          <Button
-            variant="contained"
-            size="small"
-            startIcon={<DriveFileMoveIcon fontSize="small" />}
-            onClick={(e) => setAnchor(e.currentTarget)}
-            disabled={manage.moving}
-            aria-haspopup="menu"
-          >
-            Move to…
-          </Button>
-          <Menu
-            anchorEl={anchor}
-            open={!!anchor}
-            onClose={() => setAnchor(null)}
-            anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
-            transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}
-          >
-            {targets.map((subspace, index) => {
-              const id = subspace?.subspace_id ?? null;
-              return [
-                index === 1 && <Divider key="divider" />,
-                <MenuItem
-                  key={id ?? 'top'}
-                  disabled={allIn(id)}
-                  onClick={() => void move(id)}
-                >
-                  {subspace?.name ?? 'Top level'}
-                </MenuItem>,
-              ];
-            })}
-          </Menu>
-        </>
-      )}
+      <Button
+        variant="contained"
+        size="small"
+        startIcon={<DriveFileMoveIcon fontSize="small" />}
+        // With no sub-spaces the only destination is another space.
+        onClick={(e) =>
+          subspaces.length > 0 ? setAnchor(e.currentTarget) : moveElsewhere()
+        }
+        disabled={manage.moving}
+        aria-haspopup={subspaces.length > 0 ? 'menu' : 'dialog'}
+      >
+        {subspaces.length > 0 ? 'Move to…' : 'Move to another space…'}
+      </Button>
+      <Menu
+        anchorEl={anchor}
+        open={!!anchor}
+        onClose={() => setAnchor(null)}
+        anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
+        transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+      >
+        {targets.map((subspace, index) => {
+          const id = subspace?.subspace_id ?? null;
+          return [
+            index === 1 && <Divider key="divider" />,
+            <MenuItem
+              key={id ?? 'top'}
+              disabled={allIn(id)}
+              onClick={() => void move(id)}
+            >
+              {subspace?.name ?? 'Top level'}
+            </MenuItem>,
+          ];
+        })}
+        <Divider />
+        <MenuItem onClick={moveElsewhere}>Another space…</MenuItem>
+      </Menu>
       <Button
         size="small"
         color="inherit"

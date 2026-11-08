@@ -140,6 +140,15 @@ A moved report shows in its new place immediately. The moves are then saved one 
 space reloads once at the end; a report that could not be moved returns to where it was, with the
 reason shown. Each report's menu also offers **Set as space overview** and **Remove from space**.
 
+### Moving reports to another space
+
+**Move to another space…** in a report's menu, or **Move to… › Another space…** in the selection
+bar, opens a picker listing every other space and, once one is chosen, its sub-spaces (the top level
+by default). The reports leave this space at once and the confirmation offers **Open space** to
+follow them. Moving the report you have open takes you with it, to the same report in its new space;
+so does **Move to space…** in the report's own menu. A report pinned as this space's overview stops
+being the overview when it leaves.
+
 Cloning a report inside a space produces a clone in the same space and sub-space.
 
 ## The space detail page

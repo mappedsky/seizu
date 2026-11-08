@@ -109,6 +109,17 @@ function SpaceDetail({
         id={activeReportId}
         reportPath={reportPath}
         stickyToolbar={false}
+        onSpaceChanged={(targetSpaceId) => {
+          // Moved out of this space: follow it, to its new space or to the
+          // standalone report route.
+          if (targetSpaceId === spaceId) return;
+          navigate(
+            targetSpaceId
+              ? `/app/spaces/${targetSpaceId}/reports/${activeReportId}`
+              : `/app/reports/${activeReportId}`,
+            { replace: true },
+          );
+        }}
       />
     );
   }

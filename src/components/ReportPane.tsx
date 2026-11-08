@@ -68,6 +68,12 @@ export interface ReportPaneProps {
    * pane instead.
    */
   stickyToolbar?: boolean;
+  /**
+   * Called after the report's space is changed from its menu, with where it
+   * now lives. A host that shows the report as part of a space uses it to
+   * follow the report rather than keep showing it where it no longer is.
+   */
+  onSpaceChanged?: (spaceId: string | null, subspaceId: string | null) => void;
 }
 
 function defaultReportPath(reportId: string) {
@@ -78,6 +84,7 @@ function ReportPane({
   id,
   reportPath = defaultReportPath,
   stickyToolbar = true,
+  onSpaceChanged,
 }: ReportPaneProps) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -467,6 +474,10 @@ function ReportPane({
                 spaceId: updated.space_id ?? null,
                 subspaceId: updated.subspace_id ?? null,
               });
+            onSpaceChanged?.(
+              updated.space_id ?? null,
+              updated.subspace_id ?? null,
+            );
           }}
         />
       )}
