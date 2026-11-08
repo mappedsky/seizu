@@ -363,6 +363,15 @@ export function useAllReports(): {
   return { reports, loading };
 }
 
+export interface MutationOptions {
+  /**
+   * Broadcast a report-list invalidation when the call succeeds (default).
+   * A batch passes false and notifies once when it finishes, rather than
+   * reloading every mounted list once per item.
+   */
+  notify?: boolean;
+}
+
 export function useReportsMutations(): {
   createReport: (
     name: string,
@@ -387,6 +396,7 @@ export function useReportsMutations(): {
     reportId: string,
     spaceId: string | null,
     subspaceId: string | null,
+    options?: MutationOptions,
   ) => Promise<ReportListItem>;
 } {
   const { accessToken } = useContext(AuthContext);
@@ -533,6 +543,7 @@ export function useReportsMutations(): {
       reportId: string,
       spaceId: string | null,
       subspaceId: string | null,
+      { notify = true }: MutationOptions = {},
     ): Promise<ReportListItem> => {
       // Replace semantics, matching the API: both fields describe the desired
       // final state, so a move with no sub-space clears it.
@@ -548,7 +559,7 @@ export function useReportsMutations(): {
         throw new Error(
           await errorMessage(res, `Failed to move report: ${res.status}`),
         );
-      broadcastReportsUpdated();
+      if (notify) broadcastReportsUpdated();
       return res.json();
     },
     [accessToken],

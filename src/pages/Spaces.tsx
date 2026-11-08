@@ -1,22 +1,11 @@
 import { useState } from 'react';
 import PageTitle from 'src/components/PageTitle';
 import { useNavigate } from 'react-router-dom';
-import {
-  Alert,
-  Box,
-  Button,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  TextField,
-  Typography,
-} from '@mui/material';
+import { Box, Button, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
-import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ListTable, {
   ListTableColumn,
   listTableActionColumnSx,
@@ -29,6 +18,7 @@ import ListViewState from 'src/components/ListViewState';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import UserDisplay from 'src/components/UserDisplay';
+import SpaceDialog from 'src/components/spaces/SpaceDialog';
 import {
   useSpacesList,
   useSpaceMutations,
@@ -40,93 +30,6 @@ import { pageContentSx } from 'src/theme/layout';
 const descriptionColumnSx = { ...listTableSecondaryCellSx, width: '32%' };
 const updatedAtColumnSx = { ...listTableSecondaryCellSx, width: 180 };
 const updatedByColumnSx = { ...listTableSecondaryCellSx, width: 150 };
-
-// ---------------------------------------------------------------------------
-// Create/Edit dialog
-// ---------------------------------------------------------------------------
-
-interface SpaceDialogProps {
-  open: boolean;
-  onClose: () => void;
-  onSave: (name: string, description: string) => Promise<void>;
-  initial: SpaceListItem | null;
-}
-
-function SpaceDialog({ open, onClose, onSave, initial }: SpaceDialogProps) {
-  const [name, setName] = useState(initial?.name ?? '');
-  const [description, setDescription] = useState(initial?.description ?? '');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const handleClose = () => {
-    setError(null);
-    onClose();
-  };
-
-  const handleSave = async () => {
-    setError(null);
-    if (!name.trim()) {
-      setError('Name is required.');
-      return;
-    }
-    setSaving(true);
-    try {
-      await onSave(name.trim(), description.trim());
-      handleClose();
-    } catch (err) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      setError((err as any)?.message ?? 'Failed to save.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-      <DialogTitle>{initial ? 'Edit Space' : 'New Space'}</DialogTitle>
-      <DialogContent dividers>
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {error}
-          </Alert>
-        )}
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <TextField
-            label="Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            fullWidth
-            required
-            autoFocus
-          />
-          <TextField
-            label="Description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            fullWidth
-            multiline
-            minRows={2}
-          />
-        </Box>
-        {!initial && (
-          <Alert severity="info" sx={{ mt: 2 }}>
-            The space starts empty. File reports into it from the Reports list,
-            or create them from the space, then pin one as the space&apos;s
-            overview.
-          </Alert>
-        )}
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={handleClose} disabled={saving}>
-          Cancel
-        </Button>
-        <Button onClick={handleSave} variant="contained" disabled={saving}>
-          {saving ? <ConstellationSpinner size={20} /> : 'Save'}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Page

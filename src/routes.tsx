@@ -73,6 +73,10 @@ const routes = [
       { path: 'reports/:id/versions/:version', element: <ReportVersionView /> },
       { path: 'spaces', element: <Spaces /> },
       { path: 'spaces/:spaceId', element: <SpaceDetail /> },
+      {
+        path: 'spaces/:spaceId/contents',
+        element: <SpaceDetail view="contents" />,
+      },
       { path: 'spaces/:spaceId/reports/:reportId', element: <SpaceDetail /> },
       { path: 'query-console', element: <QueryConsole /> },
       // One route, not two. As separate entries the landing and a conversation

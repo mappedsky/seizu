@@ -115,3 +115,28 @@ version would relocate the report (SPC-003).
 
 Seed order is spaces → reports → membership → overview. **An omitted `space`
 never unfiles a report** (the `pinned` rule), and seeding deletes nothing.
+
+## SPC-008 — Sub-space order is a stored position, replaced as a whole list
+
+**Applies to:** `SubspaceRecord.position`, `reorder_subspaces`,
+`PUT /spaces/{id}/subspace-order`, `spaces__reorder_subspaces`
+
+Each sub-space has an integer `position`. Lists sort by it, then by
+`created_at`. A new sub-space is appended at the end. Reordering sends the
+space's **complete** sub-space list, and the store rejects anything that is not
+exactly that set (`SubspaceOrderError`, 400) after locking the space's rows.
+
+**Why a whole list rather than "move X before Y":** a relative move applied to a
+list the client has not seen, such as one that gained a sub-space since it
+loaded, lands somewhere the user never chose. A whole list either matches
+what is stored or is refused, so a stale client finds out. It also makes
+overlapping saves from one page safe, because the last list sent is complete.
+
+**Why order is not an edit:** a reorder leaves `updated_at`/`updated_by` alone.
+It is presentation, and restamping every sub-space would make a drag look like
+a rename of all of them.
+
+Existing rows start at `0` (migration `0015`), so their order falls back to
+creation order, which is what those spaces showed before. Seeding orders an
+existing space's sub-spaces as the YAML lists them, leaving undeclared ones
+after, in keeping with SPC-007's rule that seeding deletes nothing.

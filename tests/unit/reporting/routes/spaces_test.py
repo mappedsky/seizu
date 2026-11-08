@@ -716,3 +716,47 @@ async def test_set_space_overview_rejects_a_report_the_caller_cannot_see(mocker)
     assert ret.status_code == 400
     assert "Report not found" in ret.json()["error"]
     mock_set.assert_not_called()
+
+
+async def test_reorder_subspaces(mocker):
+    mock_reorder = mocker.patch(
+        "reporting.routes.spaces.report_store.reorder_subspaces",
+        new=AsyncMock(return_value=[_subspace("ss2", name="Identity"), _subspace("ss1")]),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/subspace-order", json={"subspace_ids": ["ss2", "ss1"]})
+    assert ret.status_code == 200
+    assert [s["subspace_id"] for s in ret.json()["subspaces"]] == ["ss2", "ss1"]
+    mock_reorder.assert_awaited_once_with("sp1", ["ss2", "ss1"])
+
+
+async def test_reorder_subspaces_rejects_an_incomplete_list(mocker):
+    from reporting.schema.space_config import SubspaceOrderError
+
+    mocker.patch(
+        "reporting.routes.spaces.report_store.reorder_subspaces",
+        new=AsyncMock(side_effect=SubspaceOrderError("subspace_ids must list every sub-space")),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/subspace-order", json={"subspace_ids": ["ss1"]})
+    assert ret.status_code == 400
+    assert "every sub-space" in ret.json()["error"]
+
+
+async def test_reorder_subspaces_missing_space(mocker):
+    mocker.patch("reporting.routes.spaces.report_store.reorder_subspaces", new=AsyncMock(return_value=None))
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/missing/subspace-order", json={"subspace_ids": []})
+    assert ret.status_code == 404
+
+
+async def test_reorder_subspaces_requires_spaces_write(mocker):
+    mock_reorder = mocker.patch("reporting.routes.spaces.report_store.reorder_subspaces", new=AsyncMock())
+    app = _make_app(_UNPRIVILEGED_CURRENT_USER)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/subspace-order", json={"subspace_ids": ["ss1"]})
+    assert ret.status_code == 403
+    mock_reorder.assert_not_called()

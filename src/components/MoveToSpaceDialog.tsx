@@ -10,6 +10,7 @@ import {
   InputLabel,
   MenuItem,
   Select,
+  Typography,
 } from '@mui/material';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import {
@@ -20,15 +21,30 @@ import {
 
 const NONE = '__none__';
 
+/** Display names of the chosen placement, for a caller's confirmation. */
+export interface MovePlacementNames {
+  spaceName: string | null;
+  subspaceName: string | null;
+}
+
 interface MoveToSpaceDialogProps {
   open: boolean;
   reportName: string;
+  /** Overrides the default “Move “name”” title, e.g. for a batch. */
+  title?: string;
   currentSpaceId: string | null;
   currentSubspaceId: string | null;
+  /**
+   * Offer only spaces other than this one, and no “None”: the picker is for
+   * moving out of a space the caller already lets the user rearrange and
+   * leave by other means.
+   */
+  excludeSpaceId?: string;
   onClose: () => void;
   onConfirm: (
     spaceId: string | null,
     subspaceId: string | null,
+    names: MovePlacementNames,
   ) => Promise<void>;
 }
 
@@ -46,12 +62,18 @@ interface MoveToSpaceDialogProps {
 function MoveToSpaceDialog({
   open,
   reportName,
+  title,
   currentSpaceId,
   currentSubspaceId,
+  excludeSpaceId,
   onClose,
   onConfirm,
 }: MoveToSpaceDialogProps) {
-  const { spaces, loading: spacesLoading } = useSpacesList();
+  const { spaces: allSpaces, loading: spacesLoading } = useSpacesList();
+  const elsewhere = excludeSpaceId !== undefined;
+  const spaces = elsewhere
+    ? allSpaces.filter((space) => space.space_id !== excludeSpaceId)
+    : allSpaces;
   const [spaceId, setSpaceId] = useState<string | null>(currentSpaceId);
   const [subspaceId, setSubspaceId] = useState<string | null>(
     currentSubspaceId,
@@ -73,7 +95,12 @@ function MoveToSpaceDialog({
     setSaving(true);
     setError(null);
     try {
-      await onConfirm(spaceId, spaceId ? subspaceId : null);
+      const space = spaces.find((s) => s.space_id === spaceId);
+      const subspace = subspaces.find((s) => s.subspace_id === subspaceId);
+      await onConfirm(spaceId, spaceId ? subspaceId : null, {
+        spaceName: space?.name ?? null,
+        subspaceName: spaceId ? (subspace?.name ?? null) : null,
+      });
       onClose();
     } catch (err) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -87,23 +114,30 @@ function MoveToSpaceDialog({
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Move “{reportName}”</DialogTitle>
+      <DialogTitle>{title ?? `Move “${reportName}”`}</DialogTitle>
       <DialogContent>
         {error && (
           <Alert severity="error" sx={{ mb: 2 }}>
             {error}
           </Alert>
         )}
+        {elsewhere && !spacesLoading && spaces.length === 0 && (
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            There are no other spaces to move to. Create one from the Spaces
+            page first.
+          </Typography>
+        )}
         <FormControl fullWidth sx={{ mt: 1 }}>
           <InputLabel id="move-space-label">Space</InputLabel>
           <Select
             labelId="move-space-label"
             label="Space"
-            value={spaceId ?? NONE}
+            // Empty rather than a placeholder item, so the label is the prompt.
+            value={spaceId ?? (elsewhere ? '' : NONE)}
             disabled={spacesLoading || saving}
             onChange={(e) => handleSpaceChange(e.target.value)}
           >
-            <MenuItem value={NONE}>None</MenuItem>
+            {!elsewhere && <MenuItem value={NONE}>None</MenuItem>}
             {spaces.map((space) => (
               <MenuItem key={space.space_id} value={space.space_id}>
                 {spaceLabel(space)}
@@ -122,7 +156,7 @@ function MoveToSpaceDialog({
               setSubspaceId(e.target.value === NONE ? null : e.target.value)
             }
           >
-            <MenuItem value={NONE}>None</MenuItem>
+            <MenuItem value={NONE}>{elsewhere ? 'Top level' : 'None'}</MenuItem>
             {subspaces.map((subspace) => (
               <MenuItem key={subspace.subspace_id} value={subspace.subspace_id}>
                 {subspace.name}
@@ -135,7 +169,11 @@ function MoveToSpaceDialog({
         <Button onClick={onClose} disabled={saving}>
           Cancel
         </Button>
-        <Button variant="contained" onClick={handleConfirm} disabled={saving}>
+        <Button
+          variant="contained"
+          onClick={handleConfirm}
+          disabled={saving || (elsewhere && !spaceId)}
+        >
           {saving ? <ConstellationSpinner size={20} /> : 'Move'}
         </Button>
       </DialogActions>

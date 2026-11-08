@@ -28,6 +28,8 @@ export interface SubspaceItem {
   subspace_id: string;
   space_id: string;
   name: string;
+  /** Display order within the space; lists arrive already sorted by it. */
+  position: number;
   created_at: string;
   updated_at: string;
   created_by: string;
@@ -338,6 +340,8 @@ export function useSubspaceMutations(spaceId: string): {
   createSubspace: (name: string) => Promise<SubspaceItem>;
   updateSubspace: (subspaceId: string, name: string) => Promise<SubspaceItem>;
   deleteSubspace: (subspaceId: string) => Promise<void>;
+  /** Set the order; `subspaceIds` must list every sub-space exactly once. */
+  reorderSubspaces: (subspaceIds: string[]) => Promise<SubspaceItem[]>;
 } {
   const { accessToken } = useContext(AuthContext);
 
@@ -404,5 +408,29 @@ export function useSubspaceMutations(spaceId: string): {
     [accessToken, spaceId],
   );
 
-  return { createSubspace, updateSubspace, deleteSubspace };
+  const reorderSubspaces = useCallback(
+    async (subspaceIds: string[]): Promise<SubspaceItem[]> => {
+      const res = await fetch(`/api/v1/spaces/${spaceId}/subspace-order`, {
+        method: 'PUT',
+        headers: {
+          ...getApiHeaders(accessToken),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ subspace_ids: subspaceIds }),
+      });
+      if (!res.ok)
+        throw new Error(
+          await errorMessage(
+            res,
+            `Failed to reorder sub-spaces: ${res.status}`,
+          ),
+        );
+      broadcastSpacesUpdated();
+      const body: { subspaces: SubspaceItem[] } = await res.json();
+      return body.subspaces;
+    },
+    [accessToken, spaceId],
+  );
+
+  return { createSubspace, updateSubspace, deleteSubspace, reorderSubspaces };
 }

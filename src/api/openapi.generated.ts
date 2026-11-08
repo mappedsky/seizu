@@ -1451,6 +1451,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/spaces/{space_id}/subspace-order": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Reorder Subspaces
+         * @description Set the display order of a space's sub-spaces.
+         *
+         *     ``subspace_ids`` must list every sub-space of the space exactly once; a
+         *     stale or partial list is a 400 and changes nothing.
+         */
+        put: operations["reorder_subspaces_api_v1_spaces__space_id__subspace_order_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/spaces/{space_id}/subspaces/{subspace_id}": {
         parameters: {
             query?: never;
@@ -3494,6 +3517,17 @@ export interface components {
             text: string;
         };
         /**
+         * ReorderSubspacesRequest
+         * @description Request body for PUT /api/v1/spaces/<id>/subspace-order.
+         *
+         *     ``subspace_ids`` is the space's complete sub-space list in its new order:
+         *     every sub-space exactly once, nothing from another space.
+         */
+        ReorderSubspacesRequest: {
+            /** Subspace Ids */
+            subspace_ids: string[];
+        };
+        /**
          * ReportAccess
          * @description Report-level visibility metadata.
          */
@@ -4332,6 +4366,11 @@ export interface components {
             space_id: string;
             /** Name */
             name: string;
+            /**
+             * Position
+             * @default 0
+             */
+            position: number;
             /** Created At */
             created_at: string;
             /** Updated At */
@@ -8045,6 +8084,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubspaceItem"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reorder_subspaces_api_v1_spaces__space_id__subspace_order_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                space_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReorderSubspacesRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubspaceListResponse"];
                 };
             };
             /** @description Validation Error */

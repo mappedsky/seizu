@@ -7,6 +7,7 @@ from reporting.authnz.permissions import Permission
 from reporting.schema.space_config import (
     CreateSpaceRequest,
     CreateSubspaceRequest,
+    ReorderSubspacesRequest,
     SetSpaceOverviewRequest,
     SpaceDeleteResult,
     SpaceIdResponse,
@@ -16,6 +17,7 @@ from reporting.schema.space_config import (
     SubspaceIdResponse,
     SubspaceItem,
     SubspaceListResponse,
+    SubspaceOrderError,
     UpdateSpaceRequest,
     UpdateSubspaceRequest,
 )
@@ -234,6 +236,29 @@ async def create_subspace(
     if not created:
         raise HTTPException(status_code=404, detail="Space not found")
     return created
+
+
+@router.put(
+    "/api/v1/spaces/{space_id}/subspace-order",
+    response_model=SubspaceListResponse,
+)
+async def reorder_subspaces(
+    space_id: str,
+    body: ReorderSubspacesRequest,
+    current: CurrentUser = Depends(require_permission(Permission.SPACES_WRITE)),
+) -> SubspaceListResponse:
+    """Set the display order of a space's sub-spaces.
+
+    ``subspace_ids`` must list every sub-space of the space exactly once; a
+    stale or partial list is a 400 and changes nothing.
+    """
+    try:
+        reordered = await report_store.reorder_subspaces(space_id, body.subspace_ids)
+    except SubspaceOrderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if reordered is None:
+        raise HTTPException(status_code=404, detail="Space not found")
+    return SubspaceListResponse(subspaces=reordered)
 
 
 @router.put(
