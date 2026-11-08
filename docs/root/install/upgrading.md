@@ -25,6 +25,45 @@ For every production upgrade:
    database written by a newer one unless its upgrade procedure explicitly says
    that downgrade is supported.
 
+## 5.7.0
+
+One additive schema migration (`0015`) and no new or removed settings.
+
+### Sub-spaces gain a display position
+
+Migration `0015_subspace_position` adds a `position` column to `subspaces`
+(`NOT NULL DEFAULT 0`) at startup, inspector-guarded like every revision.
+
+1. No action is needed. Every existing sub-space starts at `0`, so lists fall
+   back to creation order — what those spaces showed before.
+2. Reordering needs `spaces:write`, through the contents page,
+   `PUT /api/v1/spaces/{id}/subspace-order` or `spaces__reorder_subspaces`.
+3. Re-seeding orders an existing space's sub-spaces as the YAML lists them;
+   sub-spaces the YAML does not declare stay, after the declared ones.
+
+### User-visible behavior changes to announce
+
+1. **Chat:** Enter sends and Shift, Ctrl or Cmd+Enter adds a line. Bypass
+   confirmations lives in the Confirmations panel, asks for acknowledgement the
+   first time it is turned on in a visit, and turns off when the user leaves the
+   page.
+2. **Query console:** Enter adds a line; Ctrl or Cmd+Enter runs.
+3. **Report panels:** pie and bar panels whose categories are all severity
+   levels use fixed severity colors, ordered Critical to Info. Threshold colors
+   may use palette names (`flare`, `ember`, `aurora`, …); existing CSS colors are
+   unchanged.
+
+### Building from source: a one-week release cooldown
+
+`pyproject.toml` (`exclude-newer`), `bunfig.toml` (`minimumReleaseAge`) and
+`docs/build.sh` resolve only package versions published at least seven days ago.
+A pinned image build from the shipped lockfiles is unaffected. If you relock or
+add a dependency and need a newer release, exempt that one package with
+`exclude-newer-package` or `minimumReleaseAgeExcludes` rather than shortening
+the window. A custom cartography worker image should install
+`cartography_sync/requirements.txt` with `pip --require-hashes`, as the shipped
+`Dockerfile.cartography` does.
+
 ## 5.6.0
 
 No schema migrations, no new settings and nothing removed. Three new
