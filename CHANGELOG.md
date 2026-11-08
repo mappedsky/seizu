@@ -4,6 +4,180 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.7.0] - 2026-11-08
+
+A design release. Spaces get a contents page, a bulk add-reports picker and
+drag-and-drop between sub-spaces, which can now be put in an order of your
+choosing. Workflows, model profiles, tools and agent plugins move from cramped
+modals to dedicated editors, and the whole web app gets a pass over its brand
+system, surfaces, chat, query console, graph view, mobile layouts and
+accessibility. Supply-chain hardening adds a one-week release cooldown to every
+dependency resolution. One additive schema migration (`0015`), no new settings,
+nothing removed.
+
+### Added
+
+- **Space contents page** (#400) at `/app/spaces/:id/contents`, also what a
+  space with no overview opens on. Each sub-space is its own panel with
+  permission-gated actions; the sidebar gains a contents link and per-sub-space
+  menus (**Add reports here…**, **New report here…**).
+- **Add reports picker** (#400). Lists every visible report not already in the
+  space, grouped as *Not in a space*, *In another space* and *Drafts*, with
+  search and filter chips. Select several and file them into a chosen sub-space
+  in one step: a report in another space moves, a draft is published first (its
+  owner only, with a warning), and failures stay selected with their reason so
+  a retry is one click. The batch runs one report at a time and reloads once.
+- **Moving reports between sub-spaces** (#400): drag and drop on the contents
+  page and the sidebar (keyboard supported), multi-select with a sticky
+  selection bar, and one-click **Move to …** menu targets, all placed
+  optimistically. **Move to another space…** works from inside a space too, and
+  a report on screen follows its own move rather than landing on "Report not in
+  this space".
+- **Ordered sub-spaces** (#400, SPC-008). Sub-spaces carry a stored display
+  `position`; new ones are appended. Reorder by dragging a panel's grip, from
+  the keyboard, or with **Move up** / **Move down**.
+  `PUT /api/v1/spaces/{id}/subspace-order` replaces the order as a complete
+  list and rejects a stale or partial one with 400; the confirmation-gated
+  `spaces__reorder_subspaces` MCP tool mirrors it. Seeding orders an existing
+  space's sub-spaces as the YAML lists them, leaving undeclared ones after.
+  A reorder does not restamp `updated_at`/`updated_by`.
+- **Tool editor page** (#396) at `/app/toolsets/:toolsetId/tools/new` and
+  `.../:toolId/edit`. "How agents see it" renders the callable name and
+  argument signature live; the query footer lists every `$parameter` the query
+  uses, offers one-click **Declare** for undeclared ones and flags declared
+  ones that go unused; **Try it** runs the unsaved draft read-only with test
+  arguments, applying defaults as an agent call does (needs `query:execute`).
+- **Model profile editor page** (#385) at `/app/model-profiles/new` and
+  `/app/model-profiles/:id/edit`: primary and economy models in their own
+  panels, reasoning levels as an ordered ladder (tick what users may pick, star
+  the default), a stage routing table in turn order showing what each stage
+  inherits and which override it, with a per-stage reset, and a sticky rail for
+  the run cost cap and the enabled/default switches.
+- **Fixed severity colors** (#365) for critical/high/medium/low/info in pie,
+  bar, graph and table panels, ordered by urgency, so a level never changes
+  color with its position in the data. Accepted values and colors are listed in
+  the dashboard docs under *Severity values*.
+- **Threshold colors take palette names** (#365) — `flare`, `ember`, `aurora`,
+  `starlight`, `beacon`, `pulsar`, `night` — rendered in a tone readable in
+  both light and dark mode. Any CSS color is still accepted as given.
+- **A filter over the query console's schema panel** (#365): node labels,
+  relationship types, property keys and indexes.
+- **`make lint`** (#355), which `AGENTS.MD` had documented without the target
+  existing.
+
+### Changed
+
+- **Workflow details, runs and editor are organized around stages** (#374).
+  The details page draws the pipeline as stage lanes and groups each run's
+  Temporal activities back into the configured stages; engine bookkeeping
+  (definition load, lock, result recording) folds behind a collapsed *Engine
+  activities* section. Runs list as a status/started/duration/trigger table, an
+  expanded run polls while active, and a run that never started says why
+  (waiting on the lock, skipped, or not yet picked up by a worker). The editor
+  is a full-screen flow map — trigger, stages, run — with an inspector for the
+  selected item and problems marked where they occur.
+- **The agent plugin editor is redesigned** (#395). Package contents render as
+  a constellation tree with amber marking only staged edits; allowed tools move
+  to a dedicated dialog with filtering, an All/Selected toggle and per-toolset
+  select-all; phones get a file switcher and a bottom action bar; an explicit
+  **Cancel** replaces relying on the back arrow; and the status line names the
+  current revision or the one a publish will create.
+- **Editors ask before discarding unsaved edits** (#374, #385, #395, #396) —
+  workflows, model profiles, tools and plugins.
+- **The web app's visual design** (#365). OKLCH tonal ramps and named roles in
+  `src/theme/brand.ts` build the MUI palette, with a contrast test; Inter and
+  JetBrains Mono are bundled; corners are rounder (8px base, 12px for cards and
+  dialogs) and cards are flat and hairline-edged; the top bar shares the
+  sidebar's surface. Report headings follow title > row (h2) > panel (h3), with
+  markdown headings rebased under the row. Route- and panel-level code splitting
+  shrinks the initial load.
+- **The graph view is a star chart** (#365), in report panels and the query
+  console: nodes are dots sized by degree and colored by group with names
+  beside them that give way when crowded; a legend strip lists node groups and
+  relationship types with counts and lights each on hover; relationship types
+  differ by stroke pattern and their labels show only where they fit; hovering a
+  node previews its neighbourhood; the details panel shows only the selected
+  item, and starts closed in the console.
+- **Chat** (#365). The transcript sits in a readable column without bubbles on
+  assistant replies; the composer is compact and auto-growing (**Enter sends**,
+  Shift/Ctrl/Cmd+Enter adds a line); sessions are grouped by recency with a
+  filter; pending confirmations render inline in the conversation as well as in
+  the Confirmations panel.
+- **Bypass confirmations moved into the Confirmations panel** (#365), asks for a
+  one-time acknowledgement per visit, marks the composer with an amber edge and
+  a **Bypass on** chip while active, and **turns off when you leave the page**.
+- **The query console editor is a growing composer** (#365): one field that
+  starts at one line and grows to 12, with a round run button. **Enter adds a
+  line**; Ctrl/Cmd+Enter runs.
+- **Mobile layouts** (#365): side panels collapse to a rail or drawer, panels
+  stack full-width with legends below charts and graph details below the
+  canvas, report filters sit behind a disclosure, and list views render as
+  labelled items.
+- **Accessibility** (#365): main/nav landmarks and a skip link, hover-only
+  affordances reachable by keyboard and visible on touch, keyboard and pointer
+  column resizing, a keyboard-operable console resize handle, panel-specific
+  info-button labels, list-table headers named by their label alone, and 11px
+  minimum graph labels.
+- **mypy type-checks against the project's own locked environment** (#355,
+  #354) via a `repo: local` pre-commit hook running `scripts/run_mypy.sh`,
+  rather than an isolated hook environment holding only pydantic and two stub
+  packages. mypy's version now lives in the `dev` group alone, and
+  `--ignore-missing-imports` is gone in favor of naming the six untyped packages
+  in `setup.cfg`. The 72 errors this surfaced are fixed; none was a live bug.
+  Lint on the host now needs `uv` on PATH.
+- **Dependencies** — minimum versions raised for Authlib (1.9.1), litellm
+  (1.96.2), PyJWT (2.15.0) and LangGraph (1.2.14), with constraint floors for
+  aiohttp (3.14.4) and urllib3 (2.8.0). The lock also moves litellm to 1.100.4,
+  mcp to 2.2.0, oauthlib to 4.0.1 (a transitive major version), joserfc to
+  1.7.6, langgraph-sdk to 0.4.6, langgraph-checkpoint-postgres to 3.1.3 and
+  opentelemetry-api to 1.45.1, among routine bumps.
+
+### Security
+
+- **A one-week release cooldown on every dependency resolution** (#381, fixes
+  #367): `exclude-newer = "7 days"` for uv, `minimumReleaseAge = 604800` for
+  bun, and `uv pip install --exclude-newer "7 days"` for the Sphinx docs
+  environment, so a compromised release has time to be caught and yanked before
+  a lock or install can pick it up. An urgent fix is admitted per package
+  (`exclude-newer-package` / `minimumReleaseAgeExcludes`) rather than by
+  shortening the window. The docs venv is built with uv and pinned to
+  Python 3.12.
+- **The cartography sync worker installs its pip dependencies hash-locked**
+  (#380), from a `requirements.txt` regenerated with
+  `make lock_cartography_requirements` and installed with `--require-hashes`.
+  The dev obot `mcp-oauth-proxy` base image is pinned by digest.
+
+### Fixed
+
+- **Every open PR failed lint without touching the failing file** (#354): the
+  mypy hook installed pydantic unpinned, and pydantic 2.14 made three
+  `TypeAdapter(...)` sites built from runtime metadata uninferable. They are
+  annotated `TypeAdapter[Any]`, and #355 then removed the second dependency
+  declaration that let the hook drift.
+- **Opening a skill in the plugin editor marked it edited** (#395). Skills are
+  compared in normalized form and only real changes are staged.
+
+### Upgrade notes {#upgrade-notes-570}
+
+One additive schema migration and no new or removed settings.
+
+1. **Migration `0015_subspace_position`** adds `subspaces.position`
+   (`NOT NULL DEFAULT 0`), applied automatically at startup. Existing
+   sub-spaces keep their creation order until someone reorders them.
+2. **Expect two keyboard changes.** In chat, Enter now sends and
+   Shift/Ctrl/Cmd+Enter adds a line. In the query console, Enter adds a line
+   and Ctrl/Cmd+Enter runs.
+3. **Bypass confirmations no longer persists across page loads.** It turns off
+   when the user leaves the chat page and asks for acknowledgement on first use
+   each visit.
+4. **Pie and bar panels whose categories are all severity levels change
+   color** to the fixed severity palette, ordered Critical to Info.
+5. **Building or locking from source needs packages at least a week old.** A
+   lock or `bun add` that names a just-released version will report it as
+   missing until it ages in.
+
+Full procedures: [Upgrading Seizu — 5.7.0](docs/root/install/upgrading.md#570).
+
 ## [5.6.0] - 2026-09-19
 
 Two changes. HTTP access logging, which has been off since the server moved to
@@ -1940,6 +2114,7 @@ frontend, storage, auth, and integrations.
 Initial release of the original reporting tool that Seizu was built from —
 Dockerized build, GitHub Container Registry publishing, and quickstart docs.
 
+[5.7.0]: https://github.com/mappedsky/seizu/compare/v5.6.0...v5.7.0
 [5.6.0]: https://github.com/mappedsky/seizu/compare/v5.5.0...v5.6.0
 [5.5.0]: https://github.com/mappedsky/seizu/compare/v5.4.0...v5.5.0
 [5.4.0]: https://github.com/mappedsky/seizu/compare/v5.3.0...v5.4.0
