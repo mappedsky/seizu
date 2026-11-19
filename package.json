@@ -64,7 +64,8 @@
     "react-grid-layout": "^2.2.3",
     "react-router-dom": "^7.15.1",
     "tiptap-markdown": "^0.9.0",
-    "yaml": "1.10.3"
+    "yaml": "1.10.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@eslint-react/eslint-plugin": "^5.8.1",
