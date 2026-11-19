@@ -4,6 +4,23 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.7.1] - 2026-11-19
+
+A patch release fixing Content Security Policy violations in the built web app.
+No migrations, no setting changes.
+
+### Fixed
+
+- **A bundled font was refused by the CSP** (#407). The build inlined the
+  smallest JetBrains Mono subset as a `data:` URI, which `default-src 'self'`
+  blocks because the policy has no `font-src`. Fonts are now always emitted as
+  files; the CSP is unchanged.
+- **Every chat page reported a `script-src` violation for `eval`** (#407).
+  Zod, which the AI SDK uses, probes for `eval` before compiling object
+  parsers. The app now runs Zod in `jitless` mode, which skips the probe, and
+  declares `zod` as a direct dependency so the setting reaches the AI SDK's
+  copy.
+
 ## [5.7.0] - 2026-11-08
 
 A design release. Spaces get a contents page, a bulk add-reports picker and
@@ -2114,6 +2131,7 @@ frontend, storage, auth, and integrations.
 Initial release of the original reporting tool that Seizu was built from —
 Dockerized build, GitHub Container Registry publishing, and quickstart docs.
 
+[5.7.1]: https://github.com/mappedsky/seizu/compare/v5.7.0...v5.7.1
 [5.7.0]: https://github.com/mappedsky/seizu/compare/v5.6.0...v5.7.0
 [5.6.0]: https://github.com/mappedsky/seizu/compare/v5.5.0...v5.6.0
 [5.5.0]: https://github.com/mappedsky/seizu/compare/v5.4.0...v5.5.0
