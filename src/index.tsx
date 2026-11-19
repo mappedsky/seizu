@@ -1,3 +1,4 @@
+import './zodConfig';
 import createCache from '@emotion/cache';
 import { CacheProvider } from '@emotion/react';
 import { StrictMode } from 'react';
