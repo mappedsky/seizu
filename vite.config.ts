@@ -13,6 +13,12 @@ export default defineConfig({
     outDir: 'build',
     assetsDir: 'static',
     chunkSizeWarningLimit: 1000,
+    // Fonts are always emitted as files, never inlined as `data:` URIs: the
+    // backend's CSP has no `font-src`, so fonts fall back to
+    // `default-src 'self'` and an inlined subset is refused. Other assets keep
+    // Vite's default size threshold (`img-src` allows `data:`).
+    assetsInlineLimit: (filePath) =>
+      /\.(woff2?|ttf|otf|eot)$/i.test(filePath) ? false : undefined,
     rolldownOptions: {
       output: {
         manualChunks(id) {
