@@ -38,6 +38,7 @@ async def get_config() -> dict:
             "chat_elicitation": settings.CHAT_ENABLED and settings.MCP_EXTERNAL_ELICITATION_ENABLED,
             "chat": settings.CHAT_ENABLED,
             "chat_schedules": settings.CHAT_ENABLED and settings.CHAT_SCHEDULES_ENABLED,
+            "query_generation": settings.CHAT_ENABLED and settings.QUERY_GENERATION_ENABLED,
             # Only gateways a user can connect for themselves have a status page
             # to show, so the UI stays hidden when none is configured.
             "chat_connections": settings.CHAT_ENABLED

@@ -2164,6 +2164,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/query/generate/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Generation Options
+         * @description The model profiles and reasoning levels the console's Ask mode offers.
+         */
+        get: operations["generation_options_api_v1_query_generate_options_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/query/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate
+         * @description Generate a read-only Cypher query from a plain-text question.
+         *
+         *     One call to the model the profile's query console settings name; no chat session is created. The
+         *     query is validated but not executed. A valid query is saved to the
+         *     caller's query history with the question as its prompt, and its
+         *     ``history_id`` returned so the console can run it by id. An invalid one is
+         *     returned with its errors and not recorded.
+         */
+        post: operations["generate_api_v1_query_generate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/chat/schedules": {
         parameters: {
             query?: never;
@@ -2649,6 +2695,7 @@ export interface components {
             default_reasoning_effort: "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
             /** Run Cost Budget Usd */
             run_cost_budget_usd: number;
+            query_console?: components["schemas"]["QueryConsoleSettings"];
             /** Name */
             name: string;
             /**
@@ -2952,6 +2999,54 @@ export interface components {
             /** Message */
             message: string;
         };
+        /** GenerateQueryRequest */
+        GenerateQueryRequest: {
+            /** Question */
+            question: string;
+            /**
+             * Current Query
+             * @default
+             */
+            current_query: string;
+            /** Model Profile Id */
+            model_profile_id?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: ("default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh") | null;
+        };
+        /** GenerateQueryResponse */
+        GenerateQueryResponse: {
+            /** Query */
+            query: string;
+            /** Explanation */
+            explanation: string;
+            /**
+             * Errors
+             * @default []
+             */
+            errors: string[];
+            /**
+             * Warnings
+             * @default []
+             */
+            warnings: string[];
+            /** History Id */
+            history_id?: string | null;
+            /**
+             * Model Id
+             * @default
+             */
+            model_id: string;
+            /**
+             * Reasoning Effort
+             * @default
+             */
+            reasoning_effort: string;
+            /**
+             * Profile Name
+             * @default
+             */
+            profile_name: string;
+        };
         /** GraphIndex */
         GraphIndex: {
             /** Name */
@@ -3051,6 +3146,7 @@ export interface components {
             default_reasoning_effort: "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
             /** Run Cost Budget Usd */
             run_cost_budget_usd: number;
+            query_console?: components["schemas"]["QueryConsoleSettings"];
             /** Name */
             name: string;
             /**
@@ -3113,6 +3209,7 @@ export interface components {
             default_reasoning_effort: "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
             /** Run Cost Budget Usd */
             run_cost_budget_usd: number;
+            query_console?: components["schemas"]["QueryConsoleSettings"];
             /** Profile Id */
             profile_id: string;
             /** Version */
@@ -3434,6 +3531,72 @@ export interface components {
             versions: components["schemas"]["PluginVersion"][];
         };
         /**
+         * QueryConsoleModelOption
+         * @description A profile the query console may generate with, and the levels it offers.
+         */
+        QueryConsoleModelOption: {
+            /** Profile Id */
+            profile_id: string;
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+            /** Model Id */
+            model_id: string;
+            /**
+             * Default Reasoning Effort
+             * @enum {string}
+             */
+            default_reasoning_effort: "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+            /** Reasoning Efforts */
+            reasoning_efforts: ("default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh")[];
+        };
+        /**
+         * QueryConsoleModelOptions
+         * @description What the console's Ask mode may run on.
+         *
+         *     ``available`` is false when profiles are configured but none is enabled
+         *     for the console. With no profiles at all, ``profiles`` is empty and the
+         *     deployment's ``QUERY_GENERATION_*`` settings apply.
+         */
+        QueryConsoleModelOptions: {
+            /** Available */
+            available: boolean;
+            /** Profiles */
+            profiles: components["schemas"]["QueryConsoleModelOption"][];
+            /** Default Profile Id */
+            default_profile_id?: string | null;
+        };
+        /**
+         * QueryConsoleSettings
+         * @description How a profile answers questions asked in the query console's Ask mode.
+         *
+         *     Resolved on its own, never carried in a run's ResolvedModelProfile
+         *     snapshot (AGT-058).
+         */
+        QueryConsoleSettings: {
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Model Id */
+            model_id?: string | null;
+            /**
+             * Reasoning Efforts
+             * @default [
+             *       "low"
+             *     ]
+             */
+            reasoning_efforts: ("default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh")[];
+            /**
+             * Default Reasoning Effort
+             * @default low
+             * @enum {string}
+             */
+            default_reasoning_effort: "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+        };
+        /**
          * QueryHistoryItem
          * @description A single query console history entry for a user.
          */
@@ -3446,6 +3609,8 @@ export interface components {
             query: string;
             /** Executed At */
             executed_at: string;
+            /** Prompt */
+            prompt?: string | null;
         };
         /**
          * QueryHistoryListResponse
@@ -4650,6 +4815,7 @@ export interface components {
             default_reasoning_effort: "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
             /** Run Cost Budget Usd */
             run_cost_budget_usd: number;
+            query_console?: components["schemas"]["QueryConsoleSettings"];
             /** Name */
             name: string;
             /**
@@ -9561,6 +9727,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExternalMCPConnection"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    generation_options_api_v1_query_generate_options_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryConsoleModelOptions"];
+                };
+            };
+        };
+    };
+    generate_api_v1_query_generate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GenerateQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GenerateQueryResponse"];
                 };
             };
             /** @description Validation Error */

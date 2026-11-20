@@ -22,6 +22,12 @@ const profile: modelProfilesApi.ModelProfile = {
   user_reasoning_efforts: ['low', 'medium', 'high'],
   default_reasoning_effort: 'medium',
   run_cost_budget_usd: 2.5,
+  query_console: {
+    enabled: true,
+    model_id: null,
+    reasoning_efforts: ['low'],
+    default_reasoning_effort: 'low',
+  },
   current_version: 3,
   created_at: '2026-08-25T00:00:00Z',
   updated_at: '2026-08-26T00:00:00Z',
@@ -121,11 +127,15 @@ describe('ModelProfileEditor', () => {
       screen.getByRole('textbox', { name: /Economy model ID/ }),
       { target: { value: 'economy-model' } },
     );
-    const none = screen.getByRole('checkbox', { name: 'none' });
+    const none = screen.getByRole('checkbox', {
+      name: 'Chat reasoning: offer none',
+    });
     expect(none).not.toBeChecked();
     fireEvent.click(none);
     fireEvent.click(
-      screen.getByRole('radio', { name: 'Make high the default' }),
+      screen.getByRole('radio', {
+        name: 'Chat reasoning: make high the default',
+      }),
     );
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
@@ -182,6 +192,63 @@ describe('ModelProfileEditor', () => {
     expect(payload).not.toHaveProperty('updated_at');
     expect(payload).not.toHaveProperty('created_by');
     expect(payload).not.toHaveProperty('updated_by');
+  });
+
+  it('configures the query console apart from chat', async () => {
+    renderAt('/app/model-profiles/profile-1/edit');
+
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'Query console' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Every question runs primary-model at low/),
+    ).toBeInTheDocument();
+
+    fireEvent.change(
+      screen.getByRole('textbox', { name: 'Query console model' }),
+      { target: { value: 'fast-model' } },
+    );
+    fireEvent.click(
+      screen.getByRole('checkbox', {
+        name: 'Query console reasoning: offer medium',
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole('radio', {
+        name: 'Query console reasoning: make medium the default',
+      }),
+    );
+    expect(
+      screen.getByText(/offers low, medium on fast-model/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    const payload = update.mock.calls[0][1];
+    expect(payload.query_console).toEqual({
+      enabled: true,
+      model_id: 'fast-model',
+      reasoning_efforts: ['low', 'medium'],
+      default_reasoning_effort: 'medium',
+    });
+    // Chat's own levels are untouched.
+    expect(payload.user_reasoning_efforts).toEqual(['low', 'medium', 'high']);
+    expect(payload.stage_overrides).not.toHaveProperty('query_generation');
+  });
+
+  it('turns the query console off for a profile', async () => {
+    renderAt('/app/model-profiles/profile-1/edit');
+
+    fireEvent.click(
+      screen.getByRole('switch', { name: /Offer in the query console/ }),
+    );
+    expect(
+      screen.getByRole('textbox', { name: 'Query console model' }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0][1].query_console.enabled).toBe(false);
   });
 
   it('asks before discarding unsaved edits', () => {

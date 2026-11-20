@@ -152,3 +152,138 @@ def test_global_cost_cap_remains_the_hard_ceiling(mocker):
 
     assert model_profiles.effective_cost_budget(2.0) == 0.75
     assert model_profiles.effective_cost_budget(0.25) == 0.25
+
+
+def _fake_resolve_environment(role, *, economy=False, model_id="", reasoning_effort=None):
+    return ModelSpec(
+        model_id=model_id or f"environment/{role}",
+        max_output_tokens=10_000,
+        reasoning_effort=reasoning_effort if reasoning_effort is not None else f"env-{role}",
+        role=role,
+    )
+
+
+def test_query_generation_is_not_a_stage_override():
+    with pytest.raises(ValueError, match="unknown profile stages: query_generation"):
+        _profile(stage_overrides={"query_generation": {"model_id": "openai/fast"}})
+    assert "query_generation" not in model_profiles.RESOLVED_MODEL_STAGES
+
+
+def test_query_console_default_must_be_one_of_its_levels():
+    with pytest.raises(ValueError, match="default reasoning must be one of its levels"):
+        _profile(query_console={"reasoning_efforts": ["low", "high"], "default_reasoning_effort": "medium"})
+
+
+def test_query_console_defaults_to_enabled_low_on_the_primary():
+    console = _profile().query_console
+    assert (console.enabled, console.model_id, console.reasoning_efforts, console.default_reasoning_effort) == (
+        True,
+        None,
+        ("low",),
+        "low",
+    )
+
+
+def _list_profiles(mocker, *profiles: ModelProfileItem) -> None:
+    mocker.patch(
+        "reporting.services.model_profiles.report_store.list_model_profiles",
+        mocker.AsyncMock(return_value=list(profiles)),
+    )
+    mocker.patch(
+        "reporting.services.model_profiles.chat_models.resolve_environment", side_effect=_fake_resolve_environment
+    )
+
+
+async def test_query_console_uses_its_model_and_the_requested_level(mocker):
+    _list_profiles(
+        mocker,
+        _profile(
+            query_console={
+                "model_id": "openai/fast",
+                "reasoning_efforts": ["minimal", "low"],
+                "default_reasoning_effort": "minimal",
+            }
+        ),
+    )
+
+    chosen = await model_profiles.resolve_query_console("profile-1", "low")
+    default = await model_profiles.resolve_query_console(None)
+
+    assert chosen.spec.model_id == "openai/fast"
+    assert chosen.spec.reasoning_effort == "low"
+    assert chosen.spec.profile_name == "Accurate"
+    assert chosen.spec.profile_version == 3
+    assert chosen.cost_budget_usd == 1.5
+    assert default.spec.reasoning_effort == "minimal"
+
+
+async def test_query_console_without_a_model_runs_the_primary(mocker):
+    _list_profiles(mocker, _profile())
+
+    choice = await model_profiles.resolve_query_console(None)
+
+    assert choice.spec.model_id == "openai/gpt-5"
+    assert choice.spec.reasoning_effort == "low"
+
+
+async def test_query_console_rejects_a_level_it_does_not_offer(mocker):
+    _list_profiles(mocker, _profile())
+
+    with pytest.raises(model_profiles.ModelProfileUnavailable, match="reasoning level"):
+        await model_profiles.resolve_query_console("profile-1", "high")
+
+
+async def test_query_console_skips_profiles_disabled_for_it(mocker):
+    _list_profiles(
+        mocker,
+        _profile(query_console={"enabled": False}),
+        _profile(profile_id="profile-2", name="Fast", is_default=False),
+    )
+
+    default = await model_profiles.resolve_query_console(None)
+    options = await model_profiles.query_console_options()
+
+    assert default.spec.profile_id == "profile-2"
+    with pytest.raises(model_profiles.ModelProfileUnavailable):
+        await model_profiles.resolve_query_console("profile-1")
+    assert options.available
+    assert [option.profile_id for option in options.profiles] == ["profile-2"]
+    assert options.default_profile_id == "profile-2"
+
+
+async def test_query_console_unavailable_when_no_profile_enables_it(mocker):
+    _list_profiles(mocker, _profile(query_console={"enabled": False}))
+
+    options = await model_profiles.query_console_options()
+
+    assert not options.available
+    assert options.profiles == []
+    with pytest.raises(model_profiles.ModelProfileUnavailable, match="enabled for the query console"):
+        await model_profiles.resolve_query_console(None)
+
+
+async def test_query_console_uses_its_settings_without_profiles(mocker):
+    _list_profiles(mocker)
+
+    choice = await model_profiles.resolve_query_console(None)
+    options = await model_profiles.query_console_options()
+
+    assert choice.spec.model_id == "environment/query_generation"
+    assert choice.spec.reasoning_effort == "env-query_generation"
+    assert choice.spec.profile_id == ""
+    assert options.available
+    assert options.profiles == []
+
+
+async def test_query_console_options_describe_the_offered_levels(mocker):
+    _list_profiles(
+        mocker,
+        _profile(query_console={"reasoning_efforts": ["low", "medium"], "default_reasoning_effort": "medium"}),
+    )
+
+    options = await model_profiles.query_console_options()
+
+    [option] = options.profiles
+    assert option.model_id == "openai/gpt-5"
+    assert option.reasoning_efforts == ("low", "medium")
+    assert option.default_reasoning_effort == "medium"

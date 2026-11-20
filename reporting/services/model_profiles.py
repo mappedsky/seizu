@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from reporting import settings
 from reporting.schema.model_profiles import (
     RESOLVED_MODEL_STAGES,
     ModelProfileItem,
+    QueryConsoleModelOption,
+    QueryConsoleModelOptions,
     ResolvedModelProfile,
     ResolvedStageModels,
     SelectableModelProfile,
@@ -122,6 +124,87 @@ async def resolve(
     if selected_effort not in default.user_reasoning_efforts:
         raise ModelProfileUnavailable("The selected reasoning level is not available for this model profile")
     return _profile_snapshot(default, selected_effort)
+
+
+@dataclass(frozen=True)
+class StandaloneModelChoice:
+    """The model for one call made outside a chat run, and what it may spend."""
+
+    spec: chat_models.ModelSpec
+    cost_budget_usd: float
+
+
+def _query_console_profiles(enabled: list[ModelProfileItem]) -> list[ModelProfileItem]:
+    """Enabled profiles offered in the console, the one it starts on first."""
+    offered = [profile for profile in enabled if profile.query_console.enabled]
+    # The store lists the default profile first; a console-enabled default wins.
+    return sorted(offered, key=lambda profile: not profile.is_default)
+
+
+async def query_console_options() -> QueryConsoleModelOptions:
+    enabled = await report_store.list_model_profiles(enabled_only=True)
+    offered = _query_console_profiles(enabled)
+    return QueryConsoleModelOptions(
+        available=bool(offered) or not enabled,
+        profiles=[
+            QueryConsoleModelOption(
+                profile_id=profile.profile_id,
+                name=profile.name,
+                description=profile.description,
+                model_id=profile.query_console.model_id or profile.primary.model_id,
+                default_reasoning_effort=profile.query_console.default_reasoning_effort,
+                reasoning_efforts=profile.query_console.reasoning_efforts,
+            )
+            for profile in offered
+        ],
+        default_profile_id=offered[0].profile_id if offered else None,
+    )
+
+
+async def resolve_query_console(
+    profile_id: str | None,
+    reasoning_effort: SelectableReasoningEffort | None = None,
+) -> StandaloneModelChoice:
+    """Resolve the model the query console generates a query with.
+
+    The profile's ``query_console`` settings decide: whether it is offered,
+    its model (the primary when unset), and the reasoning levels a caller may
+    pick. With no ``profile_id`` the console's starting profile is used; with
+    no profile enabled at all, the ``QUERY_GENERATION_*`` settings apply.
+    """
+    enabled = await report_store.list_model_profiles(enabled_only=True)
+    if not enabled:
+        return StandaloneModelChoice(
+            spec=chat_models.resolve_environment("query_generation"),
+            cost_budget_usd=max(0.0, settings.CHAT_RUN_COST_BUDGET_USD),
+        )
+    offered = _query_console_profiles(enabled)
+    if not offered:
+        raise ModelProfileUnavailable("No model profile is enabled for the query console")
+    if profile_id:
+        profile = next((item for item in offered if item.profile_id == profile_id), None)
+        if profile is None:
+            raise ModelProfileUnavailable("The selected model profile is not available in the query console")
+    else:
+        profile = offered[0]
+    console = profile.query_console
+    effort = reasoning_effort or console.default_reasoning_effort
+    if effort not in console.reasoning_efforts:
+        raise ModelProfileUnavailable("The selected reasoning level is not available in the query console")
+    spec = chat_models.resolve_environment(
+        "query_generation",
+        model_id=console.model_id or profile.primary.model_id,
+        reasoning_effort=effort,
+    )
+    return StandaloneModelChoice(
+        spec=replace(
+            spec,
+            profile_id=profile.profile_id,
+            profile_name=profile.name,
+            profile_version=profile.current_version,
+        ),
+        cost_budget_usd=effective_cost_budget(profile.run_cost_budget_usd),
+    )
 
 
 async def selectable_profiles() -> list[SelectableModelProfile]:

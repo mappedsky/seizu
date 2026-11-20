@@ -3390,6 +3390,16 @@ async def test_query_history_uses_the_store_id_contract(store):
     items, total = await store.list_query_history("user-1", page=1, per_page=20)
     assert total == 1
     assert items == [saved]
+    assert saved.prompt is None
+
+
+async def test_query_history_keeps_the_prompt_a_query_was_generated_from(store):
+    saved = await store.save_query_history("user-1", "MATCH (n) RETURN n", prompt="show every node")
+
+    assert saved.prompt == "show every node"
+    assert await store.get_query_history_item("user-1", saved.history_id) == saved
+    items, _ = await store.list_query_history("user-1", page=1, per_page=20)
+    assert items[0].prompt == "show every node"
 
 
 async def test_model_profiles_are_versioned_and_keep_one_default(store):
@@ -3691,3 +3701,44 @@ async def test_startup_leaves_a_package_published_over_the_projection_alone(stor
     unchanged = await store.get_plugin("skill_authoring")
     assert unchanged.current_revision == published.current_revision
     assert unchanged.package_digest == owned.package_digest
+
+
+async def test_model_profiles_read_a_query_generation_stage_override_as_query_console(store):
+    created = await store.create_model_profile(_model_profile_data(), "admin")
+    async with AsyncSession(sql_module._get_engine()) as session:
+        current = await session.get(sql_module.ModelProfileRecord, created.profile_id)
+        assert current is not None
+        legacy_config = dict(current.config)
+        legacy_config.pop("query_console", None)
+        legacy_config["stage_overrides"] = {
+            "query_generation": {"model_id": "openai/fast", "reasoning_effort": "minimal"},
+        }
+        current.config = legacy_config
+        session.add(current)
+        await session.commit()
+
+    loaded = await store.get_model_profile(created.profile_id)
+
+    assert loaded is not None
+    assert loaded.stage_overrides == {}
+    assert loaded.query_console.model_id == "openai/fast"
+    assert loaded.query_console.reasoning_efforts == ("minimal",)
+    assert loaded.query_console.default_reasoning_effort == "minimal"
+
+
+async def test_model_profiles_store_query_console_settings(store):
+    data = _model_profile_data()
+    data["query_console"] = {
+        "enabled": False,
+        "model_id": "openai/fast",
+        "reasoning_efforts": ["low", "medium"],
+        "default_reasoning_effort": "medium",
+    }
+    created = await store.create_model_profile(data, "admin")
+
+    loaded = await store.get_model_profile(created.profile_id)
+
+    assert loaded is not None
+    assert not loaded.query_console.enabled
+    assert loaded.query_console.model_id == "openai/fast"
+    assert loaded.query_console.reasoning_efforts == ("low", "medium")

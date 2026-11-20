@@ -188,6 +188,10 @@ export function extractGraphData(
   const nodeMap = new Map<string | number, GraphNode>();
   const nodeIdByNeo4jId = new Map<string | number, string | number>();
   const links: GraphLink[] = [];
+  // Paths returned together usually share relationships (every path from one
+  // repository starts on the same edge). Each relationship is one link: a
+  // repeat would draw a stacked edge and add another spring to the layout.
+  const seenRelationships = new Set<string | number>();
   let foundPaths = false;
 
   for (const record of records) {
@@ -211,6 +215,8 @@ export function extractGraphData(
         }
       }
       for (const rel of value.relationships) {
+        if (seenRelationships.has(rel.id)) continue;
+        seenRelationships.add(rel.id);
         links.push({
           neo4j_id: rel.id,
           source: nodeIdByNeo4jId.get(rel.start_node_id) ?? rel.start_node_id,
@@ -344,6 +350,8 @@ export function computeLayout(
   const EDGE_AVOID_DISTANCE = 40;
   const EDGE_AVOID_K = 0.2;
   const DAMPING = 0.82;
+  // The furthest a node moves in one iteration.
+  const MAX_STEP = 50 * repulsion;
 
   const positions = new Map<
     string,
@@ -504,8 +512,18 @@ export function computeLayout(
 
     nodeIds.forEach((id) => {
       const p = positions.get(id)!;
-      p.x += p.vx * DAMPING;
-      p.y += p.vy * DAMPING;
+      // Forces sum per edge and per neighbour, so a crowded node can be
+      // pushed further in one step than the spring it overshoots can pull it
+      // back, and the layout diverges. The step is capped instead.
+      let stepX = p.vx * DAMPING;
+      let stepY = p.vy * DAMPING;
+      const step = Math.sqrt(stepX * stepX + stepY * stepY);
+      if (step > MAX_STEP) {
+        stepX *= MAX_STEP / step;
+        stepY *= MAX_STEP / step;
+      }
+      p.x += stepX;
+      p.y += stepY;
     });
   }
 
