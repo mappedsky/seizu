@@ -21,6 +21,7 @@ SelectableReasoningEffort = Literal["default", "none", "minimal", "low", "medium
 # Copied per instance by the field's default_factory, so the shared list is
 # never the one a model holds.
 _DEFAULT_USER_REASONING_EFFORTS: list[SelectableReasoningEffort] = ["low", "medium", "high"]
+_DEFAULT_QUERY_CONSOLE_REASONING_EFFORTS: list[SelectableReasoningEffort] = ["low"]
 PROFILE_STAGES = frozenset(
     {
         "planner",
@@ -988,6 +989,33 @@ class StageModelOverrideDef(BaseModel):
     reasoning_effort: SelectableReasoningEffort | None = None
 
 
+class QueryConsoleSettingsDef(BaseModel):
+    """How a profile answers questions asked in the query console's Ask mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # Empty runs the profile's primary model.
+    model_id: str | None = Field(default=None, min_length=1, max_length=300)
+    reasoning_efforts: list[SelectableReasoningEffort] = Field(
+        default_factory=lambda: list(_DEFAULT_QUERY_CONSOLE_REASONING_EFFORTS), min_length=1
+    )
+    default_reasoning_effort: SelectableReasoningEffort = "low"
+
+    @field_validator("model_id", mode="before")
+    @classmethod
+    def blank_model_is_primary(cls, value: Any) -> Any:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @model_validator(mode="after")
+    def validate_reasoning(self) -> "QueryConsoleSettingsDef":
+        if len(set(self.reasoning_efforts)) != len(self.reasoning_efforts):
+            raise ValueError("query console reasoning levels must be unique")
+        if self.default_reasoning_effort not in self.reasoning_efforts:
+            raise ValueError("the query console's default reasoning must be one of its levels")
+        return self
+
+
 class ModelProfileDef(BaseModel):
     """A seedable model profile, matched to stored profiles by exact name."""
 
@@ -1005,6 +1033,7 @@ class ModelProfileDef(BaseModel):
     )
     default_reasoning_effort: SelectableReasoningEffort = "medium"
     run_cost_budget_usd: float = Field(gt=0, le=10_000)
+    query_console: QueryConsoleSettingsDef = Field(default_factory=QueryConsoleSettingsDef)
 
     @model_validator(mode="after")
     def validate_profile(self) -> "ModelProfileDef":

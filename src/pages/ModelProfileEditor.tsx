@@ -31,6 +31,8 @@ import {
   type ConfiguredReasoningEffort,
   type ModelProfile,
   type ModelProfilePayload,
+  DEFAULT_QUERY_CONSOLE_SETTINGS,
+  type QueryConsoleSettings,
   type ReasoningEffort,
   useModelProfileMutations,
   useModelProfilesList,
@@ -40,12 +42,14 @@ import { modelProfilePayload } from 'src/utils/modelProfilePayload';
 
 const LIST_PATH = '/app/model-profiles';
 
-// Listed in the order a turn reaches them. Branches run inside a worker step.
-const stages: {
+interface StageRow {
   key: string;
   role: string;
   branch?: boolean;
-}[] = [
+}
+
+// Listed in the order a turn reaches them. Branches run inside a worker step.
+const stages: StageRow[] = [
   {
     key: 'router',
     role: 'Decides whether a turn is answered directly or planned',
@@ -97,7 +101,20 @@ function emptyPayload(): ModelProfilePayload {
     user_reasoning_efforts: ['low', 'medium', 'high'],
     default_reasoning_effort: 'medium',
     run_cost_budget_usd: 1,
+    query_console: { ...DEFAULT_QUERY_CONSOLE_SETTINGS },
   };
+}
+
+/** `selected` toggled in or out of `current`, kept in ladder order; never empty. */
+function toggledEfforts(
+  current: ReasoningEffort[],
+  effort: ReasoningEffort,
+  selected: boolean,
+): ReasoningEffort[] | null {
+  const next = efforts.filter((candidate) =>
+    candidate === effort ? selected : current.includes(candidate),
+  );
+  return next.length === 0 ? null : next;
 }
 
 const monoInputSx = {
@@ -143,19 +160,28 @@ const panelSx = {
 };
 
 function ReasoningLadder({
-  value,
+  available,
+  defaultEffort,
+  label,
+  defaultHint,
+  disabled = false,
   onToggle,
   onDefault,
 }: {
-  value: ModelProfilePayload;
+  available: ReasoningEffort[];
+  defaultEffort: ReasoningEffort;
+  /** Names the group, and prefixes each level's controls when several ladders share a page. */
+  label: string;
+  /** The star's tooltip, e.g. "Start new chats on low". */
+  defaultHint: (effort: ReasoningEffort) => string;
+  disabled?: boolean;
   onToggle: (effort: ReasoningEffort, selected: boolean) => void;
   onDefault: (effort: ReasoningEffort) => void;
 }) {
-  const available = value.user_reasoning_efforts;
   return (
     <RadioGroup
-      aria-label="Default reasoning"
-      value={value.default_reasoning_effort}
+      aria-label={label}
+      value={defaultEffort}
       onChange={(event) => onDefault(event.target.value as ReasoningEffort)}
       sx={{
         display: 'grid',
@@ -165,7 +191,7 @@ function ReasoningLadder({
     >
       {efforts.map((effort) => {
         const on = available.includes(effort);
-        const isDefault = value.default_reasoning_effort === effort;
+        const isDefault = defaultEffort === effort;
         const onlyOne = on && available.length === 1;
         return (
           <Box
@@ -203,7 +229,10 @@ function ReasoningLadder({
                   size="small"
                   sx={{ p: 0.5, mr: 0.5 }}
                   checked={on}
-                  disabled={onlyOne}
+                  disabled={disabled || onlyOne}
+                  slotProps={{
+                    input: { 'aria-label': `${label}: offer ${effort}` },
+                  }}
                   onChange={(event) => onToggle(effort, event.target.checked)}
                 />
               }
@@ -215,16 +244,18 @@ function ReasoningLadder({
                 visibility: on ? 'visible' : 'hidden',
               }}
             >
-              <Tooltip title={isDefault ? '' : `Start new chats on ${effort}`}>
+              <Tooltip title={isDefault ? '' : defaultHint(effort)}>
                 <Radio
                   size="small"
                   color="secondary"
                   value={effort}
-                  disabled={!on}
+                  disabled={disabled || !on}
                   icon={<StarBorderIcon fontSize="small" />}
                   checkedIcon={<StarIcon fontSize="small" />}
                   slotProps={{
-                    input: { 'aria-label': `Make ${effort} the default` },
+                    input: {
+                      'aria-label': `${label}: make ${effort} the default`,
+                    },
                   }}
                 />
               </Tooltip>
@@ -245,10 +276,12 @@ function ReasoningLadder({
 }
 
 function StageRouting({
+  stages,
   value,
   onChange,
   onReset,
 }: {
+  stages: StageRow[];
   value: ModelProfilePayload;
   onChange: (
     stage: string,
@@ -486,6 +519,106 @@ function StageRouting({
   );
 }
 
+function QueryConsoleSettingsPanel({
+  value,
+  primaryModelId,
+  onChange,
+  onToggleEffort,
+}: {
+  value: QueryConsoleSettings;
+  primaryModelId: string;
+  onChange: (changes: Partial<QueryConsoleSettings>) => void;
+  onToggleEffort: (effort: ReasoningEffort, selected: boolean) => void;
+}) {
+  const model = value.model_id?.trim() || primaryModelId || 'the primary model';
+  const levels = value.reasoning_efforts;
+  const outcome =
+    levels.length === 1
+      ? `Every question runs ${model} at ${levels[0]}. One level is not a choice, so when this is the only profile offered the console shows no picker.`
+      : `The console’s picker offers ${levels.join(', ')} on ${model}; questions start on ${value.default_reasoning_effort}.`;
+  return (
+    <Box sx={{ ...panelSx, overflow: 'hidden' }}>
+      <FormControlLabel
+        sx={{ alignItems: 'flex-start', m: 0, px: 2, py: 1.5, width: '100%' }}
+        control={
+          <Switch
+            checked={value.enabled}
+            onChange={(e) => onChange({ enabled: e.target.checked })}
+          />
+        }
+        label={
+          <Box sx={{ pt: 0.75 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              Offer in the query console
+            </Typography>
+            <Typography color="text.secondary" variant="caption" component="p">
+              {value.enabled
+                ? 'Questions asked in Ask mode can run on this profile.'
+                : 'Ask mode never runs on this profile. With no profile offered, the console hides Ask mode.'}
+            </Typography>
+          </Box>
+        }
+      />
+      <Box
+        aria-disabled={!value.enabled}
+        sx={{
+          borderTop: 1,
+          borderColor: 'divider',
+          display: 'grid',
+          gap: 2.5,
+          opacity: value.enabled ? 1 : 0.5,
+          px: 2,
+          py: 2,
+          transition: 'opacity 150ms ease-out',
+        }}
+      >
+        <TextField
+          label="Model ID"
+          fullWidth
+          disabled={!value.enabled}
+          value={value.model_id ?? ''}
+          placeholder={primaryModelId || 'Primary model'}
+          onChange={(e) => onChange({ model_id: e.target.value || null })}
+          sx={[monoInputSx, { maxWidth: 560 }]}
+          helperText="Empty runs the primary model."
+          slotProps={{
+            inputLabel: { shrink: true },
+            htmlInput: { 'aria-label': 'Query console model' },
+          }}
+        />
+        <Box sx={{ display: 'grid', gap: 1 }}>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            Reasoning
+          </Typography>
+          <Typography color="text.secondary" variant="caption" component="p">
+            Check the levels the console offers, and star the one questions
+            start on.
+          </Typography>
+          <ReasoningLadder
+            label="Query console reasoning"
+            available={levels}
+            defaultEffort={value.default_reasoning_effort}
+            defaultHint={(effort) => `Start questions on ${effort}`}
+            disabled={!value.enabled}
+            onToggle={onToggleEffort}
+            onDefault={(effort) =>
+              onChange({ default_reasoning_effort: effort })
+            }
+          />
+        </Box>
+        <Typography
+          color="text.secondary"
+          variant="body2"
+          aria-live="polite"
+          sx={{ maxWidth: '70ch' }}
+        >
+          {outcome}
+        </Typography>
+      </Box>
+    </Box>
+  );
+}
+
 function ProfileEditor({
   profile,
   globalRunCostBudgetUsd,
@@ -559,12 +692,12 @@ function ProfileEditor({
     });
   const toggleEffort = (effort: ReasoningEffort, selected: boolean) =>
     setValue((current) => {
-      const nextEfforts = efforts.filter((candidate) =>
-        candidate === effort
-          ? selected
-          : current.user_reasoning_efforts.includes(candidate),
+      const nextEfforts = toggledEfforts(
+        current.user_reasoning_efforts,
+        effort,
+        selected,
       );
-      if (nextEfforts.length === 0) return current;
+      if (!nextEfforts) return current;
       return {
         ...current,
         user_reasoning_efforts: nextEfforts,
@@ -573,6 +706,34 @@ function ProfileEditor({
         )
           ? current.default_reasoning_effort
           : nextEfforts[0],
+      };
+    });
+
+  const updateConsole = (changes: Partial<QueryConsoleSettings>) =>
+    setValue((current) => ({
+      ...current,
+      query_console: { ...current.query_console, ...changes },
+    }));
+  const toggleConsoleEffort = (effort: ReasoningEffort, selected: boolean) =>
+    setValue((current) => {
+      const console = current.query_console;
+      const nextEfforts = toggledEfforts(
+        console.reasoning_efforts,
+        effort,
+        selected,
+      );
+      if (!nextEfforts) return current;
+      return {
+        ...current,
+        query_console: {
+          ...console,
+          reasoning_efforts: nextEfforts,
+          default_reasoning_effort: nextEfforts.includes(
+            console.default_reasoning_effort,
+          )
+            ? console.default_reasoning_effort
+            : nextEfforts[0],
+        },
       };
     });
 
@@ -809,7 +970,10 @@ function ProfileEditor({
                 description="Check the levels offered in the chat selector, and star the one new conversations start on."
               >
                 <ReasoningLadder
-                  value={value}
+                  label="Chat reasoning"
+                  available={value.user_reasoning_efforts}
+                  defaultEffort={value.default_reasoning_effort}
+                  defaultHint={(effort) => `Start new chats on ${effort}`}
                   onToggle={toggleEffort}
                   onDefault={(effort) =>
                     setValue({ ...value, default_reasoning_effort: effort })
@@ -822,9 +986,22 @@ function ProfileEditor({
                 description={`Override the model or reasoning for one stage of a turn; an empty model runs the primary, and “User’s choice” follows the level picked in chat. ${overriddenCount === 0 ? 'Every stage currently runs the base.' : `${overriddenCount} of ${stages.length} stages are overridden.`}`}
               >
                 <StageRouting
+                  stages={stages}
                   value={value}
                   onChange={updateOverride}
                   onReset={resetOverride}
+                />
+              </Section>
+
+              <Section
+                title="Query console"
+                description="Ask mode in the query console turns a question into one Cypher query in a single call, so a fast model at low reasoning usually serves it best."
+              >
+                <QueryConsoleSettingsPanel
+                  value={value.query_console}
+                  primaryModelId={value.primary.model_id.trim()}
+                  onChange={updateConsole}
+                  onToggleEffort={toggleConsoleEffort}
                 />
               </Section>
             </Box>

@@ -8,6 +8,7 @@ export interface Features {
   chat_schedules: boolean;
   chat_connections: boolean;
   chat_elicitation?: boolean;
+  query_generation?: boolean;
 }
 
 // Disabled defaults prevent feature UI from flashing before GET /api/v1/config
@@ -16,6 +17,7 @@ export const DEFAULT_FEATURES: Features = {
   chat: false,
   chat_schedules: false,
   chat_connections: false,
+  query_generation: false,
 };
 
 export const BACKEND_DEFAULT_FEATURES: Features = {
@@ -23,6 +25,8 @@ export const BACKEND_DEFAULT_FEATURES: Features = {
   chat_schedules: true,
   // External gateways are opt-in, so an older backend has none configured.
   chat_connections: false,
+  // Newer than the flag mechanism, so a backend that omits it lacks the route.
+  query_generation: false,
 };
 
 export const FeaturesContext = createContext<Features>(DEFAULT_FEATURES);

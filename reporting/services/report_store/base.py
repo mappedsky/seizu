@@ -909,8 +909,12 @@ class ReportStore(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def save_query_history(self, user_id: str, query: str) -> QueryHistoryItem:
-        """Append a query execution to the user's history and return the new item."""
+    async def save_query_history(self, user_id: str, query: str, prompt: str | None = None) -> QueryHistoryItem:
+        """Append a query execution to the user's history and return the new item.
+
+        ``prompt`` is the plain-text question a generated query was produced
+        from; it is empty for a query the user wrote.
+        """
 
     @abstractmethod
     async def list_query_history(self, user_id: str, page: int, per_page: int) -> tuple[list[QueryHistoryItem], int]:

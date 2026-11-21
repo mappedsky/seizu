@@ -25,6 +25,22 @@ export interface StageModelOverride {
   reasoning_effort?: ConfiguredReasoningEffort | null;
 }
 
+/** How a profile answers questions asked in the query console's Ask mode. */
+export interface QueryConsoleSettings {
+  enabled: boolean;
+  /** Empty runs the profile's primary model. */
+  model_id?: string | null;
+  reasoning_efforts: ReasoningEffort[];
+  default_reasoning_effort: ReasoningEffort;
+}
+
+export const DEFAULT_QUERY_CONSOLE_SETTINGS: QueryConsoleSettings = {
+  enabled: true,
+  model_id: null,
+  reasoning_efforts: ['low'],
+  default_reasoning_effort: 'low',
+};
+
 export interface ModelProfilePayload {
   name: string;
   description: string;
@@ -36,6 +52,7 @@ export interface ModelProfilePayload {
   user_reasoning_efforts: ReasoningEffort[];
   default_reasoning_effort: ReasoningEffort;
   run_cost_budget_usd: number;
+  query_console: QueryConsoleSettings;
 }
 
 export interface ModelProfile extends ModelProfilePayload {
@@ -65,6 +82,12 @@ export interface SelectableModelProfile {
   run_cost_budget_usd: number;
   effective_cost_budget_usd: number;
 }
+
+/** What a model and reasoning picker needs to know about one profile. */
+export type ModelProfileChoice = Pick<
+  SelectableModelProfile,
+  'profile_id' | 'name' | 'is_default' | 'reasoning_efforts'
+>;
 
 async function responseError(response: Response): Promise<Error> {
   const data = (await response.json().catch(() => null)) as {

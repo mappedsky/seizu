@@ -60,6 +60,35 @@ class StageModelOverride(BaseModel):
         }
 
 
+class QueryConsoleSettings(BaseModel):
+    """How a profile answers questions asked in the query console's Ask mode.
+
+    Resolved on its own, never carried in a run's ResolvedModelProfile
+    snapshot (AGT-058).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # Empty runs the profile's primary model.
+    model_id: str | None = Field(default=None, min_length=1, max_length=300)
+    reasoning_efforts: tuple[SelectableReasoningEffort, ...] = Field(default=("low",), min_length=1)
+    default_reasoning_effort: SelectableReasoningEffort = "low"
+
+    @field_validator("model_id", mode="before")
+    @classmethod
+    def blank_model_is_primary(cls, value: Any) -> Any:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @model_validator(mode="after")
+    def validate_reasoning(self) -> "QueryConsoleSettings":
+        if len(set(self.reasoning_efforts)) != len(self.reasoning_efforts):
+            raise ValueError("query console reasoning levels must be unique")
+        if self.default_reasoning_effort not in self.reasoning_efforts:
+            raise ValueError("the query console's default reasoning must be one of its levels")
+        return self
+
+
 class ModelProfileConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -71,6 +100,7 @@ class ModelProfileConfig(BaseModel):
     )
     default_reasoning_effort: SelectableReasoningEffort = "medium"
     run_cost_budget_usd: float = Field(gt=0, le=10_000)
+    query_console: QueryConsoleSettings = Field(default_factory=QueryConsoleSettings)
 
     @model_validator(mode="before")
     @classmethod
@@ -155,6 +185,30 @@ class SelectableModelProfile(BaseModel):
 
 class SelectableModelProfilesResponse(BaseModel):
     profiles: list[SelectableModelProfile]
+    default_profile_id: str | None = None
+
+
+class QueryConsoleModelOption(BaseModel):
+    """A profile the query console may generate with, and the levels it offers."""
+
+    profile_id: str
+    name: str
+    description: str
+    model_id: str
+    default_reasoning_effort: SelectableReasoningEffort
+    reasoning_efforts: tuple[SelectableReasoningEffort, ...]
+
+
+class QueryConsoleModelOptions(BaseModel):
+    """What the console's Ask mode may run on.
+
+    ``available`` is false when profiles are configured but none is enabled
+    for the console. With no profiles at all, ``profiles`` is empty and the
+    deployment's ``QUERY_GENERATION_*`` settings apply.
+    """
+
+    available: bool
+    profiles: list[QueryConsoleModelOption]
     default_profile_id: str | None = None
 
 

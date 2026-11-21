@@ -83,6 +83,30 @@ describe('computeLayout', () => {
       distance(compact, 'a', 'c'),
     );
   });
+
+  it('stays on the canvas around a node with many neighbours', () => {
+    const graphNodes = [
+      { id: 'hub' },
+      ...Array.from({ length: 150 }, (_, i) => ({ id: `n${i}` })),
+    ];
+    const graphLinks = graphNodes
+      .slice(1)
+      .map((node) => ({ source: 'hub', target: node.id, type: 'HAS' }));
+
+    for (const repulsion of [0.5, 1, 4]) {
+      const positions = computeLayout(
+        graphNodes,
+        graphLinks,
+        800,
+        450,
+        repulsion,
+      );
+      for (const { x, y } of positions.values()) {
+        expect(Math.abs(x)).toBeLessThan(10_000);
+        expect(Math.abs(y)).toBeLessThan(10_000);
+      }
+    }
+  });
 });
 
 describe('pointToSegmentDistance', () => {
@@ -180,6 +204,43 @@ describe('extractGraphData', () => {
       target: 'domain-repo-id',
       properties: { id: 'domain-rel-id' },
     });
+  });
+
+  it('keeps one link for a relationship that several paths share', () => {
+    const repo = { id: 1, labels: ['GitHubRepository'], properties: {} };
+    const owns = {
+      id: 10,
+      type: 'REQUIRES',
+      start_node_id: 1,
+      end_node_id: 2,
+      properties: {},
+    };
+    const path = (leaf: number) => ({
+      p: {
+        nodes: [
+          repo,
+          { id: 2, labels: ['Dependency'], properties: {} },
+          { id: leaf, labels: ['CVE'], properties: {} },
+        ],
+        relationships: [
+          owns,
+          {
+            id: 100 + leaf,
+            type: 'AFFECTS',
+            start_node_id: leaf,
+            end_node_id: 2,
+            properties: {},
+          },
+        ],
+      },
+    });
+
+    const result = extractGraphData([path(3), path(4), path(5)], 'name');
+
+    expect(result?.nodes).toHaveLength(5);
+    expect(result?.links.map((link) => link.neo4j_id)).toEqual([
+      10, 103, 104, 105,
+    ]);
   });
 
   it('falls back to Neo4j internal id when a path node has no id property', () => {

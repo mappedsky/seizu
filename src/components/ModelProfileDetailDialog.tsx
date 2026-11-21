@@ -75,6 +75,17 @@ export default function ModelProfileDetailDialog({
               <Typography>None</Typography>
             ) : null}
           </DetailSection>
+          <DetailSection title="Query console">
+            {profile.query_console.enabled ? (
+              <Typography variant="body2">
+                {profile.query_console.model_id || 'Primary model'};{' '}
+                {profile.query_console.reasoning_efforts.join(', ')} (starts on{' '}
+                {profile.query_console.default_reasoning_effort})
+              </Typography>
+            ) : (
+              <Typography>Not offered</Typography>
+            )}
+          </DetailSection>
         </>
       ) : null}
     </DetailDialog>
