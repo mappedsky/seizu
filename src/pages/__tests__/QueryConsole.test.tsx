@@ -7,7 +7,13 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
-import { BrowserRouter, MemoryRouter } from 'react-router-dom';
+import {
+  BrowserRouter,
+  MemoryRouter,
+  type NavigateFunction,
+  useLocation,
+  useNavigate,
+} from 'react-router-dom';
 import QueryConsole from 'src/pages/QueryConsole';
 import { AuthConfigContext } from 'src/authConfig.context';
 import { FeaturesContext } from 'src/features.context';
@@ -71,10 +77,20 @@ const mockUsePermissionState =
   >;
 const theme = createTheme();
 
+// The address bar as the console last left it, and a way to press Back.
+let currentSearch = '';
+let probeNavigate: NavigateFunction | null = null;
+function LocationProbe() {
+  currentSearch = useLocation().search;
+  probeNavigate = useNavigate();
+  return null;
+}
+
 function Wrapper({ children }: { children: React.ReactNode }) {
   return (
     <MemoryRouter>
       <ThemeProvider theme={theme}>{children}</ThemeProvider>
+      <LocationProbe />
     </MemoryRouter>
   );
 }
@@ -652,6 +668,49 @@ describe('QueryConsole query generation', () => {
 
     expect(screen.queryByRole('button', { name: 'Ask' })).toBeNull();
     expect(screen.getByRole('textbox', { name: 'Cypher query' })).toBeTruthy();
+  });
+
+  it('starts a new query from scratch after a generated one ran', async () => {
+    renderConsole();
+    ask('list my aws accounts');
+    await waitFor(() => expect(latestGraphProps?.queryHistoryId).toBe('h-gen'));
+    await waitFor(() => expect(currentSearch).toBe('?h=h-gen'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'New query' }));
+
+    await waitFor(() => expect(currentSearch).toBe(''));
+    expect(editorValue()).toBe('');
+    expect(screen.queryByTestId('query-question')).toBeNull();
+    expect(
+      screen.getByText('Run a query below to visualize the graph.'),
+    ).toBeTruthy();
+    // Nothing left to clear, so the button goes too.
+    expect(screen.queryByRole('button', { name: 'New query' })).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByRole('textbox', { name: 'Cypher query' }),
+    );
+
+    // Back returns to the query that was cleared.
+    latestGraphProps = null;
+    act(() => {
+      void probeNavigate!(-1);
+    });
+    await waitFor(() => expect(latestGraphProps?.queryHistoryId).toBe('h-gen'));
+  });
+
+  it('keeps Ask mode and focuses the question when starting over', async () => {
+    renderConsole();
+    fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+    const input = screen.getByRole('textbox', { name: 'Question' });
+    fireEvent.change(input, { target: { value: 'half a thought' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'New query' }));
+
+    const question = screen.getByRole('textbox', {
+      name: 'Question',
+    }) as HTMLTextAreaElement;
+    expect(question.value).toBe('');
+    expect(document.activeElement).toBe(question);
   });
 
   it('remembers Ask mode across visits', () => {

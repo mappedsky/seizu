@@ -343,6 +343,23 @@ export default function QueryConsole() {
     [navigate, dismissSchemaPanel, stopGenerating],
   );
 
+  /** Start from scratch: empty editor and question, no result, no `?h=`. */
+  const handleNewQuery = useCallback(() => {
+    stopGenerating();
+    setQueryText('');
+    setQuestionText('');
+    setNote(null);
+    setRun(null);
+    // Nothing this page published is on screen any more, so Back to one of
+    // those entries is a request to restore it, not this page's own echo.
+    ownHistoryIds.current.clear();
+    if (location.search) {
+      // Claimed first, so the restore effect reads the bare URL as handled.
+      handledSearch.current = '';
+      navigate({ search: '' });
+    }
+  }, [location.search, navigate, stopGenerating]);
+
   const handleModeChange = useCallback((next: ComposerMode) => {
     setModeChoice(next);
     window.localStorage.setItem(QUERY_CONSOLE_MODE_STORAGE_KEY, next);
@@ -510,6 +527,13 @@ export default function QueryConsole() {
           provenance={visibleNote}
           onDismissProvenance={() => setNote(null)}
           onRefine={() => handleModeChange('ask')}
+          canStartNew={
+            run !== null ||
+            note !== null ||
+            queryText.trim() !== '' ||
+            questionText.trim() !== ''
+          }
+          onNewQuery={handleNewQuery}
           modelPick={
             choiceCount > 1
               ? {

@@ -11,6 +11,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import Add from '@mui/icons-material/Add';
 import AutoAwesome from '@mui/icons-material/AutoAwesome';
 import Close from '@mui/icons-material/Close';
 import PlayArrow from '@mui/icons-material/PlayArrow';
@@ -97,6 +98,10 @@ interface QueryComposerProps {
   onDismissProvenance: () => void;
   onRefine: () => void;
   modelPick: ModelPick | null;
+  /** Whether there is a query, question or result to clear. */
+  canStartNew: boolean;
+  /** Clear the editor, the question and the results, for a query from scratch. */
+  onNewQuery: () => void;
 }
 
 /**
@@ -113,7 +118,10 @@ function CypherOnlyComposer({
   queryText,
   onQueryTextChange,
   onRun,
+  canStartNew,
+  onNewQuery,
 }: QueryComposerProps) {
+  const cypherRef = useRef<HTMLTextAreaElement | null>(null);
   return (
     <ComposerSurface busy={false}>
       <Box
@@ -131,7 +139,16 @@ function CypherOnlyComposer({
           onChange={onQueryTextChange}
           onRun={onRun}
           readOnly={false}
+          inputRef={cypherRef}
         />
+        {canStartNew && (
+          <NewQueryButton
+            onClick={() => {
+              onNewQuery();
+              cypherRef.current?.focus();
+            }}
+          />
+        )}
         <RunButton disabled={!queryText.trim()} onRun={onRun} />
       </Box>
     </ComposerSurface>
@@ -153,6 +170,8 @@ function StackedComposer({
   onDismissProvenance,
   onRefine,
   modelPick,
+  canStartNew,
+  onNewQuery,
 }: QueryComposerProps) {
   const asking = mode === 'ask';
   const generating = generatingSince !== null;
@@ -289,6 +308,16 @@ function StackedComposer({
         )}
 
         <Box sx={{ flex: 1 }} />
+
+        {canStartNew && !generating && (
+          <NewQueryButton
+            onClick={() => {
+              onNewQuery();
+              // The mode stays; its empty field takes the cursor.
+              (asking ? questionRef : cypherRef).current?.focus();
+            }}
+          />
+        )}
 
         {generating ? (
           <>
@@ -574,6 +603,31 @@ function CypherInput({
       inputProps={{ 'aria-label': 'Cypher query', spellCheck: false }}
       sx={{ alignSelf: 'center', ...cypherInputSx }}
     />
+  );
+}
+
+/** Starts over: a quiet companion to the primary action, never its twin. */
+function NewQueryButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Tooltip title="Clear the query and its results" describeChild>
+      <Button
+        size="small"
+        onClick={onClick}
+        startIcon={<Add />}
+        sx={{
+          color: 'text.secondary',
+          flexShrink: 0,
+          fontSize: 13,
+          height: 32,
+          px: 1.25,
+          textTransform: 'none',
+          '& .MuiButton-startIcon': { mr: 0.5 },
+          '&:hover': { bgcolor: 'action.hover', color: 'text.primary' },
+        }}
+      >
+        New query
+      </Button>
+    </Tooltip>
   );
 }
 
