@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from reporting.services import model_profiles, query_generation
+from reporting.services.chat_budget import BudgetExceeded
 from reporting.services.chat_models import ModelSpec
 from reporting.services.query_generation import (
     GeneratedCypher,
@@ -221,6 +222,61 @@ async def test_repair_is_skipped_when_the_first_call_used_most_of_the_time(mocke
 
     assert invoke.await_count == 1
     assert result.errors == ["syntax"]
+
+
+async def test_slow_validation_is_bounded_by_the_deadline(mocker, real_provider):
+    mocker.patch("reporting.settings.QUERY_GENERATION_TIMEOUT_SECONDS", 1)
+    invoke = _model_returns(mocker, GeneratedCypher(query="MATCH (n) RETURN n LIMIT 1", explanation="x"))
+
+    async def slow_validation(*_args, **_kwargs):
+        await asyncio.sleep(5)
+
+    mocker.patch("reporting.services.query_generation.validate_query", side_effect=slow_validation)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    result = await generate_query("one node")
+
+    assert loop.time() - started < 2
+    assert invoke.await_count == 1
+    assert result.query == "MATCH (n) RETURN n LIMIT 1"
+    assert not result.valid
+    assert "did not finish in time" in result.errors[0]
+
+
+async def test_slow_schema_fetch_is_bounded_by_the_deadline(mocker, real_provider):
+    mocker.patch("reporting.settings.QUERY_GENERATION_TIMEOUT_SECONDS", 1)
+
+    async def slow_schema(*_args, **_kwargs):
+        await asyncio.sleep(5)
+
+    mocker.patch("reporting.services.query_generation.reporting_neo4j.fetch_graph_schema", side_effect=slow_schema)
+    invoke = _model_returns(mocker)
+
+    with pytest.raises(QueryGenerationTimeout):
+        await generate_query("anything")
+    invoke.assert_not_awaited()
+
+
+async def test_unaffordable_repair_keeps_the_validated_first_query(mocker, real_provider):
+    calls = 0
+
+    async def first_then_over_budget(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return GeneratedCypher(query="MATCH (a:Nope) RETURN a LIMIT 1", explanation="first")
+        raise BudgetExceeded("cost")
+
+    mocker.patch("reporting.services.chat_graph._invoke_structured_output", side_effect=first_then_over_budget)
+    _validator(mocker, ValidationResult(warnings=["Label Nope does not exist"]))
+
+    result = await generate_query("anything")
+
+    assert calls == 2
+    assert result.valid
+    assert result.query == "MATCH (a:Nope) RETURN a LIMIT 1"
+    assert result.warnings == ["Label Nope does not exist"]
 
 
 async def test_generation_uses_the_query_console_choice_and_reports_it(mocker, real_provider):

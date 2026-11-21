@@ -7,7 +7,7 @@ carries the graph schema, the model returns one structured
 ``{query, explanation}``, and the result goes through the same validator an
 ad-hoc query does. A query the validator rejects or
 warns about is sent back once with the diagnostics for a repair; whatever
-that returns is final.
+that returns is final, and a repair that cannot finish leaves the first answer.
 
 Nothing here executes the query. The caller decides whether a validated
 query is recorded and run.
@@ -41,6 +41,7 @@ _MAX_OUTPUT_TOKENS = 4096
 _MAX_SCHEMA_CHARS = 24_000
 
 _MOCK_QUERY = "MATCH (n) RETURN n LIMIT 25"
+_VALIDATION_TIMEOUT_ERROR = "Validation did not finish in time, so this query was not checked."
 
 _SYSTEM_PROMPT = """\
 You write Neo4j Cypher queries for a security graph built by Cartography.
@@ -112,11 +113,16 @@ async def generate_query(
     level when omitted).
 
     Raises :class:`QueryGenerationUnavailable` when the profile cannot be
-    resolved and :class:`QueryGenerationTimeout` when the first answer does
-    not arrive in time; any other model or provider failure propagates.
+    resolved and :class:`QueryGenerationTimeout` when no answer arrives in
+    time; any other failure of the first model call propagates.
 
-    The repair call runs only when the time left is at least what the first
-    call took; otherwise the first query is returned with its diagnostics.
+    ``QUERY_GENERATION_TIMEOUT_SECONDS`` bounds the whole operation: schema
+    fetch, both model calls and both validations. An answer whose validation
+    does not finish in time is returned with an error rather than discarded,
+    so it is shown but never run. The repair is optional: it runs only when
+    the time left is at least what the first round took, and if it times out
+    or fails for any reason (an exhausted budget included) the first query is
+    returned with its diagnostics.
     """
     from reporting.services import chat_graph
 
@@ -135,7 +141,8 @@ async def generate_query(
         raise QueryGenerationUnavailable(str(exc)) from exc
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + max(1, settings.QUERY_GENERATION_TIMEOUT_SECONDS)
+    started = loop.time()
+    deadline = started + max(1, settings.QUERY_GENERATION_TIMEOUT_SECONDS)
     spec = choice.spec
     model = chat_graph.build_chat_model(spec)
     controller = BudgetController(
@@ -149,14 +156,13 @@ async def generate_query(
         "Generating query",
         extra={"model": spec.model_id, "reasoning_effort": spec.reasoning_effort, "profile_id": spec.profile_id},
     )
-    messages = _initial_messages(question, current_query, await _schema_text())
-    started = loop.time()
     try:
         async with asyncio.timeout_at(deadline):
+            messages = _initial_messages(question, current_query, await _schema_text())
             generated = await _invoke(chat_graph, model, messages, config)
     except TimeoutError as exc:
         raise QueryGenerationTimeout from exc
-    result = _answered_by(await _validated(generated), spec)
+    result = _answered_by(await _validated_by(generated, deadline), spec)
     if result.valid and not result.warnings:
         return result
     if deadline - loop.time() < loop.time() - started:
@@ -170,15 +176,32 @@ async def generate_query(
     try:
         async with asyncio.timeout_at(deadline):
             repaired = await _invoke(chat_graph, model, [*messages, *_repair_messages(result)], config)
+            final = _answered_by(await _validated(repaired), spec)
     except TimeoutError:
         logger.info("Generated query repair timed out; returning the first query")
         return result
-    final = _answered_by(await _validated(repaired), spec)
+    except Exception:
+        logger.warning("Generated query repair failed; returning the first query", exc_info=True)
+        return result
     # A repair that broke a query which only had warnings is worse than the
     # original: keep the runnable one.
     if result.valid and not final.valid:
         return result
     return final
+
+
+async def _validated_by(generated: GeneratedCypher, deadline: float) -> QueryGeneration:
+    """Validate ``generated``, reporting an unfinished validation as an error."""
+    try:
+        async with asyncio.timeout_at(deadline):
+            return await _validated(generated)
+    except TimeoutError:
+        logger.info("Generated query validation timed out")
+        return QueryGeneration(
+            query=_strip_fences(generated.query),
+            explanation=generated.explanation.strip(),
+            errors=[_VALIDATION_TIMEOUT_ERROR],
+        )
 
 
 def _answered_by(result: QueryGeneration, spec: chat_models.ModelSpec) -> QueryGeneration:
