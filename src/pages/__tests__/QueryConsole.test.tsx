@@ -599,6 +599,36 @@ describe('QueryConsole query generation', () => {
     ).toBe('slow question');
   });
 
+  it('drops a generation in flight when the page is left', async () => {
+    let finish: (response: Response) => void = () => undefined;
+    let aborted = false;
+    fetchSpy.mockImplementation((_input, init) => {
+      init?.signal?.addEventListener('abort', () => {
+        aborted = true;
+      });
+      return new Promise<Response>((resolve) => {
+        finish = resolve;
+      });
+    });
+    const { rerender } = renderConsole();
+
+    ask('slow question');
+    expect(await screen.findByText(/Generating · \d+s/)).toBeTruthy();
+
+    // Another page replaces the console; the router (and its probe) stays.
+    rerender(<div />);
+    expect(aborted).toBe(true);
+    await act(async () => {
+      finish(
+        new Response(JSON.stringify(generated()), {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    });
+
+    expect(currentSearch).toBe('');
+  });
+
   function fastProfile(
     efforts: QueryConsoleModelOptions['profiles'][number]['reasoning_efforts'],
   ) {

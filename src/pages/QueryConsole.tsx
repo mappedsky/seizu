@@ -185,6 +185,17 @@ export default function QueryConsole() {
     setGeneratingSince(null);
   }, []);
 
+  // Leaving the page drops a generation in flight, or its answer would land
+  // and navigate() the user back here.
+  useEffect(
+    () => () => {
+      generationSeqRef.current += 1;
+      generationAbortRef.current?.abort();
+      generationAbortRef.current = null;
+    },
+    [],
+  );
+
   const handleRun = useCallback(() => {
     const trimmed = queryTextRef.current.trim();
     if (!trimmed) return;
