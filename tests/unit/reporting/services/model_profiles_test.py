@@ -275,6 +275,14 @@ async def test_query_console_uses_its_settings_without_profiles(mocker):
     assert options.profiles == []
 
 
+async def test_query_console_refuses_a_named_profile_when_none_is_enabled(mocker):
+    # The profile was disabled or deleted after the console offered it.
+    _list_profiles(mocker)
+
+    with pytest.raises(model_profiles.ModelProfileUnavailable, match="not available in the query console"):
+        await model_profiles.resolve_query_console("profile-1")
+
+
 async def test_query_console_options_describe_the_offered_levels(mocker):
     _list_profiles(
         mocker,

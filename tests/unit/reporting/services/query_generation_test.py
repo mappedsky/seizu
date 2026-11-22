@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from reporting.services import model_profiles, query_generation
+from reporting.services import chat_models, model_profiles, query_generation
 from reporting.services.chat_budget import BudgetExceeded
 from reporting.services.chat_models import ModelSpec
 from reporting.services.query_generation import (
@@ -277,6 +277,31 @@ async def test_unaffordable_repair_keeps_the_validated_first_query(mocker, real_
     assert result.valid
     assert result.query == "MATCH (a:Nope) RETURN a LIMIT 1"
     assert result.warnings == ["Label Nope does not exist"]
+
+
+@pytest.mark.parametrize(("model_ceiling", "expected"), [(16_384, 4096), (2048, 2048)])
+async def test_output_ceiling_is_clamped_before_the_model_is_built(mocker, real_provider, model_ceiling, expected):
+    mocker.patch(
+        "reporting.services.query_generation.model_profiles.resolve_query_console",
+        AsyncMock(
+            return_value=model_profiles.StandaloneModelChoice(
+                spec=ModelSpec(model_id="anthropic/claude", max_output_tokens=model_ceiling, reasoning_effort="high"),
+                cost_budget_usd=1.0,
+            )
+        ),
+    )
+    build = mocker.patch("reporting.services.chat_graph.build_chat_model", return_value=MagicMock())
+    invoke = _model_returns(mocker, GeneratedCypher(query="MATCH (n) RETURN n LIMIT 1", explanation="x"))
+    _validator(mocker, ValidationResult())
+
+    await generate_query("one node")
+
+    built = build.call_args.args[0]
+    # max_tokens, the thinking budget derived from the spec, and the fallback
+    # path's limit must all describe the same allowance.
+    assert built.max_output_tokens == expected
+    assert invoke.await_args.kwargs["max_output_tokens"] == expected
+    assert chat_models.thinking_budget_tokens(built) < expected
 
 
 async def test_generation_uses_the_query_console_choice_and_reports_it(mocker, real_provider):

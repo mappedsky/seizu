@@ -200,10 +200,15 @@ async def resolve_query_console(
     The profile's ``query_console`` settings decide: whether it is offered,
     its model (the primary when unset), and the reasoning levels a caller may
     pick. With no ``profile_id`` the console's starting profile is used; with
-    no profile enabled at all, the ``QUERY_GENERATION_*`` settings apply.
+    no profile enabled at all, the ``QUERY_GENERATION_*`` settings apply, but
+    only to a request that named no profile.
     """
     enabled = await report_store.list_model_profiles(enabled_only=True)
     if not enabled:
+        # A request that named a profile is refused rather than sent to a
+        # model the caller did not choose.
+        if profile_id:
+            raise ModelProfileUnavailable(_QUERY_CONSOLE_PROFILE_UNAVAILABLE)
         return StandaloneModelChoice(
             spec=chat_models.resolve_environment("query_generation"),
             cost_budget_usd=max(0.0, settings.CHAT_RUN_COST_BUDGET_USD),

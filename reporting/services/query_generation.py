@@ -143,7 +143,9 @@ async def generate_query(
     loop = asyncio.get_running_loop()
     started = loop.time()
     deadline = started + max(1, settings.QUERY_GENERATION_TIMEOUT_SECONDS)
-    spec = choice.spec
+    # Clamped before the model is built, so max_tokens, the thinking budget
+    # derived from it, and the structured-output fallback all agree.
+    spec = replace(choice.spec, max_output_tokens=min(choice.spec.max_output_tokens, _MAX_OUTPUT_TOKENS))
     model = chat_graph.build_chat_model(spec)
     controller = BudgetController(
         initial_budget_ledger(
@@ -159,7 +161,7 @@ async def generate_query(
     try:
         async with asyncio.timeout_at(deadline):
             messages = _initial_messages(question, current_query, await _schema_text())
-            generated = await _invoke(chat_graph, model, messages, config)
+            generated = await _invoke(chat_graph, model, messages, config, spec.max_output_tokens)
     except TimeoutError as exc:
         raise QueryGenerationTimeout from exc
     result = _answered_by(await _validated_by(generated, deadline), spec)
@@ -175,7 +177,9 @@ async def generate_query(
     )
     try:
         async with asyncio.timeout_at(deadline):
-            repaired = await _invoke(chat_graph, model, [*messages, *_repair_messages(result)], config)
+            repaired = await _invoke(
+                chat_graph, model, [*messages, *_repair_messages(result)], config, spec.max_output_tokens
+            )
             final = _answered_by(await _validated(repaired), spec)
     except TimeoutError:
         logger.info("Generated query repair timed out; returning the first query")
@@ -218,6 +222,7 @@ async def _invoke(
     model: Any,
     messages: list[BaseMessage],
     config: RunnableConfig,
+    max_output_tokens: int,
 ) -> GeneratedCypher:
     output = await chat_graph._invoke_structured_output(
         model,
@@ -225,7 +230,7 @@ async def _invoke(
         messages,
         config,
         phase=_PHASE,
-        max_output_tokens=_MAX_OUTPUT_TOKENS,
+        max_output_tokens=max_output_tokens,
     )
     if isinstance(output, GeneratedCypher):
         return output
