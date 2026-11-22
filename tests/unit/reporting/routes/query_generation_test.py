@@ -154,17 +154,31 @@ async def test_history_failure_still_returns_the_query(mocker):
     assert ret.json()["history_id"] is None
 
 
-async def test_unavailable_model_is_503(mocker):
+async def test_unavailable_model_is_503_with_its_reason(mocker):
+    reason = "No model profile is enabled for the query console"
     mocker.patch(
         "reporting.routes.query_generation.generate_query",
-        AsyncMock(side_effect=QueryGenerationUnavailable("no profile")),
+        AsyncMock(side_effect=QueryGenerationUnavailable(reason)),
     )
 
     async with _client() as client:
         ret = await client.post("/api/v1/query/generate", json={"question": "nodes"})
 
     assert ret.status_code == 503
-    assert ret.json()["error"] == "no profile"
+    assert ret.json()["error"] == reason
+
+
+async def test_unavailable_with_an_unknown_message_is_503_without_detail(mocker):
+    mocker.patch(
+        "reporting.routes.query_generation.generate_query",
+        AsyncMock(side_effect=QueryGenerationUnavailable("Traceback: secret detail")),
+    )
+
+    async with _client() as client:
+        ret = await client.post("/api/v1/query/generate", json={"question": "nodes"})
+
+    assert ret.status_code == 503
+    assert ret.json()["error"] == "Query generation is not available"
 
 
 async def test_timeout_is_504(mocker):

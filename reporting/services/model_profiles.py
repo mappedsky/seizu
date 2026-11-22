@@ -23,6 +23,36 @@ class ModelProfileUnavailable(LookupError):
     """A selected model profile is missing or disabled."""
 
 
+# Every message ModelProfileUnavailable is raised with. They name what is wrong
+# with a selection and nothing else, so they are safe to show the caller.
+_PROFILE_GONE = "The selected model profile is no longer available"
+_REASONING_UNAVAILABLE = "The selected reasoning level is not available for this model profile"
+_NO_DEFAULT_PROFILE = "No default model profile is configured"
+_NO_QUERY_CONSOLE_PROFILE = "No model profile is enabled for the query console"
+_QUERY_CONSOLE_PROFILE_UNAVAILABLE = "The selected model profile is not available in the query console"
+_QUERY_CONSOLE_REASONING_UNAVAILABLE = "The selected reasoning level is not available in the query console"
+UNAVAILABLE_MESSAGES = frozenset(
+    {
+        _PROFILE_GONE,
+        _REASONING_UNAVAILABLE,
+        _NO_DEFAULT_PROFILE,
+        _NO_QUERY_CONSOLE_PROFILE,
+        _QUERY_CONSOLE_PROFILE_UNAVAILABLE,
+        _QUERY_CONSOLE_REASONING_UNAVAILABLE,
+    }
+)
+
+
+def public_unavailable_message(exc: Exception) -> str | None:
+    """The fixed message ``exc`` was raised with, or None if it is not one of them.
+
+    The return value is the module's own constant, never text read from the
+    exception, so it can go into a response as is.
+    """
+    text = str(exc)
+    return next((message for message in UNAVAILABLE_MESSAGES if message == text), None)
+
+
 _current_profile: ContextVar[ResolvedModelProfile | None] = ContextVar("chat_model_profile", default=None)
 
 _RUNTIME_ROLE = {"assistant": "default"}
@@ -110,19 +140,19 @@ async def resolve(
     if profile_id:
         profile = next((item for item in enabled if item.profile_id == profile_id), None)
         if profile is None:
-            raise ModelProfileUnavailable("The selected model profile is no longer available")
+            raise ModelProfileUnavailable(_PROFILE_GONE)
         selected_effort = reasoning_effort or profile.default_reasoning_effort
         if selected_effort not in profile.user_reasoning_efforts:
-            raise ModelProfileUnavailable("The selected reasoning level is not available for this model profile")
+            raise ModelProfileUnavailable(_REASONING_UNAVAILABLE)
         return _profile_snapshot(profile, selected_effort)
     if not enabled:
         return environment_snapshot()
     default = next((item for item in enabled if item.is_default), None)
     if default is None:
-        raise ModelProfileUnavailable("No default model profile is configured")
+        raise ModelProfileUnavailable(_NO_DEFAULT_PROFILE)
     selected_effort = reasoning_effort or default.default_reasoning_effort
     if selected_effort not in default.user_reasoning_efforts:
-        raise ModelProfileUnavailable("The selected reasoning level is not available for this model profile")
+        raise ModelProfileUnavailable(_REASONING_UNAVAILABLE)
     return _profile_snapshot(default, selected_effort)
 
 
@@ -180,17 +210,17 @@ async def resolve_query_console(
         )
     offered = _query_console_profiles(enabled)
     if not offered:
-        raise ModelProfileUnavailable("No model profile is enabled for the query console")
+        raise ModelProfileUnavailable(_NO_QUERY_CONSOLE_PROFILE)
     if profile_id:
         profile = next((item for item in offered if item.profile_id == profile_id), None)
         if profile is None:
-            raise ModelProfileUnavailable("The selected model profile is not available in the query console")
+            raise ModelProfileUnavailable(_QUERY_CONSOLE_PROFILE_UNAVAILABLE)
     else:
         profile = offered[0]
     console = profile.query_console
     effort = reasoning_effort or console.default_reasoning_effort
     if effort not in console.reasoning_efforts:
-        raise ModelProfileUnavailable("The selected reasoning level is not available in the query console")
+        raise ModelProfileUnavailable(_QUERY_CONSOLE_REASONING_UNAVAILABLE)
     spec = chat_models.resolve_environment(
         "query_generation",
         model_id=console.model_id or profile.primary.model_id,

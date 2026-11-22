@@ -48,10 +48,12 @@ async def generate(
             reasoning_effort=body.reasoning_effort,
         )
     except QueryGenerationUnavailable as exc:
-        # The message names what is wrong with the chosen profile; it carries
-        # no provider or model output.
-        logger.warning("Query generation unavailable", exc_info=exc)
-        return JSONResponse(content={"error": str(exc) or "Query generation is not available"}, status_code=503)
+        # An expected refusal (a stale or disabled selection), so no traceback.
+        logger.warning("Query generation unavailable: %s", exc)
+        # Only a known, fixed message reaches the caller; anything else is
+        # replaced with a generic one.
+        message = model_profiles.public_unavailable_message(exc) or "Query generation is not available"
+        return JSONResponse(content={"error": message}, status_code=503)
     except QueryGenerationTimeout:
         logger.warning("Query generation timed out")
         return JSONResponse(content={"error": "Query generation timed out"}, status_code=504)
