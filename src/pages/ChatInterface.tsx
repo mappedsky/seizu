@@ -19,11 +19,7 @@ import {
   Box,
   Button,
   Chip,
-  FormControl,
   IconButton,
-  ListSubheader,
-  MenuItem,
-  Select,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -51,7 +47,6 @@ import { useSidePanel } from 'src/hooks/useSidePanel';
 import { useChatSessions } from 'src/hooks/useChatSessions';
 import {
   type ReasoningEffort,
-  type SelectableModelProfile,
   useSelectableModelProfiles,
 } from 'src/hooks/useModelProfilesApi';
 import {
@@ -62,6 +57,7 @@ import {
 import { useFeature } from 'src/features.context';
 import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import ChatInput from 'src/components/ChatInput';
+import ModelProfileSelect from 'src/components/ModelProfileSelect';
 import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
 import ChatConfirmationCard from 'src/components/ChatConfirmationCard';
@@ -198,94 +194,6 @@ type SeizuChatMessage = UIMessage<
     'seizu-detail': SeizuChatDetail;
   }
 >;
-
-export function ModelProfileSelect({
-  profiles,
-  profileId,
-  reasoningEffort,
-  lockedProfileId,
-  disabled,
-  onChange,
-}: {
-  profiles: SelectableModelProfile[];
-  profileId: string;
-  reasoningEffort: ReasoningEffort | '';
-  lockedProfileId?: string | null;
-  disabled: boolean;
-  onChange: (profileId: string, reasoningEffort: ReasoningEffort) => void;
-}) {
-  const visibleProfiles = lockedProfileId
-    ? profiles.filter((profile) => profile.profile_id === lockedProfileId)
-    : profiles;
-  if (visibleProfiles.length === 0) return null;
-  const options = visibleProfiles.flatMap((profile) =>
-    profile.reasoning_efforts.map((effort) => ({
-      effort,
-      key: `${profile.profile_id}:${effort}`,
-      profile,
-    })),
-  );
-  const value =
-    profileId && reasoningEffort ? `${profileId}:${reasoningEffort}` : '';
-  return (
-    // A quiet text control in the composer's control row rather than a full
-    // field: it truncates before it crowds the send button.
-    <FormControl
-      disabled={disabled}
-      size="small"
-      sx={{ flexShrink: 1, minWidth: 0 }}
-    >
-      <Select
-        variant="standard"
-        disableUnderline
-        inputProps={{ 'aria-label': 'Model and reasoning' }}
-        sx={(theme) => ({
-          borderRadius: 1,
-          color: 'text.secondary',
-          fontSize: theme.typography.body2.fontSize,
-          '&:hover': { bgcolor: 'action.hover', color: 'text.primary' },
-          '& .MuiSelect-select': {
-            overflow: 'hidden',
-            pl: 1,
-            py: 0.5,
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          },
-          '& .MuiSelect-icon': { color: 'inherit' },
-        })}
-        onChange={(event) => {
-          const selected = options.find(
-            (option) => option.key === event.target.value,
-          );
-          if (selected) onChange(selected.profile.profile_id, selected.effort);
-        }}
-        renderValue={(selectedValue) => {
-          const selected = options.find(
-            (option) => option.key === selectedValue,
-          );
-          if (!selected) return '';
-          return `${selected.profile.name} · ${selected.effort}`;
-        }}
-        value={value}
-      >
-        {visibleProfiles.flatMap((profile) => [
-          <ListSubheader key={`${profile.profile_id}:group`}>
-            {profile.name}
-            {profile.is_default ? ' (default)' : ''}
-          </ListSubheader>,
-          ...profile.reasoning_efforts.map((effort) => (
-            <MenuItem
-              key={`${profile.profile_id}:${effort}`}
-              value={`${profile.profile_id}:${effort}`}
-            >
-              {effort}
-            </MenuItem>
-          )),
-        ])}
-      </Select>
-    </FormControl>
-  );
-}
 
 function formatMessageTime(iso: string | undefined): string {
   if (!iso) return '';

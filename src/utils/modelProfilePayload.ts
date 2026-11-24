@@ -1,4 +1,7 @@
-import type { ModelProfilePayload } from 'src/hooks/useModelProfilesApi';
+import {
+  DEFAULT_QUERY_CONSOLE_SETTINGS,
+  type ModelProfilePayload,
+} from 'src/hooks/useModelProfilesApi';
 
 export function modelProfilePayload(
   profile: ModelProfilePayload,
@@ -14,5 +17,6 @@ export function modelProfilePayload(
     user_reasoning_efforts: profile.user_reasoning_efforts,
     default_reasoning_effort: profile.default_reasoning_effort,
     run_cost_budget_usd: profile.run_cost_budget_usd,
+    query_console: profile.query_console ?? DEFAULT_QUERY_CONSOLE_SETTINGS,
   };
 }

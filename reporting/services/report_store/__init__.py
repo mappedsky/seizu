@@ -1099,8 +1099,8 @@ async def read_plugin_blob(plugin_id: str, sha256: str) -> PluginFile | None:
 # ---------------------------------------------------------------------------
 
 
-async def save_query_history(user_id: str, query: str) -> QueryHistoryItem:
-    return await get_store().save_query_history(user_id=user_id, query=query)
+async def save_query_history(user_id: str, query: str, prompt: str | None = None) -> QueryHistoryItem:
+    return await get_store().save_query_history(user_id=user_id, query=query, prompt=prompt)
 
 
 async def list_query_history(user_id: str, page: int, per_page: int) -> tuple[list[QueryHistoryItem], int]:

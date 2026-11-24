@@ -440,6 +440,7 @@ def _seed_model_profiles(config: Any, force: bool, dry_run: bool) -> None:
         "user_reasoning_efforts",
         "default_reasoning_effort",
         "run_cost_budget_usd",
+        "query_console",
     )
 
     for profile_key, definition in definitions:

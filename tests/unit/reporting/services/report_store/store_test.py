@@ -601,7 +601,7 @@ async def test_facade_delegates_remaining_methods(mock_store):
     mock_store.get_enabled_skill.assert_awaited_once_with("ss1", "sk1")
 
     await report_store.save_query_history("u1", "RETURN 1")
-    mock_store.save_query_history.assert_awaited_once_with(user_id="u1", query="RETURN 1")
+    mock_store.save_query_history.assert_awaited_once_with(user_id="u1", query="RETURN 1", prompt=None)
     await report_store.list_query_history("u1", 1, 10)
     mock_store.list_query_history.assert_awaited_once_with(user_id="u1", page=1, per_page=10)
 

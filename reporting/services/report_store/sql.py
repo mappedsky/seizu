@@ -443,6 +443,7 @@ class QueryHistoryRecord(SQLModel, table=True):  # type: ignore
     user_id: str = Field(index=True)
     query: str
     executed_at: str
+    prompt: str | None = None
 
 
 class ChatElicitationRecord(SQLModel, **{"table": True}):
@@ -912,6 +913,13 @@ def _stored_model_profile_config(value: dict[str, Any]) -> ModelProfileConfig:
     stage_overrides = normalized.get("stage_overrides")
     if isinstance(stage_overrides, dict):
         stage_overrides.pop("assistant", None)
+        legacy_console = stage_overrides.pop("query_generation", None)
+        if isinstance(legacy_console, dict) and "query_console" not in normalized:
+            effort = legacy_console.get("reasoning_effort")
+            normalized["query_console"] = {
+                "model_id": legacy_console.get("model_id"),
+                **({"reasoning_efforts": [effort], "default_reasoning_effort": effort} if effort else {}),
+            }
     return ModelProfileConfig.model_validate(normalized)
 
 
@@ -3701,7 +3709,7 @@ class SQLModelReportStore(ReportStore):
     # Query history
     # ------------------------------------------------------------------
 
-    async def save_query_history(self, user_id: str, query: str) -> QueryHistoryItem:
+    async def save_query_history(self, user_id: str, query: str, prompt: str | None = None) -> QueryHistoryItem:
         """Append a query execution to the user's history."""
         history_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
@@ -3710,6 +3718,7 @@ class SQLModelReportStore(ReportStore):
             user_id=user_id,
             query=query,
             executed_at=now,
+            prompt=prompt,
         )
         async with AsyncSession(_get_engine()) as session:
             session.add(record)
@@ -3719,6 +3728,7 @@ class SQLModelReportStore(ReportStore):
             user_id=user_id,
             query=query,
             executed_at=now,
+            prompt=prompt,
         )
 
     async def list_query_history(self, user_id: str, page: int, per_page: int) -> tuple[list[QueryHistoryItem], int]:
@@ -3746,6 +3756,7 @@ class SQLModelReportStore(ReportStore):
                     user_id=r.user_id,
                     query=r.query,
                     executed_at=r.executed_at,
+                    prompt=r.prompt,
                 )
                 for r in rows
             ], total
@@ -3765,6 +3776,7 @@ class SQLModelReportStore(ReportStore):
                 user_id=row.user_id,
                 query=row.query,
                 executed_at=row.executed_at,
+                prompt=row.prompt,
             )
 
     # ------------------------------------------------------------------
@@ -4007,6 +4019,7 @@ class SQLModelReportStore(ReportStore):
                 "user_reasoning_efforts": data.get("user_reasoning_efforts", ("low", "medium", "high")),
                 "default_reasoning_effort": data.get("default_reasoning_effort", "medium"),
                 "run_cost_budget_usd": data["run_cost_budget_usd"],
+                "query_console": data.get("query_console") or {},
             }
         ).model_dump(mode="json")
 

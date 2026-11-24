@@ -280,6 +280,9 @@
                     "maximum": 10000,
                     "title": "Run Cost Budget Usd",
                     "type": "number"
+                },
+                "query_console": {
+                    "$ref": "#/$defs/QueryConsoleSettingsDef"
                 }
             },
             "required": [
@@ -754,6 +757,64 @@
                 }
             },
             "title": "ProgressPanelSettings",
+            "type": "object"
+        },
+        "QueryConsoleSettingsDef": {
+            "additionalProperties": false,
+            "description": "How a profile answers questions asked in the query console's Ask mode.",
+            "properties": {
+                "enabled": {
+                    "default": true,
+                    "title": "Enabled",
+                    "type": "boolean"
+                },
+                "model_id": {
+                    "anyOf": [
+                        {
+                            "maxLength": 300,
+                            "minLength": 1,
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "title": "Model Id"
+                },
+                "reasoning_efforts": {
+                    "items": {
+                        "enum": [
+                            "default",
+                            "none",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh"
+                        ],
+                        "type": "string"
+                    },
+                    "minItems": 1,
+                    "title": "Reasoning Efforts",
+                    "type": "array"
+                },
+                "default_reasoning_effort": {
+                    "default": "low",
+                    "enum": [
+                        "default",
+                        "none",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "title": "Default Reasoning Effort",
+                    "type": "string"
+                }
+            },
+            "title": "QueryConsoleSettingsDef",
             "type": "object"
         },
         "Report": {

@@ -6,6 +6,8 @@ export interface QueryHistoryItem {
   user_id: string;
   query: string;
   executed_at: string;
+  /** The plain-text question the query was generated from, if it was. */
+  prompt?: string | null;
 }
 
 export interface QueryHistoryPage {

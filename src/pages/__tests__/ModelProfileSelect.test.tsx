@@ -5,7 +5,7 @@ import {
   screen,
   within,
 } from '@testing-library/react';
-import { ModelProfileSelect } from 'src/pages/ChatInterface';
+import ModelProfileSelect from 'src/components/ModelProfileSelect';
 import ChatInput from 'src/components/ChatInput';
 import type { SelectableModelProfile } from 'src/hooks/useModelProfilesApi';
 
@@ -123,4 +123,31 @@ it.each([
 
   expect(onSubmit).not.toHaveBeenCalled();
   expect(field).toHaveValue('Map\n my graph');
+});
+
+it('lists a profile with one reasoning level as a single choice', () => {
+  const onChange = jest.fn();
+  render(
+    <ModelProfileSelect
+      disabled={false}
+      onChange={onChange}
+      profileId="anthropic"
+      profiles={[
+        { ...profiles[0], reasoning_efforts: ['low'] },
+        { ...profiles[1], reasoning_efforts: ['low'] },
+      ]}
+      reasoningEffort="low"
+    />,
+  );
+  fireEvent.mouseDown(
+    screen.getByRole('combobox', { name: 'Model and reasoning' }),
+  );
+  const listbox = screen.getByRole('listbox');
+
+  expect(within(listbox).queryByText('DeepSeek')).toBeNull();
+  fireEvent.click(
+    within(listbox).getByRole('option', { name: 'DeepSeek · low' }),
+  );
+
+  expect(onChange).toHaveBeenCalledWith('deepseek', 'low');
 });

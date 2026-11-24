@@ -15,6 +15,35 @@ The console is split into three areas:
 
 Press **Ctrl+Enter** (or **Cmd+Enter** on macOS) to run the query without reaching for the mouse.
 
+## Asking in Plain Language
+
+When the chat assistant is enabled, the query box has a **Cypher | Ask** switch below the editor. In Ask mode, type a question such as *"Which S3 buckets are publicly readable?"* and press **Enter** (**Shift+Enter** for a new line) to generate a Cypher query for it. **Escape** in an empty question returns to Cypher.
+
+Generation is a single model call, not a chat conversation: nothing appears in your chat sessions. The model is given the graph's labels, relationship types and property keys, and the query it returns goes through the same validator as any ad-hoc query. If the validator rejects the query or flags labels, relationships or properties that do not exist, the model gets one chance to correct it.
+
+While it works, the query box shows a progress line and the elapsed time. **Cancel** (or **Escape**) stops waiting and leaves your question in place.
+
+- **A query that validates** is placed in the editor, saved to your query history together with the question, and run. The question sits above the query in the same box, with a short explanation of what the query matches and the model and reasoning level that wrote it.
+- **A query that does not validate** is placed in the editor with the validator's errors, but not run. Edit it and run it yourself.
+
+**Refine** (or switching back to Ask) asks a follow-up about the query in the editor: it is sent along as context, so *"only the ones in production"* changes it rather than starting over. The question it came from stays in view while you type the next one. Running a query you have edited by hand drops the question, since it no longer describes what is running.
+
+### Choosing the model
+
+Each [model profile](chat.md#model-profiles) has its own **Query console** settings, separate from chat's:
+
+- **Offer in the query console** decides whether Ask mode may run on the profile. When profiles exist but none is offered, Ask mode is hidden.
+- **Model ID** is the model generation uses; empty runs the profile's primary model.
+- **Reasoning** lists the levels the console offers for the profile, with one starred as the level questions start on. New profiles offer `low` only.
+
+In Ask mode, the picker next to the switch lists every offered profile and level, and the console remembers your choice. When there is only one, one profile at one level, there is nothing to choose and the picker is not shown. The console starts on the default profile when it is offered, and otherwise on the first one offered. Generation answers in one call under a time limit, so a fast model at low reasoning usually serves best.
+
+With no model profiles configured there is no picker, and `QUERY_GENERATION_MODEL` (default: `CHAT_LLM_MODEL`) and `QUERY_GENERATION_REASONING_EFFORT` (default `low`) apply. `QUERY_GENERATION_TIMEOUT_SECONDS` (default 50) bounds a generation, the correction call included; keep it under `API_REQUEST_TIMEOUT`.
+
+Generated queries are marked in the history tab with a sparkle icon and the question they were generated from. Opening one shows the question again above the query.
+
+Asking requires both `query:execute` and `chat:use`, and is controlled by `QUERY_GENERATION_ENABLED` (default `true`; it has no effect unless `CHAT_ENABLED` is also on).
+
 ## Side Panel
 
 The collapsible left panel has two tabs, switched via icons in the panel header:

@@ -181,7 +181,7 @@ it. `src/hooks/useAsyncResource.ts` packages the common shape — `loading` is
 - `src/hooks/useReportsApi.ts` — `useReportsList/useReport/useDashboardReport/useAllReports/useReportVersionsList/useReportVersion`; `useReportsMutations()` for create/save-version/set-dashboard/delete.
 - `src/components/ReportView.tsx` — shared report renderer; resolves panel `cypher` against `report.queries`.
 - `src/components/reports/` — panel components (`CypherCount`, `CypherTable`, `CypherBar`, …); `CypherGraph.tsx` is the `@xyflow/react` graph panel (map/path/any format; Graph/Table/Raw tabs).
-- `src/pages/QueryConsole.tsx` — ad-hoc console at `/app/query-console` (Ctrl+Enter runs); `QueryConsoleSchemaPanel.tsx` is the collapsible schema browser.
+- `src/pages/QueryConsole.tsx` — ad-hoc console at `/app/query-console` (Ctrl+Enter runs); `QueryConsoleSchemaPanel.tsx` is the collapsible schema browser. Its Ask mode (`features.query_generation`, `chat:use`) calls `POST /api/v1/query/generate` (`reporting/services/query_generation.py`): one structured call on the model profile's `query_console` settings (enabled/model/offered reasoning levels, independent of chat's and not part of the run snapshot; resolved by `model_profiles.resolve_query_console`, listed by `GET /api/v1/query/generate/options`) plus one validator-driven repair, never a chat session; a valid result is saved to history with its question as `prompt` and run by history id ([AGT-058](docs/root/dev/decisions/chat-agent.md)).
 - `src/pages/ChatInterface.tsx` — chat assistant at `/app/chat` (`@ai-sdk/react` `useChat` over `SeizuChatTransport`, which admits a turn then attaches to it); gated on the `chat:use` permission. See the Chat backend section.
 
 **User identity:**

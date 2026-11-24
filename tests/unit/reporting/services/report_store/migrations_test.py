@@ -51,6 +51,30 @@ async def test_chat_elicitations_upgrade_from_previous_revision(tmp_path):
         await engine.dispose()
 
 
+async def test_query_history_prompt_upgrades_previous_revision(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'history-prompt-upgrade.db'}")
+    try:
+        await run_schema_migrations(engine)
+        async with engine.begin() as connection:
+            await connection.execute(sa.text("ALTER TABLE query_history DROP COLUMN prompt"))
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO query_history (history_id, user_id, query, executed_at) "
+                    "VALUES ('h1', 'u1', 'RETURN 1', '2026-01-01T00:00:00+00:00')"
+                )
+            )
+            await connection.execute(sa.text("UPDATE alembic_version SET version_num = '0015_subspace_position'"))
+        await run_schema_migrations(engine)
+
+        columns = await _inspect(engine, lambda i: [c["name"] for c in i.get_columns("query_history")])
+        assert columns.count("prompt") == 1
+        async with engine.connect() as connection:
+            row = (await connection.execute(sa.text("SELECT prompt FROM query_history"))).one()
+        assert row.prompt is None
+    finally:
+        await engine.dispose()
+
+
 async def test_migrations_are_idempotent(tmp_path):
     """Re-running against an already-migrated database is a no-op."""
     db = tmp_path / "twice.db"

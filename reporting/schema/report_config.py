@@ -466,6 +466,9 @@ class QueryHistoryItem(BaseModel):
     user_id: str
     query: str
     executed_at: str
+    # The plain-text question the query was generated from; null for a query
+    # the user wrote themselves.
+    prompt: str | None = None
 
 
 class QueryHistoryListResponse(BaseModel):

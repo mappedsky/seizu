@@ -8,6 +8,7 @@ import {
   Typography,
 } from '@mui/material';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
+import AutoAwesome from '@mui/icons-material/AutoAwesome';
 import ErrorIcon from '@mui/icons-material/Error';
 import { useQueryHistory, QueryHistoryItem } from 'src/hooks/useQueryHistory';
 import { fontFamilyMono, fontSizeMin } from 'src/theme/typography';
@@ -85,7 +86,18 @@ export default function QueryConsoleHistoryPanel({
         {items.map((item) => (
           <Tooltip
             key={item.history_id}
-            title={item.query}
+            title={
+              item.prompt ? (
+                <>
+                  <Box component="span" sx={{ display: 'block', mb: 0.5 }}>
+                    “{item.prompt}”
+                  </Box>
+                  {item.query}
+                </>
+              ) : (
+                item.query
+              )
+            }
             placement="right"
             slotProps={{
               tooltip: { sx: { fontFamily: fontFamilyMono, fontSize: 11 } },
@@ -100,9 +112,33 @@ export default function QueryConsoleHistoryPanel({
                 alignItems: 'flex-start',
               }}
             >
+              {item.prompt && (
+                <Box
+                  sx={{
+                    alignItems: 'center',
+                    display: 'flex',
+                    gap: 0.5,
+                    width: '100%',
+                  }}
+                >
+                  <AutoAwesome
+                    aria-label="Generated from a question"
+                    color="primary"
+                    sx={{ flexShrink: 0, fontSize: 12 }}
+                  />
+                  <Typography
+                    variant="body2"
+                    noWrap
+                    sx={{ fontSize: 12, minWidth: 0 }}
+                  >
+                    {item.prompt}
+                  </Typography>
+                </Box>
+              )}
               <Typography
                 variant="body2"
                 noWrap
+                color={item.prompt ? 'text.secondary' : undefined}
                 sx={{ fontFamily: fontFamilyMono, fontSize: 11, width: '100%' }}
               >
                 {item.query}

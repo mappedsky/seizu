@@ -311,6 +311,25 @@ WORKFLOW_WATCH_POLL_SECONDS = int_env("WORKFLOW_WATCH_POLL_SECONDS", 20)
 WORKFLOW_RECONCILE_SECONDS = int_env("WORKFLOW_RECONCILE_SECONDS", 30)
 # NOTE: scheduled query module settings are defined within the modules themselves
 
+# Whether the query console can generate a Cypher query from a plain-text
+# question, using the chat assistant's model in a single call (no chat session
+# is created). Gates POST /api/v1/query/generate and the console's Ask mode.
+# Requires CHAT_ENABLED; callers need both query:execute and chat:use.
+QUERY_GENERATION_ENABLED = bool_env("QUERY_GENERATION_ENABLED", True)
+# Seconds one generation may take, the optional repair call included. Keep it
+# under API_REQUEST_TIMEOUT, which otherwise answers 504 first. When too little
+# of it is left for a repair, the first query is returned with its diagnostics.
+QUERY_GENERATION_TIMEOUT_SECONDS = int_env("QUERY_GENERATION_TIMEOUT_SECONDS", 50)
+# Model and reasoning effort for query generation when no model profile is
+# enabled. With profiles, each profile's query console settings and the
+# console's picker decide instead. An empty model uses
+# CHAT_LLM_MODEL; an empty effort uses CHAT_LLM_REASONING_EFFORT. Effort is one
+# of none/minimal/low/medium/high/xhigh and is ignored for models that do not
+# reason; higher effort is slower and can exceed
+# QUERY_GENERATION_TIMEOUT_SECONDS.
+QUERY_GENERATION_MODEL = str_env("QUERY_GENERATION_MODEL", "")
+QUERY_GENERATION_REASONING_EFFORT = str_env("QUERY_GENERATION_REASONING_EFFORT", "low")
+
 # Whether scheduled chats (recurring headless agent runs managed from the chat
 # UI) are enabled: gates the /api/v1/chat/schedules routes, the frontend UI,
 # and the scheduled chats worker. Requires CHAT_ENABLED.
