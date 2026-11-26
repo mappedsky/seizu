@@ -509,6 +509,21 @@ services:
       - SANDBOX_MAX_OUTPUT_BYTES
       - SANDBOX_DIRECT_TOOLS_ENABLED
       - SANDBOX_LLM_MODEL
+      - SANDBOX_PROVIDER
+      - SANDBOX_BEDROCK_IMAGE
+      - SANDBOX_BEDROCK_ROLE_ARN
+      - SANDBOX_BEDROCK_SUBNETS
+      - SANDBOX_BEDROCK_SECURITY_GROUPS
+      - SANDBOX_BEDROCK_RUNTIME_NAME
+      - SANDBOX_BEDROCK_REGION
+      - SANDBOX_BEDROCK_QUALIFIER
+      - SANDBOX_BEDROCK_MANAGE_RUNTIME
+      - SANDBOX_BEDROCK_STORAGE
+      - SANDBOX_BEDROCK_S3_BUCKET
+      - SANDBOX_BEDROCK_S3_PREFIX
+      - SANDBOX_BEDROCK_S3_BUCKET_OWNER
+      - SANDBOX_BEDROCK_S3_BUCKET_REGION
+      - SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS
       # Chat feature flags. The worker reads these for scheduled-chat schedule
       # reconciliation; without them it treats chat as disabled and reconciles
       # nothing, however the web service is configured.
@@ -793,6 +808,21 @@ services:
       - SANDBOX_MAX_OUTPUT_BYTES
       - SANDBOX_DIRECT_TOOLS_ENABLED
       - SANDBOX_LLM_MODEL
+      - SANDBOX_PROVIDER
+      - SANDBOX_BEDROCK_IMAGE
+      - SANDBOX_BEDROCK_ROLE_ARN
+      - SANDBOX_BEDROCK_SUBNETS
+      - SANDBOX_BEDROCK_SECURITY_GROUPS
+      - SANDBOX_BEDROCK_RUNTIME_NAME
+      - SANDBOX_BEDROCK_REGION
+      - SANDBOX_BEDROCK_QUALIFIER
+      - SANDBOX_BEDROCK_MANAGE_RUNTIME
+      - SANDBOX_BEDROCK_STORAGE
+      - SANDBOX_BEDROCK_S3_BUCKET
+      - SANDBOX_BEDROCK_S3_PREFIX
+      - SANDBOX_BEDROCK_S3_BUCKET_OWNER
+      - SANDBOX_BEDROCK_S3_BUCKET_REGION
+      - SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS
       # Interactive chat creates the sandboxes the worker later reaps, and the
       # deployment id is stamped at creation — so it has to match here or the
       # reaper's ownership filter matches nothing this service made.

@@ -57,7 +57,7 @@ from reporting.services import (
 )
 from reporting.services.chat_messages import message_text
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
-from reporting.services.sandbox_backend import SandboxBackend, open_backend
+from reporting.services.sandbox_backend import SandboxBackend, open_backend, workspace_note
 
 logger = logging.getLogger(__name__)
 
@@ -1515,7 +1515,9 @@ def _subagent_prompt(tool_names: set[str]) -> str:
     else:
         discovery = _DISCOVERY_CLAUSE_NONE
     # replace(), not format(): the prompt contains literal JSON braces.
-    return _SUBAGENT_PROMPT.replace(_DISCOVERY_PLACEHOLDER, f"{discovery}\n{_fallback_clause(tool_names)}")
+    prompt = _SUBAGENT_PROMPT.replace(_DISCOVERY_PLACEHOLDER, f"{discovery}\n{_fallback_clause(tool_names)}")
+    note = workspace_note()
+    return f"{prompt}\n- {note}" if note else prompt
 
 
 def _live_budget_note() -> str:
@@ -1989,7 +1991,10 @@ async def materialize_plugin_skill(skill: Any) -> str | None:
             f"for path, blob, mode in json.loads({payload!r}):\n"
             "    os.makedirs(os.path.dirname(path), exist_ok=True)\n"
             "    open(path, 'wb').write(base64.b64decode(blob))\n"
-            "    os.chmod(path, mode)\n"
+            "    try:\n"
+            "        os.chmod(path, mode)\n"
+            "    except OSError:\n"
+            "        pass\n"
             "print('SEIZU_PLUGIN_FILES_WRITTEN')\n"
         )
         if "SEIZU_PLUGIN_FILES_WRITTEN" not in await backend.run_python(code):
@@ -2030,6 +2035,12 @@ async def _handle_run_script(args: dict[str, Any], current_user: CurrentUser | N
         "import json, os, subprocess\n"
         f"argv=json.loads({argv_json!r})\n"
         f"env=json.loads({env_json!r})\n"
+        # A workspace that does not keep the executable bit (an object-store
+        # mount) still runs the script, through the interpreter it names.
+        "if not os.access(argv[0], os.X_OK):\n"
+        "    first=open(argv[0], 'rb').readline().decode(errors='replace').strip()\n"
+        "    if first.startswith('#!') and first[2:].split():\n"
+        "        argv=first[2:].split()+argv\n"
         f"result=subprocess.run(argv, cwd={root!r}, env=env, capture_output=True, text=True,"
         f" timeout={settings.SANDBOX_SCRIPT_TIMEOUT_SECONDS})\n"
         "print(json.dumps({'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}))\n"
@@ -2047,6 +2058,11 @@ async def _handle_run_script(args: dict[str, Any], current_user: CurrentUser | N
 
 def _safe_error(exc: Exception) -> str:
     return f"{exc.__class__.__name__}: {exc}"[:400]
+
+
+def _workspace_suffix() -> str:
+    note = workspace_note()
+    return f" {note}" if note else ""
 
 
 def _direct_tools() -> list[BuiltinTool]:
@@ -2079,7 +2095,7 @@ def _direct_tools() -> list[BuiltinTool]:
                 "work on it -- query results to reshape, a document to process -- instead of passing "
                 "it through a prompt. The file persists for the conversation, and any later "
                 "sandbox__delegate is told it is there, so you can prepare data for work you have "
-                "not delegated yet. Give `purpose` so that notice says what the file holds."
+                "not delegated yet. Give `purpose` so that notice says what the file holds." + _workspace_suffix()
             ),
             input_schema={
                 "type": "object",
@@ -2144,7 +2160,7 @@ def _direct_tools() -> list[BuiltinTool]:
             description=(
                 "Run Python in the conversation's sandbox and return its output. For one computation "
                 "over data already there -- reshaping, aggregating, checking. Use sandbox__delegate "
-                "instead when the work needs several steps decided as it goes."
+                "instead when the work needs several steps decided as it goes." + _workspace_suffix()
             ),
             input_schema={
                 "type": "object",

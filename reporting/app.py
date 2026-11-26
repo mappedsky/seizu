@@ -289,6 +289,7 @@ class _MCPMiddleware:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings.validate_persistence_settings()
+    settings.validate_sandbox_settings()
     await oauth_client.verify_issuer_consistency()
     await report_store.initialize()
     # Not inside the chat guard: the per-request HTTP spans need the tracer

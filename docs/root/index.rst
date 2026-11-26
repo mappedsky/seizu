@@ -76,6 +76,7 @@ Documentation
     dev/dependencies
     dev/test
     dev/query-validation
+    dev/sandbox-image-protocol
     dev/decisions/index
     dev/contributing
 

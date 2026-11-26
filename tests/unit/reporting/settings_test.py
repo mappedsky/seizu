@@ -65,3 +65,74 @@ def test_persistence_settings_reject_removed_configuration(name: str) -> None:
     with patch.dict(os.environ, {name: "legacy"}, clear=True):
         with pytest.raises(RuntimeError, match=name):
             validate_persistence_settings()
+
+
+def _bedrock(**overrides: object) -> object:
+    values: dict[str, object] = {
+        "SANDBOX_ENABLED": True,
+        "SANDBOX_PROVIDER": "bedrock",
+        "SANDBOX_BEDROCK_MANAGE_RUNTIME": True,
+        "SANDBOX_BEDROCK_IMAGE": "img",
+        "SANDBOX_BEDROCK_ROLE_ARN": "arn:aws:iam::1:role/r",
+        "SANDBOX_BEDROCK_SUBNETS": ["subnet-a"],
+        "SANDBOX_BEDROCK_SECURITY_GROUPS": ["sg-1"],
+        "SANDBOX_BEDROCK_STORAGE": "session",
+        "SANDBOX_BEDROCK_S3_BUCKET": "",
+        "SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS": 28_800,
+        "SANDBOX_SESSION_TIMEOUT_SECONDS": 1_800,
+        "SANDBOX_ALLOW_INTERNET": False,
+    }
+    values.update(overrides)
+    return patch.multiple("reporting.settings", **values)
+
+
+async def test_a_complete_bedrock_configuration_is_valid() -> None:
+    from reporting.settings import sandbox_configuration_errors, validate_sandbox_settings
+
+    with _bedrock():
+        assert sandbox_configuration_errors() == []
+        validate_sandbox_settings()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"SANDBOX_PROVIDER": "docker"}, "SANDBOX_PROVIDER must be one of"),
+        ({"SANDBOX_BEDROCK_IMAGE": ""}, "SANDBOX_BEDROCK_IMAGE"),
+        ({"SANDBOX_BEDROCK_ROLE_ARN": ""}, "SANDBOX_BEDROCK_ROLE_ARN"),
+        ({"SANDBOX_BEDROCK_STORAGE": "efs"}, "SANDBOX_BEDROCK_STORAGE must be one of"),
+        ({"SANDBOX_BEDROCK_STORAGE": "s3"}, "SANDBOX_BEDROCK_S3_BUCKET"),
+        ({"SANDBOX_BEDROCK_SECURITY_GROUPS": []}, "must be set together"),
+        ({"SANDBOX_BEDROCK_SUBNETS": [], "SANDBOX_BEDROCK_SECURITY_GROUPS": []}, "PUBLIC network mode"),
+        ({"SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS": 30}, "MAX_LIFETIME"),
+        ({"SANDBOX_SESSION_TIMEOUT_SECONDS": 30_000}, "idle timeout"),
+    ],
+)
+async def test_an_unworkable_sandbox_configuration_refuses_to_start(
+    overrides: dict[str, object], fragment: str
+) -> None:
+    from reporting.settings import validate_sandbox_settings
+
+    with _bedrock(**overrides), pytest.raises(RuntimeError, match=fragment):
+        validate_sandbox_settings()
+
+
+async def test_public_mode_is_accepted_when_internet_access_is_intended() -> None:
+    from reporting.settings import sandbox_configuration_errors
+
+    with _bedrock(SANDBOX_BEDROCK_SUBNETS=[], SANDBOX_BEDROCK_SECURITY_GROUPS=[], SANDBOX_ALLOW_INTERNET=True):
+        assert sandbox_configuration_errors() == []
+
+
+async def test_an_operator_managed_runtime_needs_no_image_or_role() -> None:
+    from reporting.settings import sandbox_configuration_errors
+
+    with _bedrock(SANDBOX_BEDROCK_MANAGE_RUNTIME=False, SANDBOX_BEDROCK_IMAGE="", SANDBOX_BEDROCK_ROLE_ARN=""):
+        assert sandbox_configuration_errors() == []
+
+
+async def test_a_disabled_sandbox_is_never_an_error() -> None:
+    from reporting.settings import sandbox_configuration_errors
+
+    with _bedrock(SANDBOX_ENABLED=False, SANDBOX_PROVIDER="docker"):
+        assert sandbox_configuration_errors() == []

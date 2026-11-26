@@ -6,22 +6,29 @@ to configure and operate the sandbox, see the
 
 Primary code: `reporting/services/mcp_builtins/sandbox.py`,
 `reporting/services/sandbox_session.py`, `reporting/services/sandbox_backend.py`,
-`reporting/services/episodic_memory.py`.
+`reporting/services/sandbox_bedrock.py`, `reporting/services/episodic_memory.py`.
 
-## SBX-001 — The backend is a five-operation protocol, not an E2B client
+## SBX-001 — The backend is a small protocol, not an E2B client
 
 **Applies to:** `reporting/services/sandbox_backend.py`
 
-`SandboxBackend` defines `run_python`, `run_bash`, `read_file`, `write_file`,
-`list_files`, plus `sandbox_id`. `_E2BSandboxBackend` is the only
-implementation today and is the only place that knows E2B response shapes.
-`_open_backend` is the single swap point for another provider.
+`SandboxBackend` defines the five operations the agents use — `run_python`,
+`run_bash`, `read_file`, `write_file`, `list_files` — plus `sandbox_id`, and
+three members only CVE remediation uses (`run_bash_streaming`, `get_host`,
+`get_traffic_access_token`). `_E2BSandboxBackend` is the only place that knows
+E2B response shapes, and `sandbox_bedrock.BedrockSandboxBackend` the only place
+that knows AgentCore's ([SBX-021](#sbx-021)). `open_backend` is the single swap
+point: it dispatches on `SANDBOX_PROVIDER`, and its signature is the lifecycle
+contract every provider implements. Both providers render output through the
+shared `python_output`/`bash_output`, so a model sees the same text for the same
+outcome whichever is configured.
 
 **Why:** fixed tool names and descriptions mean the inner agent behaves the same
-across providers, and tests need no E2B package.
+across providers, and tests need no provider package.
 
-**Don't:** widen the protocol to expose provider features. A sixth operation is
-a sixth thing every future backend must implement.
+**Don't:** widen the protocol to expose provider features. Another operation is
+another thing every backend must implement; the remediation members are the
+cautionary example — a provider without them has to refuse them.
 
 Account-wide operations that belong to no open sandbox — `kill_sandbox` and
 `list_paused_sandboxes`, which the reaper ([SBX-011](#sbx-011)) runs on — live
@@ -336,6 +343,10 @@ S3-compatible bucket, so `keep_memory=True` stays as the fallback for
 deployments that do not have one — which is why the trade is documented rather
 than treated as temporary.
 
+**On Bedrock this way out is the design** ([SBX-021](#sbx-021)): a turn's end
+stops the session, the workspace persists, and the next turn cold-boots with the
+files restored and no processes. The E2B path is unchanged.
+
 **Don't:** "tidy" this back to `keep_memory=False` for isolation. A test pins
 the value and says why.
 
@@ -530,6 +541,10 @@ runtime would catch it. It fails closed there as a backstop, not as the control.
 `reporting/services/session_reaper_schedule.py`,
 `reporting/temporal_workflows/session_reap.py`, the account-wide helpers in
 `sandbox_backend.py`
+
+The orphan pass below is written against E2B's listing. On Bedrock it works
+from S3 markers with `s3` storage and does not exist with session storage
+([SBX-021](#sbx-021)).
 
 **Measured, on one developer's account:** 59 suspended sandboxes, the oldest six
 days old, every one of them a chat thread abandoned rather than deleted. The
@@ -804,3 +819,90 @@ survive across delegations rather than resetting per delegation. That targets
 the 7s rather than the 1.2s, and needs care for the opposite reason: the
 per-delegation reset is deliberate, and a stale notice could suppress a call
 that genuinely needed remaking.
+
+## SBX-021 — Bedrock runs the sandbox on AgentCore Runtime, through a protocol Seizu owns and an image it does not build
+
+**Applies to:** `reporting/services/sandbox_bedrock.py`,
+`reporting/services/sandbox_bedrock_runtime.py`,
+`reporting/services/sandbox_protocol.py`,
+`docs/root/dev/sandbox-image-protocol.md`,
+`scripts/sandbox_image_conformance.py`
+
+**Runtime, not Code Interpreter.** AgentCore Code Interpreter is the obvious
+fit and cannot do what SBX-005 needs: a stopped session cannot be resumed, it
+has no managed storage, and its only persistence is a mount you supply in VPC
+mode, shared by every session that mounts it — one user's code could read
+another's files. Runtime's session storage is scoped per `runtimeSessionId`,
+survives `StopRuntimeSession`, and comes back when the same id is invoked again.
+That is SBX-005's "planned way out" — persist files, cold-boot — offered by the
+provider.
+
+**A protocol, not the command API.** `InvokeAgentRuntimeCommand` would have let
+any image work, and was rejected on three counts: AgentCore logs every command's
+text to CloudWatch, which here means code and the contents of every file
+written, security-graph query results included; commands are capped at 64 KB,
+so the oversized-result files of SBX-002 (10 MB by default) would be dozens of
+chunked round trips; and each command is a fresh process, so `run_python` would
+lose the notebook-style state the sub-agent prompt relies on. `seizu-sandbox/1`
+is one JSON request per operation over `POST /invocations`, up to 100 MB, with a
+persistent interpreter. **The image lives in its own repository**: Seizu owns
+the contract (the models, the generated JSON Schema, the spec page and a
+standard-library conformance checker), not the container.
+
+**`/home/user` resolves into the mount.** Every path Seizu writes is under
+`/home/user` (SBX-010, SBX-017), so the image symlinks it onto `/mnt/workspace`
+rather than Seizu learning a second home directory per provider.
+
+**A marker detects lost storage.** Session storage is erased silently — after 14
+idle days and by **every** runtime update, image changes included — and the id
+stays valid: invoking it just starts an empty VM. Without a check, a resumed
+conversation would be pointed at receipts for files that are gone. `hello`
+writes `$HOME/.seizu-sandbox` at creation and reads it on resume; no marker is
+SBX-006's terminal case, so a new session id replaces it and receipts scoped to
+the old id (SBX-008) stop being offered. An id that is not ours (an E2B id after
+switching provider) is treated the same way without calling AgentCore, where it
+would be a validation error that wedged the thread.
+
+**Kill means delete, then stop.** Neither storage mode has a provider-side
+delete: session storage is wiped from inside the session (`wipe`, which boots a
+stopped one), an `s3` workspace by deleting its prefix from Seizu. Stopping alone
+would leave a deleted thread's files for 14 days.
+
+**Two storage modes, because neither is strictly better.** `session` needs no
+bucket but is 1 GB, in preview, and erased by every runtime update. `s3`
+(`s3BucketMount`, prefix `<prefix>/{runtimeSessionId}/`) survives updates, is
+listable — so the SBX-011 orphan pass works again, reading the markers — and is
+deletable without booting anything; its cost is object semantics (no append,
+rename or symlink), which the sub-agent and direct tools are told about, and a
+plugin script whose executable bit did not survive runs through its shebang. In
+`s3` mode the sandbox's own role reaches the bucket, and its credentials are
+readable inside the VM, so the role must be scoped to the session's prefix with
+`aws:AgentCoreRuntimeSourceSid`. **That scoping is documented, not yet verified
+against a live runtime;** until it is, treat `s3` mode as single-tenant.
+
+**The role is the boundary SBX-009 relied on "holding no credentials" for.**
+AgentCore serves the execution role through the VM's metadata service to any
+code inside, so "no credentials" becomes "a role that can do nothing useful":
+ECR pull and logs only. Network isolation likewise moves to the runtime: Seizu
+refuses to start a PUBLIC-mode runtime unless `SANDBOX_ALLOW_INTERNET` says
+internet access is intended, and refuses per-sandbox internet requests outright
+rather than ignoring them.
+
+**One writer per change, without a lock.** The Temporal worker reconciles the
+runtime at startup, beside the worker rather than before it (provisioning takes
+minutes). Replicas start together, so every Create/Update carries a
+`clientToken` hashed from the configuration it applies and the version it
+replaces; identical concurrent requests are applied once. Nothing is updated
+unless a managed field differs, because with session storage an update empties
+every sandbox. Web processes only look the runtime up, and cache it only once
+READY.
+
+**Remediation stays on E2B.** It needs templates, per-command environments,
+streaming and one sandbox reaching another's port; `agent_config_error` refuses
+it on any other provider before a run starts.
+
+**Don't:** switch to the command API to drop the image — the CloudWatch logging
+is the reason, not convenience. **Don't** update the runtime on every startup to
+"make sure": with session storage that erases every conversation's files.
+**Don't** drop the marker check because resumes usually work; the failure it
+catches is silent.

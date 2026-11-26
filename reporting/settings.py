@@ -1258,6 +1258,12 @@ SEIZU_DEPLOYMENT_ID = str_env("SEIZU_DEPLOYMENT_ID", "")
 # the sandbox service hostname — the E2B-compatible API is used in both cases.
 SANDBOX_ENABLED = bool_env("SANDBOX_ENABLED", False)
 
+# Which provider runs sandboxes: "e2b" (E2B cloud, or an E2B-compatible
+# self-hosted service via SANDBOX_DOMAIN) or "bedrock" (Amazon Bedrock AgentCore
+# Runtime, configured by the SANDBOX_BEDROCK_* settings below). CVE remediation
+# runs on E2B only. See docs/root/install/sandbox.md#providers.
+SANDBOX_PROVIDER = str_env("SANDBOX_PROVIDER", "e2b").strip().lower()
+
 # Hostname of the sandbox API (no scheme, no trailing slash).
 # Empty → E2B's default cloud endpoint.
 # For OpenKruise Agents: set to your cluster's sandbox ingress hostname.
@@ -1378,6 +1384,110 @@ SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_
 # then CHAT_LLM_MODEL.
 # Example: "anthropic/claude-haiku-4-5-20251001" for a cheaper inner agent.
 SANDBOX_LLM_MODEL = str_env("SANDBOX_LLM_MODEL", "")
+
+# --- Amazon Bedrock AgentCore Runtime (SANDBOX_PROVIDER=bedrock) ---
+# The container image the sandbox runtime runs: an ECR URI for a linux/arm64
+# image implementing the seizu-sandbox/1 protocol
+# (docs/root/dev/sandbox-image-protocol.md). Required unless
+# SANDBOX_BEDROCK_MANAGE_RUNTIME is false. Changing it updates the runtime, and
+# in "session" storage mode that erases every conversation's sandbox files.
+SANDBOX_BEDROCK_IMAGE = str_env("SANDBOX_BEDROCK_IMAGE", "")
+# IAM role the runtime runs as. Code inside the sandbox can read this role's
+# credentials, so grant it only ECR pull and CloudWatch Logs (plus the scoped S3
+# access "s3" storage needs). Required unless SANDBOX_BEDROCK_MANAGE_RUNTIME is
+# false.
+SANDBOX_BEDROCK_ROLE_ARN = str_env("SANDBOX_BEDROCK_ROLE_ARN", "")
+# Comma-separated subnet and security-group ids. Setting both runs the runtime
+# in VPC mode -- use private subnets without a NAT gateway to keep sandboxes off
+# the internet. Leaving both empty runs it in PUBLIC mode, which has internet
+# access and is refused unless SANDBOX_ALLOW_INTERNET is true.
+SANDBOX_BEDROCK_SUBNETS = [v.strip() for v in list_env("SANDBOX_BEDROCK_SUBNETS", []) if v.strip()]
+SANDBOX_BEDROCK_SECURITY_GROUPS = [v.strip() for v in list_env("SANDBOX_BEDROCK_SECURITY_GROUPS", []) if v.strip()]
+# Name of the AgentCore runtime. Empty derives "seizu_sandbox_<deployment id>".
+# Letters, digits and underscores only, starting with a letter, at most 48.
+SANDBOX_BEDROCK_RUNTIME_NAME = str_env("SANDBOX_BEDROCK_RUNTIME_NAME", "")
+# AWS region of the runtime. Empty uses the default AWS region configuration.
+SANDBOX_BEDROCK_REGION = str_env("SANDBOX_BEDROCK_REGION", "")
+# Runtime endpoint invoked. DEFAULT follows the runtime's latest version.
+SANDBOX_BEDROCK_QUALIFIER = str_env("SANDBOX_BEDROCK_QUALIFIER", "DEFAULT")
+# Whether Seizu creates and updates the runtime from these settings. The
+# Temporal worker does it at startup; web processes only look the runtime up.
+# false: an operator manages the runtime (it must still be named
+# SANDBOX_BEDROCK_RUNTIME_NAME and implement the protocol), and Seizu never
+# calls the control plane except to read it.
+SANDBOX_BEDROCK_MANAGE_RUNTIME = bool_env("SANDBOX_BEDROCK_MANAGE_RUNTIME", True)
+# Where sandbox files persist between turns:
+# - "session": AgentCore managed session storage. 1 GB per conversation, erased
+#   after 14 days without use and whenever the runtime is updated.
+# - "s3": an S3 bucket mounted per conversation (SANDBOX_BEDROCK_S3_*). Kept
+#   until deleted (use a bucket lifecycle rule for retention), survives runtime
+#   updates, but has object semantics: no append, rename or symlink.
+SANDBOX_BEDROCK_STORAGE = str_env("SANDBOX_BEDROCK_STORAGE", "session").strip().lower()
+# Bucket for "s3" storage. Each conversation's sandbox is mounted from
+# <bucket>/<prefix>/<session id>/. Seizu itself needs s3:ListBucket, GetObject
+# and DeleteObject on the prefix, to delete and reap sandboxes.
+SANDBOX_BEDROCK_S3_BUCKET = str_env("SANDBOX_BEDROCK_S3_BUCKET", "")
+# Key prefix for "s3" storage. Empty derives "seizu-sandbox/<deployment id>".
+SANDBOX_BEDROCK_S3_PREFIX = str_env("SANDBOX_BEDROCK_S3_PREFIX", "")
+# Account id that must own the bucket, and the bucket's region. Empty means the
+# runtime's own account and region.
+SANDBOX_BEDROCK_S3_BUCKET_OWNER = str_env("SANDBOX_BEDROCK_S3_BUCKET_OWNER", "")
+SANDBOX_BEDROCK_S3_BUCKET_REGION = str_env("SANDBOX_BEDROCK_S3_BUCKET_REGION", "")
+# Longest a sandbox session may run before AgentCore stops it, in seconds
+# (60-28800). Its idle timeout is SANDBOX_SESSION_TIMEOUT_SECONDS. A stopped
+# session keeps its files; only running processes and Python state are lost.
+SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS = int_env("SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS", 28_800)
+
+_SANDBOX_PROVIDERS = frozenset({"e2b", "bedrock"})
+_SANDBOX_BEDROCK_STORAGE_MODES = frozenset({"session", "s3"})
+
+
+def sandbox_configuration_errors() -> list[str]:
+    """Every reason the sandbox settings cannot work together, or ``[]``.
+
+    Checked only when the sandbox is enabled: a disabled sandbox is never opened,
+    so a half-written provider configuration there is not an error.
+    """
+    if not SANDBOX_ENABLED:
+        return []
+    if SANDBOX_PROVIDER not in _SANDBOX_PROVIDERS:
+        return [f"SANDBOX_PROVIDER must be one of: {', '.join(sorted(_SANDBOX_PROVIDERS))}"]
+    if SANDBOX_PROVIDER != "bedrock":
+        return []
+    errors: list[str] = []
+    if SANDBOX_BEDROCK_STORAGE not in _SANDBOX_BEDROCK_STORAGE_MODES:
+        errors.append(f"SANDBOX_BEDROCK_STORAGE must be one of: {', '.join(sorted(_SANDBOX_BEDROCK_STORAGE_MODES))}")
+    if SANDBOX_BEDROCK_STORAGE == "s3" and not SANDBOX_BEDROCK_S3_BUCKET:
+        errors.append("SANDBOX_BEDROCK_STORAGE=s3 requires SANDBOX_BEDROCK_S3_BUCKET")
+    if SANDBOX_BEDROCK_MANAGE_RUNTIME:
+        if not SANDBOX_BEDROCK_IMAGE:
+            errors.append("SANDBOX_PROVIDER=bedrock requires SANDBOX_BEDROCK_IMAGE")
+        if not SANDBOX_BEDROCK_ROLE_ARN:
+            errors.append("SANDBOX_PROVIDER=bedrock requires SANDBOX_BEDROCK_ROLE_ARN")
+        if bool(SANDBOX_BEDROCK_SUBNETS) != bool(SANDBOX_BEDROCK_SECURITY_GROUPS):
+            errors.append("SANDBOX_BEDROCK_SUBNETS and SANDBOX_BEDROCK_SECURITY_GROUPS must be set together")
+        elif not SANDBOX_BEDROCK_SUBNETS and not SANDBOX_ALLOW_INTERNET:
+            errors.append(
+                "SANDBOX_PROVIDER=bedrock without SANDBOX_BEDROCK_SUBNETS runs sandboxes in PUBLIC network mode, "
+                "with internet access; set SANDBOX_BEDROCK_SUBNETS and SANDBOX_BEDROCK_SECURITY_GROUPS, or set "
+                "SANDBOX_ALLOW_INTERNET=true to accept that"
+            )
+        if not 60 <= SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS <= 28_800:
+            errors.append("SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS must be between 60 and 28800")
+        if not 60 <= SANDBOX_SESSION_TIMEOUT_SECONDS <= SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS:
+            errors.append(
+                "SANDBOX_SESSION_TIMEOUT_SECONDS is the Bedrock runtime's idle timeout and must be between 60 "
+                "and SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS"
+            )
+    return errors
+
+
+def validate_sandbox_settings() -> None:
+    """Refuse to start with a sandbox configuration that cannot work."""
+    errors = sandbox_configuration_errors()
+    if errors:
+        raise RuntimeError("Invalid sandbox configuration: " + "; ".join(errors))
+
 
 # OAuth 2.0 Authorization Server Metadata (RFC 8414) for MCP clients.
 # When set, Seizu exposes /.well-known/oauth-authorization-server so MCP clients

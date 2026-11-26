@@ -27,5 +27,13 @@ def export_json_schema(output_file: str | None) -> None:
         print(schema_as_json)
 
 
+@schema_cli.command("export-sandbox-protocol")
+def export_sandbox_protocol() -> None:
+    """Print the seizu-sandbox/1 image protocol as JSON Schema."""
+    from reporting.services import sandbox_protocol
+
+    print(json.dumps(sandbox_protocol.json_schema(), indent=4))
+
+
 if __name__ == "__main__":
     schema_cli()
