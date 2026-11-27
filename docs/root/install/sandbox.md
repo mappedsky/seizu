@@ -392,6 +392,16 @@ client reads.) The containers read these when they are created: once temporary
 credentials expire, AWS calls fail with `ExpiredTokenException` until the two
 services are recreated with fresh ones.
 
+To avoid recreating them, give the two services credentials they can renew
+instead: set `SEIZU_AWS_CONFIG_DIR` to a directory holding an AWS `config`
+file, which is mounted at `/run/seizu-aws` and read as `AWS_CONFIG_FILE`. A
+profile there with `credential_process = cat /run/seizu-aws/credentials.json`,
+where `credentials.json` is in the `credential_process` format with an
+`Expiration`, is read again shortly before each expiry, so a process that keeps
+that file current, renewing it well before each expiry, keeps the services
+working. Leave the `SEIZU_AWS_*` keys unset in that case: credentials in the
+environment take precedence.
+
 #### Managing the runtime yourself
 
 With `SANDBOX_BEDROCK_MANAGE_RUNTIME=false` you create the runtime with your own

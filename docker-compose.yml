@@ -395,6 +395,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=${SEIZU_AWS_SECRET_ACCESS_KEY:-}
       - AWS_SESSION_TOKEN=${SEIZU_AWS_SESSION_TOKEN:-}
       - AWS_DEFAULT_REGION=${SEIZU_AWS_REGION:-us-east-1}
+      - AWS_CONFIG_FILE=/run/seizu-aws/config
       # The SQS emulator ignores credentials but boto still signs requests, so
       # the SQS client gets placeholders of its own.
       - SQS_ACCESS_KEY_ID=fake
@@ -569,6 +570,10 @@ services:
     command: python -m reporting.temporal_worker
     volumes:
       - .:/home/seizu/seizu
+      # Seizu's AWS config, read through AWS_CONFIG_FILE. Empty unless a tool
+      # keeps one there that renews short-lived credentials in place
+      # (SEIZU_AWS_CONFIG_DIR in .env). A missing file is ignored.
+      - ${SEIZU_AWS_CONFIG_DIR:-./.compose/aws}:/run/seizu-aws:ro
     networks:
       stats:
       database:
@@ -683,6 +688,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=${SEIZU_AWS_SECRET_ACCESS_KEY:-}
       - AWS_SESSION_TOKEN=${SEIZU_AWS_SESSION_TOKEN:-}
       - AWS_DEFAULT_REGION=${SEIZU_AWS_REGION:-us-east-1}
+      - AWS_CONFIG_FILE=/run/seizu-aws/config
       # Chat assistant — set CHAT_ENABLED=true in .env to enable the feature
       # (routes + checkpoint init + UI). Defaults to false when unset.
       - CHAT_ENABLED
@@ -863,6 +869,10 @@ services:
       retries: 5
     volumes:
       - .:/home/seizu/seizu
+      # Seizu's AWS config, read through AWS_CONFIG_FILE. Empty unless a tool
+      # keeps one there that renews short-lived credentials in place
+      # (SEIZU_AWS_CONFIG_DIR in .env). A missing file is ignored.
+      - ${SEIZU_AWS_CONFIG_DIR:-./.compose/aws}:/run/seizu-aws:ro
     ports:
       - 8080:8080
     # Start from /run/seizu so the gunicorn arbiter control socket (gunicorn.ctl)
