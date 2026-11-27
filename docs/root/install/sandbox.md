@@ -510,8 +510,8 @@ Amazon Bedrock AgentCore Runtime settings (`SANDBOX_PROVIDER=bedrock`):
 |----------|---------|-------------|
 | `SANDBOX_BEDROCK_IMAGE` | `""` | ECR URI of the sandbox image. Required unless `SANDBOX_BEDROCK_MANAGE_RUNTIME=false`. |
 | `SANDBOX_BEDROCK_ROLE_ARN` | `""` | Execution role the runtime runs as. Required unless `SANDBOX_BEDROCK_MANAGE_RUNTIME=false`. |
-| `SANDBOX_BEDROCK_SUBNETS` | `""` | Comma-separated subnet ids. With `SANDBOX_BEDROCK_SECURITY_GROUPS`, selects VPC mode; empty means PUBLIC mode, which requires `SANDBOX_ALLOW_INTERNET=true`. |
-| `SANDBOX_BEDROCK_SECURITY_GROUPS` | `""` | Comma-separated security group ids. |
+| `SANDBOX_BEDROCK_SUBNETS` | `""` | Comma-separated subnet ids. With `SANDBOX_BEDROCK_SECURITY_GROUPS`, selects VPC mode; empty means PUBLIC mode, which requires `SANDBOX_ALLOW_INTERNET=true`. Ignored when `SANDBOX_BEDROCK_MANAGE_RUNTIME=false`. |
+| `SANDBOX_BEDROCK_SECURITY_GROUPS` | `""` | Comma-separated security group ids. Ignored when `SANDBOX_BEDROCK_MANAGE_RUNTIME=false`. |
 | `SANDBOX_BEDROCK_REGION` | `""` | AWS region. Empty uses the default AWS configuration. |
 | `SANDBOX_BEDROCK_RUNTIME_NAME` | `""` | Runtime name. Empty means `seizu_sandbox_<SEIZU_DEPLOYMENT_ID>`. |
 | `SANDBOX_BEDROCK_RUNTIME_ARN` | `""` | ARN of a runtime you manage. Seizu reads it directly instead of finding it by name, and needs no `ListAgentRuntimes`. Requires `SANDBOX_BEDROCK_MANAGE_RUNTIME=false`. |

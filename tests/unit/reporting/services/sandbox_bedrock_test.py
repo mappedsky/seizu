@@ -12,7 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 from reporting.services import sandbox_backend, sandbox_bedrock
 from reporting.services.sandbox_backend import kill_sandbox, list_paused_sandboxes, open_backend, sandbox_is_paused
@@ -74,7 +74,8 @@ async def test_a_sandbox_not_kept_is_wiped_and_stopped(agentcore: FakeAgentCore)
         sandbox_id = backend.sandbox_id
         await backend.write_file("/home/user/data.txt", "rows")
     assert (sandbox_id, "wipe") in agentcore.invocations
-    assert agentcore.stopped == [sandbox_id]
+    # Stopped before the wipe, so nothing still running can write after it.
+    assert agentcore.stopped == [sandbox_id, sandbox_id]
     assert list(agentcore.image(sandbox_id).mount.iterdir()) == []
 
 
@@ -114,10 +115,17 @@ async def test_resume_of_an_id_from_another_provider_creates_without_calling_it(
 
 async def test_a_transient_failure_on_resume_propagates(agentcore: FakeAgentCore) -> None:
     error = ClientError({"Error": {"Code": "ThrottlingException", "Message": "slow down"}}, "InvokeAgentRuntime")
-    with patch.object(agentcore, "invoke_agent_runtime", side_effect=error):
+    invoke = MagicMock(side_effect=error)
+    with (
+        patch.object(agentcore, "invoke_agent_runtime", invoke),
+        patch.object(sandbox_bedrock.asyncio, "sleep", AsyncMock()),
+    ):
         with pytest.raises(ClientError):
             async with _open(resume_sandbox_id=sandbox_bedrock.new_session_id()):
                 pass
+    # Retried, since a throttled call never ran, then reported rather than
+    # mistaken for a lost workspace.
+    assert invoke.call_count == sandbox_bedrock._MAX_ATTEMPTS
 
 
 async def test_provisioning_conflicts_are_retried(agentcore: FakeAgentCore) -> None:
@@ -155,7 +163,7 @@ async def test_a_failed_suspend_destroys_the_session(agentcore: FakeAgentCore) -
     def _flaky_stop(**kwargs: Any) -> dict[str, Any]:
         calls["n"] += 1
         if calls["n"] == 1:
-            raise ClientError({"Error": {"Code": "InternalServerException", "Message": "x"}}, "StopRuntimeSession")
+            raise ClientError({"Error": {"Code": "AccessDeniedException", "Message": "x"}}, "StopRuntimeSession")
         return real_stop(**kwargs)
 
     teardowns: list[bool] = []
@@ -333,9 +341,25 @@ class _FakeS3:
         body.read.return_value = self.objects[Key]
         return {"Body": body}
 
+    log: list[str]
+    #: Per-key errors the next delete_objects calls report instead of deleting.
+    failures: list[dict[str, str]]
+
     def delete_objects(self, Bucket: str, Delete: dict[str, Any]) -> dict[str, Any]:  # noqa: N803
+        errors: list[dict[str, str]] = []
+        failing = {f["Key"]: f for f in getattr(self, "failures", [])}
         for obj in Delete["Objects"]:
+            if obj["Key"] in failing:
+                errors.append(failing[obj["Key"]])
+                continue
             self.objects.pop(obj["Key"], None)
+            getattr(self, "log", []).append(f"delete {obj['Key']}")
+        self.failures = []
+        return {"Errors": errors} if errors else {}
+
+    def delete_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+        self.objects.pop(Key, None)
+        getattr(self, "log", []).append(f"delete {Key}")
         return {}
 
 
@@ -409,3 +433,248 @@ def test_session_storage_needs_no_workspace_note(agentcore: FakeAgentCore) -> No
 
     assert sandbox_backend.workspace_note() == ""
     assert sandbox_tool._subagent_prompt({"graph__query"}).endswith("description of what you tried.")
+
+
+# ---------------------------------------------------------------------------
+# Retries never run code twice
+# ---------------------------------------------------------------------------
+
+
+def _server_error(status: int = 500, code: str = "InternalServerException") -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code, "Message": "x"}, "ResponseMetadata": {"HTTPStatusCode": status}}, "InvokeAgentRuntime"
+    )
+
+
+def _fail_after_running(agentcore: FakeAgentCore, op: str, error: Exception) -> MagicMock:
+    """Run ``op`` for real, then report ``error`` once, as if the response were lost."""
+    real = agentcore.invoke_agent_runtime
+    state = {"failed": False}
+
+    def _invoke(**kwargs: Any) -> dict[str, Any]:
+        response = real(**kwargs)
+        if json.loads(kwargs["payload"])["op"] == op and not state["failed"]:
+            state["failed"] = True
+            raise error
+        return response
+
+    return MagicMock(side_effect=_invoke)
+
+
+def test_the_data_client_never_retries_on_its_own() -> None:
+    sandbox_bedrock._reset_runtime_cache()
+    with patch.object(sandbox_bedrock, "get_boto_client") as make:
+        sandbox_bedrock.data_client()
+    sandbox_bedrock._reset_runtime_cache()
+    assert make.call_args.kwargs["config"].retries == {"mode": "standard", "total_max_attempts": 1}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _server_error(),
+        _server_error(502, "BadGateway"),
+        ReadTimeoutError(endpoint_url="https://bedrock-agentcore"),
+    ],
+)
+async def test_code_is_not_run_again_after_an_ambiguous_failure(agentcore: FakeAgentCore, error: Exception) -> None:
+    async with _open() as backend:
+        invoke = _fail_after_running(agentcore, "run_python", error)
+        with patch.object(agentcore, "invoke_agent_runtime", invoke):
+            with pytest.raises(type(error)):
+                await backend.run_python("open('runs.txt', 'a').write('x')")
+        assert await backend.read_file("/home/user/runs.txt") == "x"
+
+
+async def test_a_repeatable_operation_is_retried_after_an_ambiguous_failure(agentcore: FakeAgentCore) -> None:
+    async with _open() as backend:
+        invoke = _fail_after_running(agentcore, "write_file", _server_error())
+        with (
+            patch.object(agentcore, "invoke_agent_runtime", invoke),
+            patch.object(sandbox_bedrock.asyncio, "sleep", AsyncMock()),
+        ):
+            await backend.write_file("/home/user/a.txt", "content")
+        assert invoke.call_count == 2
+        assert await backend.read_file("/home/user/a.txt") == "content"
+
+
+async def test_a_throttled_execution_is_retried_because_it_never_ran(agentcore: FakeAgentCore) -> None:
+    async with _open() as backend:
+        real = agentcore.invoke_agent_runtime
+        throttled = {"done": False}
+
+        def _invoke(**kwargs: Any) -> dict[str, Any]:
+            if json.loads(kwargs["payload"])["op"] == "run_python" and not throttled["done"]:
+                throttled["done"] = True
+                raise ClientError({"Error": {"Code": "ThrottlingException", "Message": ""}}, "InvokeAgentRuntime")
+            return real(**kwargs)
+
+        with (
+            patch.object(agentcore, "invoke_agent_runtime", side_effect=_invoke),
+            patch.object(sandbox_bedrock.asyncio, "sleep", AsyncMock()),
+        ):
+            await backend.run_python("open('runs.txt', 'a').write('x')")
+        assert await backend.read_file("/home/user/runs.txt") == "x"
+
+
+# ---------------------------------------------------------------------------
+# Deletion
+# ---------------------------------------------------------------------------
+
+
+async def test_session_storage_kill_stops_first_and_absorbs_the_cold_start(agentcore: FakeAgentCore) -> None:
+    async with _open(suspend_on_exit=True) as backend:
+        sandbox_id = backend.sandbox_id
+        await backend.write_file("/home/user/secret.txt", "x")
+    agentcore.stopped.clear()
+    agentcore.invocations.clear()
+    # The wipe boots a stopped session, which answers 409 while it starts.
+    agentcore.conflicts_before_ready = 2
+
+    with patch.object(sandbox_bedrock.asyncio, "sleep", AsyncMock()):
+        await kill_sandbox(sandbox_id)
+
+    assert list(agentcore.image(sandbox_id).mount.iterdir()) == []
+    assert agentcore.invocations == [(sandbox_id, "wipe")]
+    assert agentcore.stopped == [sandbox_id, sandbox_id]
+
+
+@pytest.fixture
+def s3_log(agentcore: FakeAgentCore, s3_storage: _FakeS3) -> Iterator[list[str]]:
+    """One log of stops and S3 deletes, in the order they happened."""
+    log: list[str] = []
+    s3_storage.log = log
+    real_stop = agentcore.stop_runtime_session
+
+    def _stop(**kwargs: Any) -> dict[str, Any]:
+        log.append("stop")
+        return real_stop(**kwargs)
+
+    with patch.object(agentcore, "stop_runtime_session", side_effect=_stop):
+        yield log
+
+
+def _s3_workspace(s3: _FakeS3, sandbox_id: str, *names: str) -> str:
+    prefix = f"seizu-sandbox/prod/{sandbox_id}/"
+    s3.objects[f"{prefix}{MARKER_FILENAME}"] = _marker("prod")
+    for name in names:
+        s3.objects[f"{prefix}{name}"] = b"data"
+    return prefix
+
+
+async def test_s3_kill_stops_the_session_before_deleting_and_the_marker_goes_last(
+    agentcore: FakeAgentCore, s3_storage: _FakeS3, s3_log: list[str]
+) -> None:
+    sandbox_id = sandbox_bedrock.new_session_id()
+    prefix = _s3_workspace(s3_storage, sandbox_id, "a.txt", "b.txt")
+
+    await kill_sandbox(sandbox_id)
+
+    assert s3_log[0] == "stop"
+    assert s3_log[-1] == f"delete {prefix}{MARKER_FILENAME}"
+    assert not any(k.startswith(prefix) for k in s3_storage.objects)
+
+
+async def test_s3_kill_that_cannot_stop_deletes_nothing(agentcore: FakeAgentCore, s3_storage: _FakeS3) -> None:
+    sandbox_id = sandbox_bedrock.new_session_id()
+    prefix = _s3_workspace(s3_storage, sandbox_id, "a.txt")
+    denied = ClientError({"Error": {"Code": "AccessDeniedException", "Message": ""}}, "StopRuntimeSession")
+
+    with patch.object(agentcore, "stop_runtime_session", side_effect=denied):
+        with pytest.raises(ClientError):
+            await kill_sandbox(sandbox_id)
+
+    assert sorted(s3_storage.objects) == [f"{prefix}{MARKER_FILENAME}", f"{prefix}a.txt"]
+
+
+async def test_s3_kill_reports_keys_it_could_not_delete_and_keeps_the_marker(
+    agentcore: FakeAgentCore, s3_storage: _FakeS3
+) -> None:
+    sandbox_id = sandbox_bedrock.new_session_id()
+    prefix = _s3_workspace(s3_storage, sandbox_id, "secret.txt", "other.txt")
+    s3_storage.failures = [{"Key": f"{prefix}secret.txt", "Code": "AccessDenied", "Message": "Access Denied"}]
+
+    with pytest.raises(RuntimeError, match="secret.txt: AccessDenied"):
+        await kill_sandbox(sandbox_id)
+
+    # Still findable by the orphan sweep, so the delete can be retried.
+    assert sorted(s3_storage.objects) == [f"{prefix}{MARKER_FILENAME}", f"{prefix}secret.txt"]
+    assert await sandbox_is_paused(sandbox_id) is True
+
+
+async def test_s3_kill_retries_transient_key_failures(agentcore: FakeAgentCore, s3_storage: _FakeS3) -> None:
+    sandbox_id = sandbox_bedrock.new_session_id()
+    prefix = _s3_workspace(s3_storage, sandbox_id, "a.txt")
+    s3_storage.failures = [{"Key": f"{prefix}a.txt", "Code": "SlowDown", "Message": ""}]
+
+    with patch.object(sandbox_bedrock.time, "sleep"):
+        await kill_sandbox(sandbox_id)
+
+    assert not any(k.startswith(prefix) for k in s3_storage.objects)
+
+
+async def test_s3_kill_finds_objects_written_while_it_deletes(agentcore: FakeAgentCore, s3_storage: _FakeS3) -> None:
+    sandbox_id = sandbox_bedrock.new_session_id()
+    prefix = _s3_workspace(s3_storage, sandbox_id, "a.txt")
+    real_delete = s3_storage.delete_objects
+    late = {"written": False}
+
+    def _delete_then_a_late_upload(**kwargs: Any) -> dict[str, Any]:
+        response = real_delete(**kwargs)
+        if not late["written"]:
+            late["written"] = True
+            s3_storage.objects[f"{prefix}late.txt"] = b"flushed after the listing"
+        return response
+
+    with patch.object(s3_storage, "delete_objects", side_effect=_delete_then_a_late_upload):
+        await kill_sandbox(sandbox_id)
+
+    assert not any(k.startswith(prefix) for k in s3_storage.objects)
+
+
+async def test_s3_kill_gives_up_on_a_workspace_that_keeps_refilling(
+    agentcore: FakeAgentCore, s3_storage: _FakeS3
+) -> None:
+    sandbox_id = sandbox_bedrock.new_session_id()
+    prefix = _s3_workspace(s3_storage, sandbox_id, "a.txt")
+    real_delete = s3_storage.delete_objects
+
+    def _refill(**kwargs: Any) -> dict[str, Any]:
+        response = real_delete(**kwargs)
+        s3_storage.objects[f"{prefix}again.txt"] = b"x"
+        return response
+
+    with patch.object(s3_storage, "delete_objects", side_effect=_refill):
+        with pytest.raises(RuntimeError, match="remain"):
+            await kill_sandbox(sandbox_id)
+    assert f"{prefix}{MARKER_FILENAME}" in s3_storage.objects
+
+
+# ---------------------------------------------------------------------------
+# Thread pools
+# ---------------------------------------------------------------------------
+
+
+async def test_cleanup_runs_while_executions_hold_every_execution_thread(agentcore: FakeAgentCore) -> None:
+    import asyncio
+    import threading
+
+    release = threading.Event()
+    saved = dict(sandbox_bedrock._executors)
+    sandbox_bedrock._executors.clear()
+    try:
+        with patch.object(sandbox_bedrock, "_EXEC_THREADS", 1):
+            busy = asyncio.ensure_future(sandbox_bedrock.run_blocking(release.wait, 30, pool="exec"))
+            queued = asyncio.ensure_future(sandbox_bedrock.run_blocking(release.wait, 30, pool="exec"))
+            await asyncio.sleep(0.05)
+            busy.cancel()
+            queued.cancel()
+            # The execution thread is still held by the cancelled call; a stop
+            # must not wait for it.
+            await asyncio.wait_for(sandbox_bedrock.stop_session(ARN, sandbox_bedrock.new_session_id()), timeout=5)
+    finally:
+        release.set()
+        for executor in sandbox_bedrock._executors.values():
+            executor.shutdown(wait=True)
+        sandbox_bedrock._executors.clear()
+        sandbox_bedrock._executors.update(saved)

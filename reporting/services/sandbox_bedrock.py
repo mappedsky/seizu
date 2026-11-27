@@ -15,8 +15,13 @@ for every provider (SBX-006, SBX-007, SBX-015, SBX-021):
 - **resume** -- invoke the same id: AgentCore starts a fresh microVM and
   restores the workspace. A missing marker means the workspace is gone, which is
   the terminal case: a new session replaces it.
-- **kill** -- delete the workspace (``wipe`` for session storage, the S3 prefix
-  for ``s3``), then stop the session.
+- **kill** -- stop the session, then delete the workspace (the S3 prefix, marker
+  last, for ``s3``; for session storage a ``wipe`` in a freshly started session,
+  then a second stop).
+
+Data-plane calls are retried by :func:`_with_retries`, never by the SDK, so code
+never runs twice; they run on thread pools of their own, code apart from
+everything else (:func:`run_blocking`).
 
 The runtime itself is provisioned by
 :mod:`reporting.services.sandbox_bedrock_runtime`, or by an operator; this
@@ -25,15 +30,21 @@ module only finds it (and, for an operator's runtime, has it checked).
 
 import asyncio
 import base64
+import contextvars
+import functools
 import json
 import logging
+import random
 import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
+
+from botocore.exceptions import ConnectionClosedError, ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError
 
 from reporting.services import get_boto_client
 from reporting.services.sandbox_protocol import (
@@ -73,6 +84,41 @@ _PROVISION_RETRY_SECONDS = 60.0
 
 #: Pages a listing walks before giving up (mirrors the E2B listing's bound).
 _MAX_LIST_PAGES = 200
+
+#: Attempts at a data-plane call that fails in a way worth retrying (throttling,
+#: a connection that never opened, or -- for an operation that can be repeated --
+#: a server error or lost response). Provisioning conflicts are bounded by
+#: _PROVISION_RETRY_SECONDS instead.
+_MAX_ATTEMPTS = 5
+
+#: Operations whose repetition repeats no effect: reads, whole-file writes,
+#: ``hello`` (the image creates the marker exclusively) and ``wipe``. Running
+#: code is not among them, so a failure that may have happened after the code
+#: ran is never retried.
+_REPEATABLE_OPS = frozenset({Op.HELLO, Op.READ_FILE, Op.WRITE_FILE, Op.LIST_FILES, Op.WIPE})
+_EXEC_OPS = frozenset({Op.RUN_PYTHON, Op.RUN_BASH})
+
+#: Error codes AgentCore answers with before a request reaches the sandbox, so
+#: retrying them cannot run anything twice.
+_NOT_DELIVERED_CODES = frozenset({"ThrottlingException", "RetryableConflictException"})
+#: Error codes that leave it unknown whether the request ran.
+_AMBIGUOUS_CODES = frozenset({"InternalServerException", "ServiceUnavailableException"})
+
+#: Passes over an S3 workspace before its deletion is reported incomplete. Each
+#: pass lists what is left, so an object written while the last pass ran is
+#: still found.
+_S3_DELETE_PASSES = 3
+#: Per-key S3 delete errors worth another pass; any other fails the delete.
+_S3_RETRYABLE_DELETE_CODES = frozenset({"InternalError", "ServiceUnavailable", "SlowDown", "RequestTimeout"})
+
+#: Threads for running code. A call holds its thread until AgentCore answers --
+#: up to the execution timeout -- even after the coroutine awaiting it is
+#: cancelled, so these are kept apart from everything else.
+_EXEC_THREADS = 32
+#: Threads for every other blocking call: file operations, hello, stop, wipe, S3
+#: and the control plane. Kept separate so cleanup always has somewhere to run,
+#: however many executions are outstanding.
+_OPS_THREADS = 16
 
 _RUNTIME_NAME_RE = re.compile(r"[^A-Za-z0-9_]")
 
@@ -147,7 +193,7 @@ def _exec_timeout() -> int:
 _clients: dict[str, Any] = {}
 
 
-def _client(service: str, *, read_timeout: int) -> Any:
+def _client(service: str, *, read_timeout: int, retries: dict[str, Any] | None = None) -> Any:
     from botocore.config import Config
 
     from reporting import settings
@@ -156,14 +202,24 @@ def _client(service: str, *, read_timeout: int) -> Any:
         config = Config(
             connect_timeout=settings.AWS_CONNECT_TIMEOUT,
             read_timeout=read_timeout,
-            retries={"mode": "adaptive", "max_attempts": 5},
+            retries=retries or {"mode": "adaptive", "max_attempts": 5},
         )
         _clients[service] = get_boto_client(service, region=settings.SANDBOX_BEDROCK_REGION or None, config=config)
     return _clients[service]
 
 
 def data_client() -> Any:
-    return _client("bedrock-agentcore", read_timeout=_exec_timeout() + 60)
+    """The AgentCore data-plane client. It never retries on its own.
+
+    The SDK would replay a call after a server error or a lost response, which
+    for ``run_python`` runs the code again; :func:`_with_retries` retries only
+    what cannot have run, or what is safe to repeat.
+    """
+    return _client(
+        "bedrock-agentcore",
+        read_timeout=_exec_timeout() + 60,
+        retries={"mode": "standard", "total_max_attempts": 1},
+    )
 
 
 def control_client() -> Any:
@@ -183,6 +239,82 @@ def _error_code(exc: BaseException) -> str:
     if isinstance(response, dict):
         return str(response.get("Error", {}).get("Code", ""))
     return ""
+
+
+def _http_status(exc: BaseException) -> int:
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        return int(response.get("ResponseMetadata", {}).get("HTTPStatusCode") or 0)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Blocking calls: thread pools and retries
+# ---------------------------------------------------------------------------
+
+_executors: dict[str, ThreadPoolExecutor] = {}
+
+
+def _executor(kind: str) -> ThreadPoolExecutor:
+    if kind not in _executors:
+        size = _EXEC_THREADS if kind == "exec" else _OPS_THREADS
+        _executors[kind] = ThreadPoolExecutor(max_workers=size, thread_name_prefix=f"sandbox-bedrock-{kind}")
+    return _executors[kind]
+
+
+async def run_blocking[T](fn: Callable[..., T], /, *args: Any, pool: str = "ops", **kwargs: Any) -> T:
+    """Run a blocking call on this provider's ``"ops"`` (default) or ``"exec"`` pool.
+
+    Like :func:`asyncio.to_thread`, but on pools of its own (the default
+    executor is shared with the rest of the process), and carrying the caller's
+    context variables. Cancelling a call still queued drops it; one already
+    running finishes in its thread.
+    """
+    loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
+    return await loop.run_in_executor(_executor(pool), functools.partial(context.run, fn, *args, **kwargs))
+
+
+def _retry_kind(exc: BaseException) -> str:
+    """``"not_delivered"``, ``"ambiguous"`` or ``""`` (not worth retrying)."""
+    code = _error_code(exc)
+    if code in _NOT_DELIVERED_CODES or isinstance(exc, (EndpointConnectionError, ConnectTimeoutError)):
+        return "not_delivered"
+    if (
+        code in _AMBIGUOUS_CODES
+        or _http_status(exc) >= 500
+        or isinstance(exc, (ReadTimeoutError, ConnectionClosedError))
+    ):
+        return "ambiguous"
+    return ""
+
+
+async def _with_retries[T](call: Callable[[], T], *, repeatable: bool, pool: str, what: str) -> T:
+    """``call()`` on ``pool``, retried only where that cannot repeat its effect.
+
+    A provisioning conflict (a new or restarting session) is retried until
+    :data:`_PROVISION_RETRY_SECONDS`; throttling and a connection that never
+    opened up to :data:`_MAX_ATTEMPTS` times; a server error, timeout or lost
+    response the same, but only when ``repeatable``.
+    """
+    provisioning_deadline = time.monotonic() + _PROVISION_RETRY_SECONDS
+    attempt = 0
+    delay = 0.5
+    while True:
+        attempt += 1
+        try:
+            return await run_blocking(call, pool=pool)
+        except Exception as exc:
+            kind = _retry_kind(exc)
+            if _error_code(exc) == "RetryableConflictException":
+                retry = time.monotonic() < provisioning_deadline
+            else:
+                retry = (kind == "not_delivered" or (kind == "ambiguous" and repeatable)) and attempt < _MAX_ATTEMPTS
+            if not retry:
+                raise
+            logger.info("retrying %s after %s (attempt %d)", what, _error_code(exc) or type(exc).__name__, attempt)
+            await asyncio.sleep(delay * random.uniform(0.5, 1.0))  # noqa: S311 -- backoff jitter
+            delay = min(delay * 2, 5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +359,7 @@ async def resolve_runtime_arn() -> str:
         return await _resolve_operator_runtime_arn()
     if _runtime_arn:
         return _runtime_arn
-    runtime = await asyncio.to_thread(find_runtime)
+    runtime = await run_blocking(find_runtime)
     if runtime is None:
         raise SandboxRuntimeUnavailable(
             f"sandbox runtime {runtime_name()!r} does not exist yet; the Temporal worker creates it at startup "
@@ -307,32 +439,30 @@ def _invoke_sync(arn: str, session_id: str, op: Op, args: dict[str, Any], timeou
 
 
 async def _invoke(arn: str, session_id: str, op: Op, args: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
-    return await asyncio.to_thread(_invoke_sync, arn, session_id, op, args, timeout_seconds)
+    """One protocol operation, retried as :func:`_with_retries` allows for ``op``.
+
+    Code runs on the ``"exec"`` pool, everything else on ``"ops"``. Every call
+    absorbs the 409 a session answers while it starts, so an operation on a
+    stopped session (``wipe`` during deletion, say) needs no ``hello`` first.
+    """
+    return await _with_retries(
+        functools.partial(_invoke_sync, arn, session_id, op, args, timeout_seconds),
+        repeatable=op in _REPEATABLE_OPS,
+        pool="exec" if op in _EXEC_OPS else "ops",
+        what=f"sandbox {op.value}",
+    )
 
 
 async def _hello(arn: str, session_id: str, *, create_marker: SandboxMarker | None = None) -> HelloResult:
-    """``hello``, retrying the 409 a session answers while it is provisioned.
+    """``hello``: the first call any session sees, so the one that absorbs provisioning.
 
-    This is the first call any session sees, so it is the one that absorbs
-    provisioning; once it returns, concurrent calls from a distributed batch
-    land on a running microVM.
+    Once it returns, concurrent calls from a distributed batch land on a
+    running microVM.
     """
     args: dict[str, Any] = {}
     if create_marker is not None:
         args["create_marker"] = create_marker.model_dump()
-    deadline = time.monotonic() + _PROVISION_RETRY_SECONDS
-    delay = 0.5
-    while True:
-        try:
-            result = HelloResult.model_validate(
-                await _invoke(arn, session_id, Op.HELLO, args, _FILE_OP_TIMEOUT_SECONDS)
-            )
-            break
-        except Exception as exc:
-            if _error_code(exc) != "RetryableConflictException" or time.monotonic() >= deadline:
-                raise
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 5.0)
+    result = HelloResult.model_validate(await _invoke(arn, session_id, Op.HELLO, args, _FILE_OP_TIMEOUT_SECONDS))
     if PROTOCOL_VERSION not in result.protocol_versions:
         raise SandboxOpError(
             ErrorCode.UNSUPPORTED_PROTOCOL,
@@ -365,7 +495,7 @@ async def stop_session(arn: str, session_id: str) -> None:
                 return
             raise
 
-    await asyncio.to_thread(_stop)
+    await _with_retries(_stop, repeatable=True, pool="ops", what="stopping a sandbox session")
 
 
 # ---------------------------------------------------------------------------
@@ -480,35 +610,65 @@ class BedrockSandboxBackend:
 # ---------------------------------------------------------------------------
 
 
-def _delete_s3_prefix_sync(prefix: str) -> int:
+def _list_keys_sync(client: Any, bucket: str, prefix: str) -> list[str]:
+    keys: list[str] = []
+    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        keys.extend(obj["Key"] for obj in page.get("Contents", []))
+    return keys
+
+
+def _delete_s3_prefix_sync(prefix: str) -> None:
+    """Delete every object under ``prefix``, the marker last.
+
+    Raises unless everything is gone. The marker is how the orphan sweep finds a
+    workspace, so it is deleted only once a listing shows nothing else left: a
+    delete that fails part-way leaves the workspace findable and the delete
+    retryable. S3 reports per-key failures in the response, not as an error.
+    """
     from reporting import settings
 
     client = s3_client()
     bucket = settings.SANDBOX_BEDROCK_S3_BUCKET
-    deleted = 0
-    paginator = client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
-        # list_objects_v2 pages hold at most 1000 keys, which is delete_objects' limit.
-        if keys:
-            client.delete_objects(Bucket=bucket, Delete={"Objects": keys, "Quiet": True})
-            deleted += len(keys)
-    return deleted
+    marker = f"{prefix}{MARKER_FILENAME}"
+    for attempt in range(_S3_DELETE_PASSES + 1):
+        keys = [key for key in _list_keys_sync(client, bucket, prefix) if key != marker]
+        if not keys:
+            break
+        if attempt == _S3_DELETE_PASSES:
+            raise RuntimeError(f"{len(keys)} object(s) remain under {prefix} after {_S3_DELETE_PASSES} delete passes")
+        errors: list[dict[str, Any]] = []
+        for start in range(0, len(keys), 1000):  # delete_objects takes at most 1000 keys
+            batch = keys[start : start + 1000]
+            response = client.delete_objects(
+                Bucket=bucket, Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True}
+            )
+            errors.extend(response.get("Errors") or [])
+        fatal = [error for error in errors if error.get("Code") not in _S3_RETRYABLE_DELETE_CODES]
+        if fatal:
+            first = fatal[0]
+            raise RuntimeError(
+                f"could not delete {len(errors)} object(s) under {prefix}: "
+                f"{first.get('Key', '')}: {first.get('Code', '')} {first.get('Message', '')}".rstrip()
+            )
+        if errors:
+            time.sleep(0.5 * 2**attempt)
+    client.delete_object(Bucket=bucket, Key=marker)
 
 
 async def destroy_session(arn: str, session_id: str) -> None:
-    """Delete a session's workspace, then stop it. Raises if the delete fails.
+    """Stop a session, then delete its workspace. Raises if either fails.
 
-    Neither storage mode has a provider-side delete: session storage is erased
-    from inside the session (which starts one if it was stopped), an S3
-    workspace by deleting its prefix here.
+    Stopping first ends every process that could still write to the workspace;
+    a stop that fails deletes nothing, so the whole destroy stays retryable (and
+    in ``s3`` mode the orphan sweep still finds the workspace by its marker).
+    Neither storage mode has a provider-side delete: an S3 workspace is deleted
+    by its prefix here; session storage is erased from inside the session, which
+    is therefore started again -- with nothing else running in it -- wiped and
+    stopped.
     """
+    await stop_session(arn, session_id)
     if storage_mode() == "s3":
-        await asyncio.to_thread(_delete_s3_prefix_sync, _session_prefix(session_id))
-        try:
-            await stop_session(arn, session_id)
-        except Exception:
-            logger.info("could not stop sandbox session %s after deleting it", session_id, exc_info=True)
+        await run_blocking(_delete_s3_prefix_sync, _session_prefix(session_id))
         return
     WipeResult.model_validate(await _invoke(arn, session_id, Op.WIPE, {}, _FILE_OP_TIMEOUT_SECONDS))
     await stop_session(arn, session_id)
@@ -591,7 +751,7 @@ async def list_bedrock_sandboxes(*, all_owners: bool = False) -> list[Any]:
     """
     if storage_mode() != "s3":
         return []
-    return await asyncio.to_thread(_list_sandboxes_sync, all_owners)
+    return await run_blocking(_list_sandboxes_sync, all_owners)
 
 
 async def bedrock_sandbox_is_paused(sandbox_id: str) -> bool:
@@ -604,7 +764,7 @@ async def bedrock_sandbox_is_paused(sandbox_id: str) -> bool:
     if storage_mode() != "s3" or not is_session_id(sandbox_id):
         return False
     try:
-        return await asyncio.to_thread(_read_marker_sync, sandbox_id) is not None
+        return await run_blocking(_read_marker_sync, sandbox_id) is not None
     except Exception:
         logger.info("could not read sandbox %s marker; leaving it alone", sandbox_id, exc_info=True)
         return False

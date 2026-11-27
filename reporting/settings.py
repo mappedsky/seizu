@@ -1401,7 +1401,9 @@ SANDBOX_BEDROCK_ROLE_ARN = str_env("SANDBOX_BEDROCK_ROLE_ARN", "")
 # Comma-separated subnet and security-group ids. Setting both runs the runtime
 # in VPC mode -- use private subnets without a NAT gateway to keep sandboxes off
 # the internet. Leaving both empty runs it in PUBLIC mode, which has internet
-# access and is refused unless SANDBOX_ALLOW_INTERNET is true.
+# access and is refused unless SANDBOX_ALLOW_INTERNET is true. Ignored when
+# SANDBOX_BEDROCK_MANAGE_RUNTIME is false: the runtime's own network
+# configuration applies.
 SANDBOX_BEDROCK_SUBNETS = [v.strip() for v in list_env("SANDBOX_BEDROCK_SUBNETS", []) if v.strip()]
 SANDBOX_BEDROCK_SECURITY_GROUPS = [v.strip() for v in list_env("SANDBOX_BEDROCK_SECURITY_GROUPS", []) if v.strip()]
 # Name of the AgentCore runtime. Empty derives "seizu_sandbox_<deployment id>".

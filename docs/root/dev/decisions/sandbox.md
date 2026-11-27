@@ -863,10 +863,35 @@ the old id (SBX-008) stop being offered. An id that is not ours (an E2B id after
 switching provider) is treated the same way without calling AgentCore, where it
 would be a validation error that wedged the thread.
 
-**Kill means delete, then stop.** Neither storage mode has a provider-side
-delete: session storage is wiped from inside the session (`wipe`, which boots a
-stopped one), an `s3` workspace by deleting its prefix from Seizu. Stopping alone
-would leave a deleted thread's files for 14 days.
+**Kill means stop, then delete.** Neither storage mode has a provider-side
+delete: an `s3` workspace is deleted by its prefix from Seizu, and session
+storage is wiped from inside the session (`wipe`, which boots a stopped one).
+Stopping alone would leave a deleted thread's files for 14 days. The stop comes
+first, and must succeed, because deleting a running session's workspace races
+its processes: a background job or an upload still being flushed recreates
+objects after they were listed, and a review reproduced exactly that. So
+session storage is stopped, wiped in a fresh microVM with nothing else running,
+and stopped again. An S3 delete is checked key by key (`DeleteObjects` reports
+per-key failures in its response, not as an error), re-listed until empty, and
+deletes the marker last: a delete that stops part-way must leave the workspace
+findable by the orphan sweep, or what remains is never deleted at all.
+
+**Retries never run code twice.** The data-plane client has the SDK's retries
+off. With them on, a server error or lost response after `run_python` ran
+replayed the call and ran the code again, which a review reproduced. Seizu
+retries instead (`_with_retries`): throttling, the 409 a starting session
+answers, and a connection that never opened, for any operation, since none of
+them reached the sandbox; a server error, timeout or dropped connection only
+for operations whose repetition repeats nothing (reads, whole-file writes,
+`hello` -- the image creates the marker exclusively -- and `wipe`). Every
+operation absorbs the starting-session 409, not only `hello`, because deletion
+wipes a stopped session without one.
+
+**Code runs on a thread pool of its own.** A blocking boto call keeps its thread
+until AgentCore answers, up to the execution timeout, even after the coroutine
+awaiting it is cancelled. On the process's shared default executor, a handful of
+cancelled executions left `StopRuntimeSession` unable to start. Execution gets
+one pool, and file operations, lifecycle, S3 and the control plane another.
 
 **Two storage modes, because neither is strictly better.** `session` needs no
 bucket but is 1 GB, in preview, and erased by every runtime update. `s3`

@@ -118,7 +118,7 @@ def _client_token(*parts: Any) -> str:
 
 async def _get(runtime_id: str) -> dict[str, Any]:
     client = sandbox_bedrock.control_client()
-    return dict(await asyncio.to_thread(client.get_agent_runtime, agentRuntimeId=runtime_id))
+    return dict(await sandbox_bedrock.run_blocking(client.get_agent_runtime, agentRuntimeId=runtime_id))
 
 
 async def _wait_ready(runtime_id: str) -> dict[str, Any]:
@@ -148,7 +148,7 @@ async def _update(runtime: dict[str, Any], desired: dict[str, Any], changed: lis
         else "",
     )
     client = sandbox_bedrock.control_client()
-    await asyncio.to_thread(
+    await sandbox_bedrock.run_blocking(
         client.update_agent_runtime,
         agentRuntimeId=runtime_id,
         clientToken=_client_token("update", runtime_id, runtime.get("agentRuntimeVersion"), desired),
@@ -176,11 +176,11 @@ async def reconcile_runtime() -> dict[str, Any] | None:
         return None
     name = sandbox_bedrock.runtime_name()
     desired = desired_configuration()
-    summary = await asyncio.to_thread(sandbox_bedrock.find_runtime)
+    summary = await sandbox_bedrock.run_blocking(sandbox_bedrock.find_runtime)
     if summary is None:
         logger.info("Creating sandbox runtime %s", name)
         client = sandbox_bedrock.control_client()
-        created = await asyncio.to_thread(
+        created = await sandbox_bedrock.run_blocking(
             client.create_agent_runtime,
             agentRuntimeName=name,
             description="Seizu chat sandbox (seizu-sandbox/1)",
@@ -298,7 +298,7 @@ async def check_operator_runtime() -> tuple[str, str, list[str]]:
         runtime_id = _runtime_id(label)
     else:
         label = sandbox_bedrock.runtime_name()
-        summary = await asyncio.to_thread(sandbox_bedrock.find_runtime)
+        summary = await sandbox_bedrock.run_blocking(sandbox_bedrock.find_runtime)
         if summary is None:
             raise unavailable(
                 f"sandbox runtime {label!r} does not exist; with SANDBOX_BEDROCK_MANAGE_RUNTIME=false it is created "
@@ -306,7 +306,7 @@ async def check_operator_runtime() -> tuple[str, str, list[str]]:
             )
         runtime_id = str(summary["agentRuntimeId"])
     try:
-        endpoint = await asyncio.to_thread(
+        endpoint = await sandbox_bedrock.run_blocking(
             client.get_agent_runtime_endpoint, agentRuntimeId=runtime_id, endpointName=qualifier
         )
     except Exception as exc:
@@ -320,7 +320,9 @@ async def check_operator_runtime() -> tuple[str, str, list[str]]:
     if status not in {"READY", "UPDATING"} or not version:
         raise unavailable(f"endpoint {qualifier!r} of sandbox runtime {label!r} is {status or 'not ready'}")
     runtime = dict(
-        await asyncio.to_thread(client.get_agent_runtime, agentRuntimeId=runtime_id, agentRuntimeVersion=version)
+        await sandbox_bedrock.run_blocking(
+            client.get_agent_runtime, agentRuntimeId=runtime_id, agentRuntimeVersion=version
+        )
     )
     if runtime.get("status") != "READY":
         raise unavailable(f"sandbox runtime {label!r} version {version} is {runtime.get('status') or 'not ready'}")
