@@ -101,8 +101,14 @@ constraint-dependencies = [
 # Upstream has already widened the pin to <51.0.0 on main, but has not cut a
 # release carrying it; the newest release (0.7.0) still ships <49.0.0 in its
 # wheel metadata. Drop this override once that release lands.
+#
+# e2b pins wcmatch to <11.0, and that bound is the only thing holding the tree
+# below wcmatch 11.2. wcmatch is used only internally by e2b for glob matching
+# (nothing in this repository imports it directly), so lifting the cap is safe.
+# Drop this override once e2b widens its pin upstream.
 override-dependencies = [
     "cryptography>=50.0.0",
+    "wcmatch==11.2",
 ]
 
 # Keep the separately published CLI package in the root uv workspace so the
