@@ -389,9 +389,16 @@ services:
       # Workflow chat sessions enforce the creator's stored role unless dev
       # mode is on; keep this aligned with the seizu service.
       - DEVELOPMENT_ONLY_REQUIRE_AUTH
-      - AWS_ACCESS_KEY_ID=fake
-      - AWS_SECRET_ACCESS_KEY=fake
-      - AWS_DEFAULT_REGION=us-east-1
+      # Seizu's own AWS credentials (for the Bedrock sandbox provider), set as
+      # SEIZU_AWS_* in .env. Unset, the service has none.
+      - AWS_ACCESS_KEY_ID=${SEIZU_AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${SEIZU_AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${SEIZU_AWS_SESSION_TOKEN:-}
+      - AWS_DEFAULT_REGION=${SEIZU_AWS_REGION:-us-east-1}
+      # The SQS emulator ignores credentials but boto still signs requests, so
+      # the SQS client gets placeholders of its own.
+      - SQS_ACCESS_KEY_ID=fake
+      - SQS_SECRET_ACCESS_KEY=fake
       - SQL_DATABASE_URL=${SQL_DATABASE_URL:-postgresql://postgres:5432/seizu}
       - SQL_DATABASE_USER=${SQL_DATABASE_USER:-seizu}
       - SQL_DATABASE_PASSWORD=${SQL_DATABASE_PASSWORD:-seizu}
@@ -670,10 +677,12 @@ services:
       - "OIDC_SCOPE=${OIDC_SCOPE-openid email profile offline_access}"
       # Disable HTTPS redirect in development (plain HTTP)
       - "TALISMAN_FORCE_HTTPS=false"
-      # AWS credentials for local integrations such as SQS.
-      - AWS_ACCESS_KEY_ID=fake
-      - AWS_SECRET_ACCESS_KEY=fakefake
-      - AWS_DEFAULT_REGION=us-east-1
+      # Seizu's own AWS credentials (for the Bedrock sandbox provider), set as
+      # SEIZU_AWS_* in .env. Unset, the service has none.
+      - AWS_ACCESS_KEY_ID=${SEIZU_AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${SEIZU_AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${SEIZU_AWS_SESSION_TOKEN:-}
+      - AWS_DEFAULT_REGION=${SEIZU_AWS_REGION:-us-east-1}
       # Chat assistant — set CHAT_ENABLED=true in .env to enable the feature
       # (routes + checkpoint init + UI). Defaults to false when unset.
       - CHAT_ENABLED

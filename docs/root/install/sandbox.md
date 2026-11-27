@@ -382,14 +382,15 @@ yourself instead, see [Managing the runtime yourself](#managing-the-runtime-your
 /home/user` in the sandbox. A Bedrock sandbox answers `aarch64` and
 `/mnt/workspace`.
 
-The local Docker Compose stack sets placeholder AWS credentials for its SQS
-emulator. To try this provider locally, override `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` for the `seizu` and
-`seizu-temporal-worker` services in a Compose override file, and add
-`AWS_SESSION_TOKEN` there if the credentials are temporary. The containers read
-these when they are created: once temporary credentials expire, AWS calls fail
-with `ExpiredTokenException` until the two services are recreated with fresh
-ones.
+To try this provider in the local Docker Compose stack, set
+`SEIZU_AWS_ACCESS_KEY_ID`, `SEIZU_AWS_SECRET_ACCESS_KEY` and `SEIZU_AWS_REGION`
+in `.env`, plus `SEIZU_AWS_SESSION_TOKEN` if the credentials are temporary.
+Compose passes them to the `seizu` and `seizu-temporal-worker` services as the
+usual `AWS_*` variables. (The stack's SQS emulator has placeholder credentials of
+its own, `SQS_ACCESS_KEY_ID` and `SQS_SECRET_ACCESS_KEY`, which only the SQS
+client reads.) The containers read these when they are created: once temporary
+credentials expire, AWS calls fail with `ExpiredTokenException` until the two
+services are recreated with fresh ones.
 
 #### Managing the runtime yourself
 
