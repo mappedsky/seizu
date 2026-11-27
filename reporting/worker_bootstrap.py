@@ -25,6 +25,7 @@ def install_shutdown_handlers(event: asyncio.Event, logger: logging.Logger) -> N
 async def initialize_report_store() -> None:
     """Validate persistence configuration and upgrade the report-store schema."""
     settings.validate_persistence_settings()
+    settings.validate_sandbox_settings()
     await report_store.initialize()
 
 

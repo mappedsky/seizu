@@ -6,7 +6,9 @@ remediation workflow (:mod:`reporting.services.sandbox_remediation`). Kept
 separate from the chat tool so it is not a chat-only private helper.
 
 Add a new provider by implementing :class:`SandboxBackend` and opening it in
-:func:`open_backend`.
+:func:`open_backend`, which dispatches on ``SANDBOX_PROVIDER``. E2B lives here;
+Amazon Bedrock AgentCore Runtime lives in :mod:`reporting.services.sandbox_bedrock`
+(SBX-001, SBX-021).
 """
 
 import asyncio
@@ -133,20 +135,17 @@ class _E2BSandboxBackend:
 
     async def run_python(self, code: str) -> str:
         execution = await self._sandbox.run_code(code)
-        parts: list[str] = []
         # logs.stdout captures print() output; execution.text is the return-value
         # text of the last expression (display output, not stdout).  We need both.
-        if execution.logs.stdout:
-            parts.append("".join(execution.logs.stdout))
-        if execution.logs.stderr:
-            parts.append("stderr:\n" + "".join(execution.logs.stderr))
-        if execution.text:
-            parts.append(execution.text)
-        if execution.error:
-            parts.append(f"Error: {execution.error.name}: {execution.error.value}")
-            if execution.error.traceback:
-                parts.append(execution.error.traceback)
-        return "\n".join(parts) if parts else "(no output)"
+        error = execution.error
+        return python_output(
+            "".join(execution.logs.stdout or []),
+            "".join(execution.logs.stderr or []),
+            execution.text or "",
+            error_name=error.name if error else "",
+            error_value=error.value if error else "",
+            error_traceback=(error.traceback or "") if error else "",
+        )
 
     async def run_bash(self, cmd: str) -> str:
         """Run a shell command, reporting a non-zero exit rather than raising.
@@ -177,7 +176,7 @@ class _E2BSandboxBackend:
         try:
             result = await self._sandbox.commands.run(cmd)
         except CommandExitException as exc:
-            return _bash_output(
+            return bash_output(
                 getattr(exc, "stdout", ""), getattr(exc, "stderr", ""), int(getattr(exc, "exit_code", 1) or 1)
             )
         except TimeoutException:
@@ -187,7 +186,7 @@ class _E2BSandboxBackend:
                 "The command was stopped for running too long. Nothing it may have printed was kept. "
                 "Try a narrower command, or run it in the background and read its output from a file."
             )
-        return _bash_output(result.stdout, result.stderr, int(getattr(result, "exit_code", 0) or 0))
+        return bash_output(result.stdout, result.stderr, int(getattr(result, "exit_code", 0) or 0))
 
     async def read_file(self, path: str) -> str:
         content = await self._sandbox.files.read(path)
@@ -244,7 +243,35 @@ class _E2BSandboxBackend:
         return str(getattr(self._sandbox, "sandbox_id", "") or "")
 
 
-def _bash_output(stdout: str, stderr: str, exit_code: int) -> str:
+def python_output(
+    stdout: str,
+    stderr: str,
+    text: str,
+    *,
+    error_name: str = "",
+    error_value: str = "",
+    error_traceback: str = "",
+) -> str:
+    """One rendering for a Python run, whichever provider ran it.
+
+    Every provider produces the same text for the same outcome, so a sub-agent's
+    prompt and the tests describing it never depend on which one is configured.
+    """
+    parts: list[str] = []
+    if stdout:
+        parts.append(stdout)
+    if stderr:
+        parts.append("stderr:\n" + stderr)
+    if text:
+        parts.append(text)
+    if error_name:
+        parts.append(f"Error: {error_name}: {error_value}")
+        if error_traceback:
+            parts.append(error_traceback)
+    return "\n".join(parts) if parts else "(no output)"
+
+
+def bash_output(stdout: str, stderr: str, exit_code: int) -> str:
     """One rendering for a shell command, whichever way it ended.
 
     The exit code is stated only when it is non-zero: on the success path it
@@ -281,6 +308,31 @@ def _account_api_params() -> dict[str, Any]:
     from reporting import settings as _settings
 
     return _api_params(_settings.SANDBOX_API_KEY, _settings.SANDBOX_DOMAIN)
+
+
+def provider() -> str:
+    """The configured sandbox provider (``e2b`` or ``bedrock``)."""
+    from reporting import settings as _settings
+
+    return _settings.SANDBOX_PROVIDER
+
+
+def workspace_note() -> str:
+    """What a model working in the sandbox must know about its filesystem, or ``""``.
+
+    Only an object-store workspace (bedrock with ``s3`` storage) needs one: it
+    cannot append to, edit in place, rename or link files, and code that assumes
+    it can fails in ways a model otherwise reads as a broken tool.
+    """
+    from reporting import settings as _settings
+
+    if provider() == "bedrock" and _settings.SANDBOX_BEDROCK_STORAGE == "s3":
+        return (
+            "Files under /home/user are stored as objects: write each file whole in one go. Appending, "
+            "editing a file in place, renaming, and symlinks are not supported there; build content in "
+            "memory (or under /tmp, which does not persist) and write the finished file."
+        )
+    return ""
 
 
 def deployment_id() -> str:
@@ -349,6 +401,11 @@ async def list_paused_sandboxes(*, all_owners: bool = False) -> list[SandboxSnap
     ``all_owners`` drops the filter for the one caller that needs the untagged
     ones too, and pays that cost knowingly.
     """
+    if provider() == "bedrock":
+        from reporting.services.sandbox_bedrock import list_bedrock_sandboxes
+
+        return list(await list_bedrock_sandboxes(all_owners=all_owners))
+
     from e2b import SandboxQuery, SandboxState
     from e2b_code_interpreter import AsyncSandbox
 
@@ -378,6 +435,11 @@ async def sandbox_is_paused(sandbox_id: str) -> bool:
     API call. A sandbox that cannot be inspected reports ``False``: the caller's
     job is reclaiming storage, and skipping one is cheaper than being wrong.
     """
+    if provider() == "bedrock":
+        from reporting.services.sandbox_bedrock import bedrock_sandbox_is_paused
+
+        return await bedrock_sandbox_is_paused(sandbox_id)
+
     from e2b import SandboxState
     from e2b_code_interpreter import AsyncSandbox
 
@@ -396,6 +458,12 @@ async def kill_sandbox(sandbox_id: str) -> None:
     from a failure (one logs an orphan and carries on, the other counts it), so
     neither gets to have the decision made here.
     """
+    if provider() == "bedrock":
+        from reporting.services.sandbox_bedrock import kill_bedrock_sandbox
+
+        await kill_bedrock_sandbox(sandbox_id)
+        return
+
     from e2b_code_interpreter import AsyncSandbox
 
     await AsyncSandbox.kill(sandbox_id, **_account_api_params())
@@ -428,16 +496,60 @@ async def open_backend(
     create_if_missing: bool = True,
     detach_on_exit: bool = False,
 ) -> AsyncIterator[SandboxBackend]:
-    """Open a sandbox and yield a :class:`SandboxBackend` for it.
+    """Open a sandbox on the configured provider and yield a :class:`SandboxBackend`.
 
-    This is the extension point for swapping providers.  To add a new backend:
-    1. Implement :class:`SandboxBackend`.
-    2. Add a ``SANDBOX_BACKEND`` setting (or branch on an existing one).
-    3. Open the new backend here and ``yield`` it.
+    The single swap point (SBX-001): every caller opens sandboxes here, and
+    tests patch this function to inject any backend without touching a provider
+    SDK. ``SANDBOX_PROVIDER`` picks the implementation; every argument means the
+    same thing to each, except that ``api_key`` and ``domain`` are E2B's
+    connection settings and a provider with no per-sandbox equivalent of an
+    argument says so in its own docstring (:func:`_open_e2b_backend`,
+    :func:`reporting.services.sandbox_bedrock.open_bedrock_backend`).
+    """
+    lifecycle: dict[str, Any] = {
+        "allow_internet": allow_internet,
+        "timeout_seconds": timeout_seconds,
+        "template": template,
+        "allow_public_traffic": allow_public_traffic,
+        "resume_sandbox_id": resume_sandbox_id,
+        "suspend_on_exit": suspend_on_exit,
+        "on_teardown": on_teardown,
+        "purpose": purpose,
+        "thread": thread,
+        "create_if_missing": create_if_missing,
+        "detach_on_exit": detach_on_exit,
+    }
+    if provider() == "bedrock":
+        from reporting.services.sandbox_bedrock import open_bedrock_backend
 
-    Tests patch this function to inject any :class:`SandboxBackend` without
-    touching provider SDKs.  The ``e2b_code_interpreter`` import stays lazy so
-    importing this module never fails when the package is absent.
+        async with open_bedrock_backend(**lifecycle) as bedrock_backend:
+            yield bedrock_backend
+        return
+    async with _open_e2b_backend(api_key=api_key, domain=domain, **lifecycle) as e2b_backend:
+        yield e2b_backend
+
+
+@asynccontextmanager
+async def _open_e2b_backend(
+    *,
+    api_key: str,
+    domain: str,
+    allow_internet: bool | None = None,
+    timeout_seconds: int | None = None,
+    template: str | None = None,
+    allow_public_traffic: bool = False,
+    resume_sandbox_id: str | None = None,
+    suspend_on_exit: bool | Callable[[], bool] = False,
+    on_teardown: Callable[[bool], None] | None = None,
+    purpose: str = "sandbox",
+    thread: str = "",
+    create_if_missing: bool = True,
+    detach_on_exit: bool = False,
+) -> AsyncIterator[SandboxBackend]:
+    """Open an E2B sandbox and yield a :class:`SandboxBackend` for it.
+
+    The ``e2b_code_interpreter`` import stays lazy so importing this module never
+    fails when the package is absent.
 
     Security defaults applied to every sandbox:
     - ``allow_internet_access``: off by default (``SANDBOX_ALLOW_INTERNET``);

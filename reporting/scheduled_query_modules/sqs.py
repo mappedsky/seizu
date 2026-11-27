@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 _SQS_CREATE_SCHEDULED_QUERY_QUEUES = bool_env("SQS_CREATE_SCHEDULED_QUERY_QUEUES", False)
 # URL for the SQS server, for use in dev when pointing at a fake SQS
 _SQS_URL = str_env("SQS_URL")
+# Credentials for the SQS client alone, for a fake SQS that still needs a signed
+# request. Empty uses the default AWS credential chain, like every other client.
+_SQS_ACCESS_KEY_ID = str_env("SQS_ACCESS_KEY_ID")
+_SQS_SECRET_ACCESS_KEY = str_env("SQS_SECRET_ACCESS_KEY")
 
 
 def _get_client() -> Any:
@@ -23,10 +27,13 @@ def _get_client() -> Any:
         connect_timeout=settings.AWS_CONNECT_TIMEOUT,
         read_timeout=settings.AWS_READ_TIMEOUT,
     )
-    if _SQS_URL:
-        return get_boto_client("sqs", endpoint_url=_SQS_URL, config=config)
-    else:
-        return get_boto_client("sqs", config=config)
+    return get_boto_client(
+        "sqs",
+        endpoint_url=_SQS_URL or None,
+        aws_access_key_id=_SQS_ACCESS_KEY_ID or None,
+        aws_secret_access_key=_SQS_SECRET_ACCESS_KEY or None,
+        config=config,
+    )
 
 
 def action_name() -> str:

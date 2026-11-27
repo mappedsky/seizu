@@ -26,6 +26,24 @@ def test_get_client_uses_configured_timeout(mocker):
     assert kwargs["config"].read_timeout == 23
 
 
+def test_get_client_uses_its_own_credentials_only_when_set(mocker):
+    client_ctor = mocker.patch("reporting.scheduled_query_modules.sqs.get_boto_client")
+    mocker.patch("reporting.scheduled_query_modules.sqs._SQS_URL", "")
+    mocker.patch("reporting.scheduled_query_modules.sqs._SQS_ACCESS_KEY_ID", "")
+    mocker.patch("reporting.scheduled_query_modules.sqs._SQS_SECRET_ACCESS_KEY", "")
+
+    sqs._get_client()
+    kwargs = client_ctor.call_args.kwargs
+    assert kwargs["endpoint_url"] is None
+    assert kwargs["aws_access_key_id"] is None and kwargs["aws_secret_access_key"] is None
+
+    mocker.patch("reporting.scheduled_query_modules.sqs._SQS_ACCESS_KEY_ID", "fake")
+    mocker.patch("reporting.scheduled_query_modules.sqs._SQS_SECRET_ACCESS_KEY", "fake")
+    sqs._get_client()
+    kwargs = client_ctor.call_args.kwargs
+    assert kwargs["aws_access_key_id"] == "fake" and kwargs["aws_secret_access_key"] == "fake"
+
+
 async def test_setup(mocker):
     mocker.patch("reporting.scheduled_query_modules.sqs._SQS_CREATE_SCHEDULED_QUERY_QUEUES", True)
     client_mock = mocker.MagicMock()

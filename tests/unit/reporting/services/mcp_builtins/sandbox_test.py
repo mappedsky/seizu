@@ -74,7 +74,7 @@ def _make_fake_agent_result(text: str) -> dict[str, Any]:
 
 
 def _open_backend_ctx(fake_backend: MagicMock) -> Any:
-    """Return a patched _open_backend that yields fake_backend."""
+    """Return a patched open_backend that yields fake_backend."""
 
     @asynccontextmanager
     async def _ctx(**_kwargs: Any):  # type: ignore[misc]
@@ -2947,3 +2947,57 @@ def test_subagent_prompt_forbids_reconstructing_a_file_to_count_lines() -> None:
 
     assert "Never reconstruct a file from memory to count its lines" in prompt
     assert "write the content to a file and let run_python find it" in prompt
+
+
+async def test_a_script_without_its_executable_bit_runs_through_its_shebang(mocker, tmp_path):
+    """An object-store workspace (bedrock, s3 storage) may not keep the mode a
+    materialized script was written with; the program still runs it."""
+    import subprocess
+    import sys
+
+    from reporting.schema.plugins import PluginFile, PluginSkillItem
+
+    skill = PluginSkillItem(
+        plugin_id="security",
+        skill_id="review",
+        portable_name="review",
+        title="Review",
+        description="Review things",
+        template="Review.",
+        source_path="skills/review",
+        revision=2,
+        package_digest="abc123" * 10,
+        has_scripts=True,
+    )
+    root = tmp_path / "skill"
+    (root / "scripts").mkdir(parents=True)
+    script = root / "scripts" / "check.sh"
+    script.write_text('#!/bin/sh\necho "ran with $1"\n')
+    script.chmod(0o644)
+
+    def _run_in_tmp(code: str) -> str:
+        # The program the sandbox would run, pointed at this directory.
+        program = code.replace("/home/user/seizu_plugins/security/2-abc123abc123/skills/review", str(root))
+        return subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, check=True).stdout
+
+    backend = MagicMock()
+    backend.run_python = AsyncMock(side_effect=_run_in_tmp)
+    mocker.patch.object(sandbox_module.report_store, "get_enabled_plugin_skill", new=AsyncMock(return_value=skill))
+    mocker.patch.object(
+        sandbox_module.report_store,
+        "read_plugin_file",
+        new=AsyncMock(return_value=PluginFile(path="skills/review/scripts/check.sh", content=b"#!/bin/sh\n")),
+    )
+    mocker.patch.object(sandbox_module, "_direct_backend", new=AsyncMock(return_value=(backend, "")))
+    mocker.patch.object(
+        sandbox_module,
+        "materialize_plugin_skill",
+        new=AsyncMock(return_value="/home/user/seizu_plugins/security/2-abc123abc123/skills/review"),
+    )
+
+    result = await sandbox_module._handle_run_script(
+        {"plugin_id": "security", "skill_id": "review", "script": "check.sh", "arguments": ["x"]}, None
+    )
+
+    assert result["returncode"] == 0, result
+    assert result["stdout"] == "ran with x\n"

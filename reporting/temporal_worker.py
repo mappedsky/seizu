@@ -16,7 +16,13 @@ from reporting import (
     settings,
     setup_logging,  # noqa:F401
 )
-from reporting.services import chat_schedules, session_reaper_schedule, telemetry, workflow_schedules
+from reporting.services import (
+    chat_schedules,
+    sandbox_bedrock_runtime,
+    session_reaper_schedule,
+    telemetry,
+    workflow_schedules,
+)
 from reporting.temporal_workflows.activities import (
     build_code_workflow_input,
     check_configured_workflow_watch,
@@ -139,11 +145,16 @@ async def _run_worker() -> None:
             # idempotent.
             await session_reaper_schedule.reconcile()
             reconcile_task = asyncio.create_task(_reconcile_loop())
+            # Takes minutes when it changes anything, so beside the worker rather
+            # than before it; a no-op unless the bedrock sandbox is in use, and
+            # only a check of the runtime when an operator manages it.
+            runtime_task = asyncio.create_task(sandbox_bedrock_runtime.reconcile_in_background())
             try:
                 await _shutdown_event.wait()
             finally:
                 reconcile_task.cancel()
-                await asyncio.gather(reconcile_task, return_exceptions=True)
+                runtime_task.cancel()
+                await asyncio.gather(reconcile_task, runtime_task, return_exceptions=True)
 
 
 async def _reconcile_loop() -> None:
