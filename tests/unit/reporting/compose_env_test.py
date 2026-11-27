@@ -78,3 +78,30 @@ def test_both_sandbox_creating_services_agree_on_the_deployment_id() -> None:
     the reaper does not recognize, and nothing is ever collected."""
     for service in ("seizu", "seizu-temporal-worker"):
         assert "SEIZU_DEPLOYMENT_ID" in _service_environment(service), service
+
+
+# Read wherever a sandbox is opened (web) and where the runtime is provisioned
+# and sessions are reaped (worker).
+_SANDBOX_PROVIDER_SETTINGS = (
+    "SANDBOX_PROVIDER",
+    "SANDBOX_BEDROCK_IMAGE",
+    "SANDBOX_BEDROCK_ROLE_ARN",
+    "SANDBOX_BEDROCK_SUBNETS",
+    "SANDBOX_BEDROCK_SECURITY_GROUPS",
+    "SANDBOX_BEDROCK_RUNTIME_NAME",
+    "SANDBOX_BEDROCK_REGION",
+    "SANDBOX_BEDROCK_QUALIFIER",
+    "SANDBOX_BEDROCK_MANAGE_RUNTIME",
+    "SANDBOX_BEDROCK_STORAGE",
+    "SANDBOX_BEDROCK_S3_BUCKET",
+    "SANDBOX_BEDROCK_S3_PREFIX",
+    "SANDBOX_BEDROCK_S3_BUCKET_OWNER",
+    "SANDBOX_BEDROCK_S3_BUCKET_REGION",
+    "SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS",
+)
+
+
+def test_web_and_worker_receive_the_sandbox_provider_settings() -> None:
+    for service in ("seizu", "seizu-temporal-worker"):
+        missing = set(_SANDBOX_PROVIDER_SETTINGS) - _service_environment(service)
+        assert not missing, f"{service} lacks {sorted(missing)}"

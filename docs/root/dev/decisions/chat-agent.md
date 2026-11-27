@@ -3257,3 +3257,51 @@ falls back to the combined tool results.
 **Don't:** run a post-action summary turn with no terminal tool while the
 system prompt demands one, or let any resume path persist an empty answer — the
 message is what carries the turn, and history drops it when it is blank.
+
+## AGT-058 — Console query generation is one model call, not a headless chat turn
+
+**Applies to:** `reporting/services/query_generation.py`, `POST /api/v1/query/generate`, `QueryConsole` Ask mode
+
+The query console turns a plain-text question into Cypher with a single
+structured call (`_invoke_structured_output`) to the active profile's
+assistant model, given the graph schema's names, followed by `validate_query`.
+A query with validator errors or schema warnings gets exactly one repair call
+carrying those diagnostics. No chat session, checkpoint, sandbox or tool is
+involved. A query that validates is saved to query history with the question
+in the new `prompt` column, and the console runs it **by history id**.
+
+**Why:** `run_headless_chat` would have given the model tools to explore the
+graph, but at the cost the user is not asking for here: a persisted
+`ChatSessionItem` that has to be hidden from every session listing, a
+checkpoint, router/planner overhead, tens of seconds of latency, and an answer
+in prose that the Cypher then has to be extracted from. The validator already
+does what exploration would mostly be for (it reports nonexistent labels,
+relationships and properties), so one repair against its output gets most of
+the benefit for one extra call. Saving the entry server-side, and running it
+by id, gives exactly one history row with the question attached and no
+duplicate prompt-less row from the follow-up execution, without threading a
+prompt through `useLazyCypherQuery` and `CypherGraph`.
+
+**Don't:** route this through `run_headless_chat` without first making
+headless sessions invisible everywhere sessions are listed and reaped, or
+record the prompt on whatever entry runs next. An edited query is the user's
+own and is saved without one.
+
+**Model choice (amended twice):** the call runs on the profile's own
+`query_console` settings (`QueryConsoleSettings`: enabled, model, offered
+reasoning levels and their default), resolved by
+`model_profiles.resolve_query_console` and listed for the picker by
+`GET /api/v1/query/generate/options`. A first cut made it a
+`query_generation` stage override picked from chat's own profile/level list;
+that offered chat's levels (`medium`/`high`, slow enough to hit the time
+limit) in a tool that wants one fast answer, and gave no way to keep a profile
+out of the console, so the console's choices became independent of chat's.
+Stored profiles carrying that override are read into `query_console`. The
+console hides its picker when it offers exactly one profile at one level.
+It is deliberately **not** in `RESOLVED_MODEL_STAGES`: that set is the persisted per-run snapshot,
+validated as exact by `ResolvedModelProfile.require_every_stage`, so adding a
+stage there would make every snapshot written before the upgrade fail to load,
+and would put a model chat never calls into chat's pricing check
+(`initial_budget_ledger` derives the token ceiling from whether *every* spec
+is priced). Without profiles, `QUERY_GENERATION_MODEL` and
+`QUERY_GENERATION_REASONING_EFFORT` are the stage's environment defaults.

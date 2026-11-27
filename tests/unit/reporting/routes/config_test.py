@@ -87,6 +87,16 @@ async def test_config_features_reflect_chat_enabled(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.get("/api/v1/config")
     assert ret.json()["features"]["chat"] is True
+    assert ret.json()["features"]["query_generation"] is True
+
+
+async def test_config_features_query_generation_needs_its_own_switch(mocker):
+    mocker.patch("reporting.settings.CHAT_ENABLED", True)
+    mocker.patch("reporting.settings.QUERY_GENERATION_ENABLED", False)
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/config")
+    assert ret.json()["features"]["query_generation"] is False
 
 
 async def test_config_auth_required_true(mocker):

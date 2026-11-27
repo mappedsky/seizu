@@ -1,0 +1,549 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "seizu-sandbox/1",
+    "description": "Request/response contract for a Seizu sandbox image. See docs/root/dev/sandbox-image-protocol.md.",
+    "x-seizu-protocol-version": 1,
+    "x-seizu-marker-file": ".seizu-sandbox",
+    "x-seizu-home": "/home/user",
+    "x-seizu-workspace-mount": "/mnt/workspace",
+    "x-seizu-ops": {
+        "hello": {
+            "args": {
+                "$ref": "#/$defs/HelloArgs"
+            },
+            "result": {
+                "$ref": "#/$defs/HelloResult"
+            }
+        },
+        "run_python": {
+            "args": {
+                "$ref": "#/$defs/RunPythonArgs"
+            },
+            "result": {
+                "$ref": "#/$defs/RunPythonResult"
+            }
+        },
+        "run_bash": {
+            "args": {
+                "$ref": "#/$defs/RunBashArgs"
+            },
+            "result": {
+                "$ref": "#/$defs/RunBashResult"
+            }
+        },
+        "read_file": {
+            "args": {
+                "$ref": "#/$defs/ReadFileArgs"
+            },
+            "result": {
+                "$ref": "#/$defs/ReadFileResult"
+            }
+        },
+        "write_file": {
+            "args": {
+                "$ref": "#/$defs/WriteFileArgs"
+            },
+            "result": {
+                "$ref": "#/$defs/WriteFileResult"
+            }
+        },
+        "list_files": {
+            "args": {
+                "$ref": "#/$defs/ListFilesArgs"
+            },
+            "result": {
+                "$ref": "#/$defs/ListFilesResult"
+            }
+        },
+        "wipe": {
+            "args": {
+                "$ref": "#/$defs/WipeArgs"
+            },
+            "result": {
+                "$ref": "#/$defs/WipeResult"
+            }
+        }
+    },
+    "oneOf": [
+        {
+            "$ref": "#/$defs/SandboxRequest"
+        },
+        {
+            "$ref": "#/$defs/SandboxResponse"
+        }
+    ],
+    "$defs": {
+        "SandboxMarker": {
+            "description": "Who created a sandbox and for what. Written once, at creation.\n\n``created_at`` is supplied by Seizu, never generated in the image: a\nsnapshotted container restores the same clock reading into every session.",
+            "properties": {
+                "deployment": {
+                    "description": "SEIZU_DEPLOYMENT_ID of the installation that created the sandbox.",
+                    "title": "Deployment",
+                    "type": "string"
+                },
+                "purpose": {
+                    "default": "",
+                    "description": "What the sandbox is for; diagnostics only.",
+                    "title": "Purpose",
+                    "type": "string"
+                },
+                "thread": {
+                    "default": "",
+                    "description": "Namespaced chat thread (user:<id>:thread:<id>), or empty.",
+                    "title": "Thread",
+                    "type": "string"
+                },
+                "created_at": {
+                    "description": "ISO 8601 UTC timestamp of creation.",
+                    "title": "Created At",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "deployment",
+                "created_at"
+            ],
+            "title": "SandboxMarker",
+            "type": "object"
+        },
+        "HelloArgs": {
+            "properties": {
+                "create_marker": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/SandboxMarker"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "description": "Write this marker if none exists yet. An existing marker is never overwritten."
+                }
+            },
+            "title": "HelloArgs",
+            "type": "object"
+        },
+        "HelloResult": {
+            "properties": {
+                "protocol_versions": {
+                    "description": "Every protocol version the image speaks.",
+                    "items": {
+                        "type": "integer"
+                    },
+                    "title": "Protocol Versions",
+                    "type": "array"
+                },
+                "capabilities": {
+                    "description": "Optional features; none are defined in v1.",
+                    "items": {
+                        "type": "string"
+                    },
+                    "title": "Capabilities",
+                    "type": "array"
+                },
+                "home": {
+                    "description": "The resolved $HOME. Must be inside the workspace mount.",
+                    "title": "Home",
+                    "type": "string"
+                },
+                "storage_semantics": {
+                    "default": "posix",
+                    "description": "'object' when the workspace is an object-store mount that cannot append, edit in place, rename or symlink; 'posix' otherwise.",
+                    "enum": [
+                        "posix",
+                        "object"
+                    ],
+                    "title": "Storage Semantics",
+                    "type": "string"
+                },
+                "marker": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/SandboxMarker"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "description": "The marker after this call, or null if none exists."
+                }
+            },
+            "required": [
+                "protocol_versions",
+                "home",
+                "marker"
+            ],
+            "title": "HelloResult",
+            "type": "object"
+        },
+        "RunPythonArgs": {
+            "properties": {
+                "code": {
+                    "title": "Code",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "code"
+            ],
+            "title": "RunPythonArgs",
+            "type": "object"
+        },
+        "PythonError": {
+            "properties": {
+                "name": {
+                    "title": "Name",
+                    "type": "string"
+                },
+                "value": {
+                    "default": "",
+                    "title": "Value",
+                    "type": "string"
+                },
+                "traceback": {
+                    "default": "",
+                    "title": "Traceback",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "name"
+            ],
+            "title": "PythonError",
+            "type": "object"
+        },
+        "RunPythonResult": {
+            "properties": {
+                "stdout": {
+                    "default": "",
+                    "title": "Stdout",
+                    "type": "string"
+                },
+                "stderr": {
+                    "default": "",
+                    "title": "Stderr",
+                    "type": "string"
+                },
+                "text": {
+                    "default": "",
+                    "description": "repr() of a trailing expression, as a notebook cell shows it.",
+                    "title": "Text",
+                    "type": "string"
+                },
+                "error": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/PythonError"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "restarted": {
+                    "default": false,
+                    "description": "True when the interpreter was restarted by this call (timeout), losing its state.",
+                    "title": "Restarted",
+                    "type": "boolean"
+                }
+            },
+            "title": "RunPythonResult",
+            "type": "object"
+        },
+        "RunBashArgs": {
+            "properties": {
+                "command": {
+                    "title": "Command",
+                    "type": "string"
+                },
+                "cwd": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "description": "Working directory; $HOME when omitted.",
+                    "title": "Cwd"
+                }
+            },
+            "required": [
+                "command"
+            ],
+            "title": "RunBashArgs",
+            "type": "object"
+        },
+        "RunBashResult": {
+            "properties": {
+                "stdout": {
+                    "default": "",
+                    "title": "Stdout",
+                    "type": "string"
+                },
+                "stderr": {
+                    "default": "",
+                    "title": "Stderr",
+                    "type": "string"
+                },
+                "exit_code": {
+                    "default": 0,
+                    "title": "Exit Code",
+                    "type": "integer"
+                },
+                "timed_out": {
+                    "default": false,
+                    "title": "Timed Out",
+                    "type": "boolean"
+                }
+            },
+            "title": "RunBashResult",
+            "type": "object"
+        },
+        "ReadFileArgs": {
+            "properties": {
+                "path": {
+                    "title": "Path",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "path"
+            ],
+            "title": "ReadFileArgs",
+            "type": "object"
+        },
+        "ReadFileResult": {
+            "properties": {
+                "content_b64": {
+                    "title": "Content B64",
+                    "type": "string"
+                },
+                "size": {
+                    "title": "Size",
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "content_b64",
+                "size"
+            ],
+            "title": "ReadFileResult",
+            "type": "object"
+        },
+        "WriteFileArgs": {
+            "properties": {
+                "path": {
+                    "title": "Path",
+                    "type": "string"
+                },
+                "content_b64": {
+                    "title": "Content B64",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "path",
+                "content_b64"
+            ],
+            "title": "WriteFileArgs",
+            "type": "object"
+        },
+        "WriteFileResult": {
+            "properties": {
+                "size": {
+                    "title": "Size",
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "size"
+            ],
+            "title": "WriteFileResult",
+            "type": "object"
+        },
+        "ListFilesArgs": {
+            "properties": {
+                "path": {
+                    "title": "Path",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "path"
+            ],
+            "title": "ListFilesArgs",
+            "type": "object"
+        },
+        "FileEntry": {
+            "properties": {
+                "name": {
+                    "title": "Name",
+                    "type": "string"
+                },
+                "type": {
+                    "enum": [
+                        "file",
+                        "dir"
+                    ],
+                    "title": "Type",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "name",
+                "type"
+            ],
+            "title": "FileEntry",
+            "type": "object"
+        },
+        "ListFilesResult": {
+            "properties": {
+                "entries": {
+                    "items": {
+                        "$ref": "#/$defs/FileEntry"
+                    },
+                    "title": "Entries",
+                    "type": "array"
+                }
+            },
+            "required": [
+                "entries"
+            ],
+            "title": "ListFilesResult",
+            "type": "object"
+        },
+        "WipeArgs": {
+            "properties": {},
+            "title": "WipeArgs",
+            "type": "object"
+        },
+        "WipeResult": {
+            "properties": {
+                "removed": {
+                    "default": 0,
+                    "description": "Top-level entries removed from the workspace.",
+                    "title": "Removed",
+                    "type": "integer"
+                }
+            },
+            "title": "WipeResult",
+            "type": "object"
+        },
+        "Op": {
+            "description": "Every operation an image must implement.",
+            "enum": [
+                "hello",
+                "run_python",
+                "run_bash",
+                "read_file",
+                "write_file",
+                "list_files",
+                "wipe"
+            ],
+            "title": "Op",
+            "type": "string"
+        },
+        "SandboxRequest": {
+            "properties": {
+                "protocol": {
+                    "const": "seizu-sandbox/1",
+                    "default": "seizu-sandbox/1",
+                    "title": "Protocol",
+                    "type": "string"
+                },
+                "op": {
+                    "$ref": "#/$defs/Op"
+                },
+                "args": {
+                    "additionalProperties": true,
+                    "title": "Args",
+                    "type": "object"
+                },
+                "timeout_seconds": {
+                    "description": "How long the operation may run inside the image.",
+                    "exclusiveMinimum": 0,
+                    "title": "Timeout Seconds",
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "op",
+                "timeout_seconds"
+            ],
+            "title": "SandboxRequest",
+            "type": "object"
+        },
+        "ErrorCode": {
+            "description": "Why an operation failed, as opposed to what the code it ran printed.\n\nA Python exception or a non-zero shell exit is a *successful* operation\nreporting an outcome; these codes are for the operation itself failing.",
+            "enum": [
+                "unsupported_protocol",
+                "unsupported_op",
+                "invalid_args",
+                "not_found",
+                "timeout",
+                "internal"
+            ],
+            "title": "ErrorCode",
+            "type": "string"
+        },
+        "SandboxError": {
+            "properties": {
+                "code": {
+                    "$ref": "#/$defs/ErrorCode"
+                },
+                "message": {
+                    "default": "",
+                    "title": "Message",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "code"
+            ],
+            "title": "SandboxError",
+            "type": "object"
+        },
+        "SandboxResponse": {
+            "properties": {
+                "ok": {
+                    "title": "Ok",
+                    "type": "boolean"
+                },
+                "result": {
+                    "anyOf": [
+                        {
+                            "additionalProperties": true,
+                            "type": "object"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "title": "Result"
+                },
+                "error": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/SandboxError"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                }
+            },
+            "required": [
+                "ok"
+            ],
+            "title": "SandboxResponse",
+            "type": "object"
+        }
+    }
+}

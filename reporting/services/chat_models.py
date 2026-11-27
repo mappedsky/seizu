@@ -258,6 +258,7 @@ def _role_reasoning_effort(stage: str) -> str:
         "verifier": settings.CHAT_LLM_VERIFIER_REASONING_EFFORT,
         "synthesizer": settings.CHAT_LLM_SYNTHESIZER_REASONING_EFFORT,
         "sandbox_subagent": settings.CHAT_LLM_SANDBOX_REASONING_EFFORT,
+        "query_generation": settings.QUERY_GENERATION_REASONING_EFFORT,
     }
     parent = _STAGE_PARENT.get(stage, "")
     return (
@@ -386,6 +387,7 @@ def model_id_for_role(role: str, *, economy: bool = False) -> str:
         "sandbox_subagent": settings.SANDBOX_LLM_MODEL,
         "verifier": settings.CHAT_LLM_VERIFIER_MODEL,
         "synthesizer": settings.CHAT_LLM_SYNTHESIZER_MODEL,
+        "query_generation": settings.QUERY_GENERATION_MODEL,
     }
     # A stage's own model wins; only then does it inherit its parent's. Checking
     # the parent first would make `SANDBOX_LLM_MODEL` unreachable, since the

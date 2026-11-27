@@ -476,6 +476,11 @@ def agent_config_error() -> str | None:
     """
     from reporting import settings
 
+    if settings.SANDBOX_PROVIDER != "e2b":
+        # Coding-agent runs need per-command environments, streaming output,
+        # templates and inbound ports between sandboxes -- E2B features the other
+        # providers do not have (SBX-021).
+        return f"the sandbox coding agent requires SANDBOX_PROVIDER=e2b (configured: {settings.SANDBOX_PROVIDER!r})"
     provider = resolve_provider()
     if provider is None:
         return f"unknown sandbox agent provider {settings.SANDBOX_AGENT_PROVIDER!r}"

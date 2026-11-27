@@ -41,6 +41,12 @@ const original: ModelProfileVersion = {
   user_reasoning_efforts: ['low', 'high'],
   default_reasoning_effort: 'high',
   run_cost_budget_usd: 2,
+  query_console: {
+    enabled: true,
+    model_id: null,
+    reasoning_efforts: ['low'],
+    default_reasoning_effort: 'low',
+  },
   created_at: '2026-08-25T00:00:00Z',
   created_by: 'user-1',
   comment: 'Initial revision',

@@ -173,6 +173,7 @@ seed_dashboard:
 .PHONY: schema
 schema: generate_openapi
 	docker compose run --rm seizu uv run --frozen --no-sync python -m reporting.schema.cli export > schema/reporting-schema.json
+	docker compose run --rm --no-deps seizu uv run --frozen --no-sync python -m reporting.schema.cli export-sandbox-protocol > schema/sandbox-protocol-v1.json
 
 # Export the OpenAPI spec from the FastAPI app (no backend connections required).
 .PHONY: generate_openapi

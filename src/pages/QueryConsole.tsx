@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import {
-  Box,
-  Card,
-  CardContent,
-  IconButton,
-  InputBase,
-  Tooltip,
-  Typography,
-} from '@mui/material';
+import { Box, Card, CardContent, Typography } from '@mui/material';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
-import PlayArrow from '@mui/icons-material/PlayArrow';
 import CypherGraph from 'src/components/reports/CypherGraph';
+import QueryComposer, {
+  type ComposerMode,
+  type QueryProvenance,
+} from 'src/components/QueryComposer';
 import QueryConsoleSchemaPanel from 'src/components/QueryConsoleSchemaPanel';
+import { useFeature } from 'src/features.context';
+import {
+  type GeneratedQuery,
+  useGenerateQuery,
+  useQueryConsoleModels,
+} from 'src/hooks/useGenerateQuery';
+import type { ReasoningEffort } from 'src/hooks/useModelProfilesApi';
 import { usePermissionState } from 'src/hooks/usePermissions';
 import {
   useFetchHistoryItem,
@@ -20,32 +22,74 @@ import {
 } from 'src/hooks/useQueryHistory';
 import { pageContentSx } from 'src/theme/layout';
 import { useSidePanel } from 'src/hooks/useSidePanel';
-import { fontFamilyMono } from 'src/theme/typography';
 
 /** Exactly one thing is running: a typed query, or a stored history entry. */
 type ConsoleRun =
   | { kind: 'query'; query: string; key: number }
   | { kind: 'history'; historyId: string; key: number };
 
-// The editor starts at one line and grows with the query up to this many
-// lines, then scrolls, so the graph keeps most of the page.
-const QUERY_MAX_ROWS = 12;
-
-// The modifier this platform's users reach for; either one runs the query.
-const RUN_SHORTCUT =
-  typeof navigator !== 'undefined' && /Mac|iP(hone|ad)/.test(navigator.platform)
-    ? '⌘+Enter'
-    : 'Ctrl+Enter';
-
 const QUERY_CONSOLE_SCHEMA_PANEL_STORAGE_KEY =
   'seizu:query-console:schema-panel-open';
+const QUERY_CONSOLE_MODE_STORAGE_KEY = 'seizu:query-console:composer-mode';
+const QUERY_CONSOLE_MODEL_STORAGE_KEY = 'seizu:query-console:model';
+
+interface StoredModelPick {
+  profileId: string;
+  reasoningEffort: ReasoningEffort;
+}
+
+function readStored<T>(
+  key: string,
+  parse: (raw: string) => T | null,
+): T | null {
+  if (typeof window === 'undefined') return null;
+  const raw = window.localStorage.getItem(key);
+  if (raw === null) return null;
+  try {
+    return parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** "Accurate · low", or the model id when the deployment has no profiles. */
+function answeredBy(result: GeneratedQuery): string | undefined {
+  const source = result.profile_name || result.model_id;
+  if (!source) return undefined;
+  return result.reasoning_effort
+    ? `${source} · ${result.reasoning_effort}`
+    : source;
+}
 
 export default function QueryConsole() {
   const { hasPermission, loading: permissionsLoading } = usePermissionState();
   const navigate = useNavigate();
   const location = useLocation();
   const fetchHistoryItem = useFetchHistoryItem();
+  const generateQuery = useGenerateQuery();
+  const generationEnabled = useFeature('query_generation');
   const [queryText, setQueryText] = useState('');
+  const [questionText, setQuestionText] = useState('');
+  const [modeChoice, setModeChoice] = useState<ComposerMode>(
+    () =>
+      readStored(QUERY_CONSOLE_MODE_STORAGE_KEY, (raw) =>
+        raw === 'ask' ? 'ask' : null,
+      ) ?? 'cypher',
+  );
+  const [modelChoice, setModelChoice] = useState<StoredModelPick | null>(() =>
+    readStored(QUERY_CONSOLE_MODEL_STORAGE_KEY, (raw) => {
+      const parsed = JSON.parse(raw) as Partial<StoredModelPick>;
+      return parsed.profileId && parsed.reasoningEffort
+        ? (parsed as StoredModelPick)
+        : null;
+    }),
+  );
+  const [generatingSince, setGeneratingSince] = useState<number | null>(null);
+  const [note, setNote] = useState<QueryProvenance | null>(null);
+  // Only the latest question's answer may land; an earlier one that returns
+  // late, or one that returns after the user ran something else, is dropped.
+  const generationSeqRef = useRef(0);
+  const generationAbortRef = useRef<AbortController | null>(null);
   // What this page is showing, and nothing else decides it. `location` is
   // deliberately absent from this: deriving the run from the address bar means
   // re-deriving it while our own navigate() is still settling, and a completed
@@ -105,7 +149,7 @@ export default function QueryConsole() {
     if (!historyId || ownHistoryIds.current.has(historyId)) return undefined;
     ownHistoryIds.current.add(historyId);
 
-    let cancelled = false;
+    const search = location.search;
     // The one place this page writes run state from an effect, because the
     // history stack is an external system rather than something this render
     // can derive -- the carve-out UI-003 names, recorded as UI-005.
@@ -116,12 +160,16 @@ export default function QueryConsole() {
       key: (previous?.key ?? 0) + 1,
     }));
     void fetchHistoryItem(historyId).then((item) => {
-      if (cancelled || !item) return;
+      // Stale only once the page has moved to another URL. Not a cleanup
+      // flag: StrictMode's re-run returns early above, so a flag set by the
+      // first run's cleanup would drop the only fetch there is.
+      if (handledSearch.current !== search || !item) return;
       setQueryText(item.query);
+      if (item.prompt) {
+        setNote({ historyId, prompt: item.prompt, severity: 'info' });
+      }
     });
-    return () => {
-      cancelled = true;
-    };
+    return undefined;
     // `fetchHistoryItem` resolves null until there is a token, so the editor
     // text needs no gate of its own here.
   }, [location.search, fetchHistoryItem]);
@@ -129,9 +177,32 @@ export default function QueryConsole() {
   const queryTextRef = useRef(queryText);
   queryTextRef.current = queryText;
 
+  /** Drop any generation in flight; its answer will be ignored if it lands. */
+  const stopGenerating = useCallback(() => {
+    generationSeqRef.current += 1;
+    generationAbortRef.current?.abort();
+    generationAbortRef.current = null;
+    setGeneratingSince(null);
+  }, []);
+
+  // Leaving the page drops a generation in flight, or its answer would land
+  // and navigate() the user back here.
+  useEffect(
+    () => () => {
+      generationSeqRef.current += 1;
+      generationAbortRef.current?.abort();
+      generationAbortRef.current = null;
+    },
+    [],
+  );
+
   const handleRun = useCallback(() => {
     const trimmed = queryTextRef.current.trim();
     if (!trimmed) return;
+    stopGenerating();
+    // The query being run is the user's own now, so the question it may have
+    // come from no longer describes it.
+    setNote(null);
     setRun((previous) => ({
       kind: 'query',
       query: trimmed,
@@ -139,19 +210,111 @@ export default function QueryConsole() {
     }));
   }, []);
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        handleRun();
-      }
-    },
-    [handleRun],
-  );
+  const questionTextRef = useRef(questionText);
+  questionTextRef.current = questionText;
+
+  const modelPickRef = useRef<StoredModelPick | null>(null);
+
+  /** Turn the question into a query, put it in the editor, and run it if it validated. */
+  const handleGenerate = useCallback(async () => {
+    const question = questionTextRef.current.trim();
+    if (!question) return;
+    stopGenerating();
+    const seq = generationSeqRef.current;
+    const controller = new AbortController();
+    generationAbortRef.current = controller;
+    setGeneratingSince(performance.now());
+    setNote(null);
+    const pick = modelPickRef.current;
+    const outcome = await generateQuery(question, {
+      currentQuery: queryTextRef.current,
+      modelProfileId: pick?.profileId,
+      reasoningEffort: pick?.reasoningEffort,
+      signal: controller.signal,
+    });
+    if (seq !== generationSeqRef.current) return;
+    generationAbortRef.current = null;
+    setGeneratingSince(null);
+
+    if (!outcome.ok) {
+      setNote({
+        historyId: null,
+        prompt: question,
+        problems: [outcome.error],
+        severity: 'error',
+      });
+      return;
+    }
+
+    const { result } = outcome;
+    const by = answeredBy(result);
+    if (!result.query) {
+      setNote({
+        historyId: null,
+        prompt: question,
+        answeredBy: by,
+        explanation: result.explanation,
+        problems: result.errors.length
+          ? result.errors
+          : ['No query was generated.'],
+        severity: 'error',
+      });
+      return;
+    }
+
+    setQueryText(result.query);
+    // The question now lives above the query it produced; the field is left
+    // empty for the next one.
+    setQuestionText('');
+    setModeChoice('cypher');
+    if (result.errors.length) {
+      // Shown for editing, not run: the validator would only refuse it again.
+      setNote({
+        historyId: null,
+        prompt: question,
+        answeredBy: by,
+        explanation: result.explanation,
+        problems: result.errors,
+        severity: 'warning',
+      });
+      return;
+    }
+
+    setNote({
+      historyId: result.history_id,
+      prompt: question,
+      answeredBy: by,
+      explanation: result.explanation,
+      problems: result.warnings.length ? result.warnings : undefined,
+      severity: 'info',
+    });
+    if (result.history_id) {
+      // Already recorded with its question, so it runs by id and adds no
+      // second, prompt-less history entry.
+      const historyId = result.history_id;
+      ownHistoryIds.current.add(historyId);
+      handledSearch.current = `?h=${historyId}`;
+      setHistoryRefreshTrigger((n) => n + 1);
+      setRun((previous) => ({
+        kind: 'history',
+        historyId,
+        key: (previous?.key ?? 0) + 1,
+      }));
+      navigate(`?h=${historyId}`);
+    } else {
+      setRun((previous) => ({
+        kind: 'query',
+        query: result.query,
+        key: (previous?.key ?? 0) + 1,
+      }));
+    }
+  }, [generateQuery, navigate, stopGenerating]);
 
   /** Insert a query from the schema browser and run it immediately. */
   const handleQuerySelect = useCallback(
     (query: string) => {
+      stopGenerating();
+      setNote(null);
       setQueryText(query);
       setRun((previous) => ({
         kind: 'query',
@@ -160,13 +323,24 @@ export default function QueryConsole() {
       }));
       dismissSchemaPanel();
     },
-    [dismissSchemaPanel],
+    [dismissSchemaPanel, stopGenerating],
   );
 
   /** Load a query from history into the editor and re-execute by history ID. */
   const handleHistorySelect = useCallback(
     (item: QueryHistoryItem) => {
+      stopGenerating();
       setQueryText(item.query);
+      setNote(
+        item.prompt
+          ? {
+              historyId: item.history_id,
+              prompt: item.prompt,
+              severity: 'info',
+            }
+          : null,
+      );
+      setModeChoice('cypher');
       ownHistoryIds.current.add(item.history_id);
       handledSearch.current = `?h=${item.history_id}`;
       setRun((previous) => ({
@@ -177,7 +351,41 @@ export default function QueryConsole() {
       navigate(`?h=${item.history_id}`);
       dismissSchemaPanel();
     },
-    [navigate, dismissSchemaPanel],
+    [navigate, dismissSchemaPanel, stopGenerating],
+  );
+
+  /** Start from scratch: empty editor and question, no result, no `?h=`. */
+  const handleNewQuery = useCallback(() => {
+    stopGenerating();
+    setQueryText('');
+    setQuestionText('');
+    setNote(null);
+    setRun(null);
+    // Nothing this page published is on screen any more, so Back to one of
+    // those entries is a request to restore it, not this page's own echo.
+    ownHistoryIds.current.clear();
+    if (location.search) {
+      // Claimed first, so the restore effect reads the bare URL as handled.
+      handledSearch.current = '';
+      navigate({ search: '' });
+    }
+  }, [location.search, navigate, stopGenerating]);
+
+  const handleModeChange = useCallback((next: ComposerMode) => {
+    setModeChoice(next);
+    window.localStorage.setItem(QUERY_CONSOLE_MODE_STORAGE_KEY, next);
+  }, []);
+
+  const handleModelChange = useCallback(
+    (profileId: string, reasoningEffort: ReasoningEffort) => {
+      const next = { profileId, reasoningEffort };
+      setModelChoice(next);
+      window.localStorage.setItem(
+        QUERY_CONSOLE_MODEL_STORAGE_KEY,
+        JSON.stringify(next),
+      );
+    },
+    [],
   );
 
   const handleSchemaPanelToggle = useCallback(
@@ -197,6 +405,49 @@ export default function QueryConsole() {
       String(schemaPanelOpen),
     );
   }, [schemaPanelOpen]);
+
+  const generationAllowed = generationEnabled && hasPermission('chat:use');
+  // Which profiles and levels the profiles enable for the console; with no
+  // profiles at all the deployment's own settings apply and there is nothing
+  // to pick.
+  const { options: consoleModels } = useQueryConsoleModels(generationAllowed);
+  const canGenerate = generationAllowed && consoleModels.available;
+  // A mode the user can no longer use falls back to Cypher rather than
+  // leaving them in a composer whose button cannot work.
+  const mode: ComposerMode = canGenerate ? modeChoice : 'cypher';
+  const visibleNote =
+    note &&
+    (note.historyId === null ||
+      (run?.kind === 'history' && run.historyId === note.historyId))
+      ? note
+      : null;
+
+  const modelProfiles = consoleModels.profiles;
+  const storedProfile = modelChoice
+    ? modelProfiles.find((item) => item.profile_id === modelChoice.profileId)
+    : undefined;
+  const pickedProfile =
+    storedProfile ??
+    modelProfiles.find(
+      (item) => item.profile_id === consoleModels.default_profile_id,
+    );
+  // A remembered level the profile no longer offers falls back to its default.
+  const pickedEffort: ReasoningEffort | '' = pickedProfile
+    ? storedProfile &&
+      modelChoice &&
+      storedProfile.reasoning_efforts.includes(modelChoice.reasoningEffort)
+      ? modelChoice.reasoningEffort
+      : pickedProfile.default_reasoning_effort
+    : '';
+  modelPickRef.current =
+    pickedProfile && pickedEffort
+      ? { profileId: pickedProfile.profile_id, reasoningEffort: pickedEffort }
+      : null;
+  // One profile at one level is not a choice: the picker stays out of the way.
+  const choiceCount = modelProfiles.reduce(
+    (count, item) => count + item.reasoning_efforts.length,
+    0,
+  );
 
   if (permissionsLoading) {
     return (
@@ -272,70 +523,43 @@ export default function QueryConsole() {
           )}
         </Box>
 
-        {/* Query editor: one surface holding the query and its run button. */}
-        <Box
-          data-testid="query-composer"
-          sx={{
-            alignItems: 'flex-end',
-            bgcolor: 'background.paper',
-            border: 1,
-            borderColor: 'divider',
-            borderRadius: 2,
-            display: 'flex',
-            flexShrink: 0,
-            gap: 1,
-            mt: 1.5,
-            pl: 1.5,
-            pr: 0.75,
-            py: 0.75,
-            transition: 'border-color 120ms ease',
-            '&:focus-within': { borderColor: 'primary.main' },
-          }}
-        >
-          <InputBase
-            multiline
-            fullWidth
-            minRows={1}
-            maxRows={QUERY_MAX_ROWS}
-            value={queryText}
-            onChange={(e) => setQueryText(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={`MATCH (n) RETURN n LIMIT 25 · ${RUN_SHORTCUT} to run`}
-            inputProps={{ 'aria-label': 'Cypher query', spellCheck: false }}
-            sx={{
-              alignSelf: 'center',
-              fontFamily: fontFamilyMono,
-              fontSize: 13,
-              // Show the characters as typed: `->` stays two glyphs, not an arrow.
-              fontVariantLigatures: 'none',
-              lineHeight: 1.6,
-              py: 0.5,
-            }}
-          />
-          <Tooltip title={`Run query (${RUN_SHORTCUT})`}>
-            <span style={{ flexShrink: 0 }}>
-              <IconButton
-                aria-label="Run query"
-                onClick={handleRun}
-                disabled={!queryText.trim()}
-                size="small"
-                sx={{
-                  bgcolor: 'primary.main',
-                  color: 'primary.contrastText',
-                  height: 32,
-                  width: 32,
-                  '&:hover': { bgcolor: 'primary.dark' },
-                  '&.Mui-disabled': {
-                    bgcolor: 'action.disabledBackground',
-                    color: 'action.disabled',
-                  },
-                }}
-              >
-                <PlayArrow fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
-        </Box>
+        <QueryComposer
+          canGenerate={canGenerate}
+          mode={mode}
+          onModeChange={handleModeChange}
+          queryText={queryText}
+          onQueryTextChange={setQueryText}
+          onRun={handleRun}
+          questionText={questionText}
+          onQuestionTextChange={setQuestionText}
+          onGenerate={() => void handleGenerate()}
+          onCancelGenerate={stopGenerating}
+          generatingSince={generatingSince}
+          provenance={visibleNote}
+          onDismissProvenance={() => setNote(null)}
+          onRefine={() => handleModeChange('ask')}
+          canStartNew={
+            run !== null ||
+            note !== null ||
+            queryText.trim() !== '' ||
+            questionText.trim() !== ''
+          }
+          onNewQuery={handleNewQuery}
+          modelPick={
+            choiceCount > 1
+              ? {
+                  profiles: modelProfiles.map((item) => ({
+                    ...item,
+                    is_default:
+                      item.profile_id === consoleModels.default_profile_id,
+                  })),
+                  profileId: pickedProfile?.profile_id ?? '',
+                  reasoningEffort: pickedEffort,
+                  onChange: handleModelChange,
+                }
+              : null
+          }
+        />
       </Box>
     </Box>
   );

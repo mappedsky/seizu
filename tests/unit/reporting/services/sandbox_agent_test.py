@@ -13,6 +13,7 @@ from reporting.services import sandbox_agent
 
 def _settings(**overrides: Any) -> ExitStack:
     values: dict[str, Any] = {
+        "SANDBOX_PROVIDER": "e2b",
         "SANDBOX_AGENT_PROVIDER": "claude",
         "SANDBOX_AGENT_API_KEY": "",
         "SANDBOX_AGENT_API_KEY_COMMAND": "",
@@ -46,6 +47,12 @@ def test_agent_config_error_needs_a_key() -> None:
     # The global provider key is an acceptable fallback.
     with _settings(ANTHROPIC_API_KEY="sk-global"):
         assert sandbox_agent.agent_config_error() is None
+
+
+def test_agent_config_error_requires_the_e2b_provider() -> None:
+    """Coding-agent runs need E2B-only features (SBX-021); say so before a run starts."""
+    with _settings(SANDBOX_PROVIDER="bedrock", SANDBOX_AGENT_API_KEY="sk-x"):
+        assert "SANDBOX_PROVIDER=e2b" in (sandbox_agent.agent_config_error() or "")
 
 
 def test_agent_config_error_proxy_constraints() -> None:

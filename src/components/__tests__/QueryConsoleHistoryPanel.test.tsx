@@ -95,6 +95,28 @@ describe('QueryConsoleHistoryPanel', () => {
     ).toBeInTheDocument();
   });
 
+  it('shows the question a generated query came from beside the query', () => {
+    mockHook({
+      data: {
+        items: [{ ...ITEMS[0], prompt: 'show me every node' }, ITEMS[1]],
+        total: 2,
+        page: 1,
+        per_page: 20,
+      },
+    });
+    render(
+      <Wrapper>
+        <QueryConsoleHistoryPanel onQuerySelect={jest.fn()} />
+      </Wrapper>,
+    );
+    expect(screen.getByText('show me every node')).toBeInTheDocument();
+    expect(screen.getByText('MATCH (n) RETURN n')).toBeInTheDocument();
+    // Only the generated entry is marked.
+    expect(screen.getAllByLabelText('Generated from a question')).toHaveLength(
+      1,
+    );
+  });
+
   it('calls onQuerySelect with the full history item when an item is clicked', () => {
     const onQuerySelect = jest.fn();
     mockHook({ data: { items: ITEMS, total: 2, page: 1, per_page: 20 } });

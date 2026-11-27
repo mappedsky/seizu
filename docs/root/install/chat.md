@@ -125,6 +125,13 @@ settings. A profile has one primary base model. Direct assistant calls use that
 base, and every other runtime stage inherits it unless that stage has an
 override. There is no separate assistant setting in a profile.
 
+A profile also sets the model the [query console](query-console.md#choosing-the-model)
+uses to turn a plain-language question into Cypher, in its own **Query console**
+section of the editor: whether the console offers the profile at all, the model
+(the profile's primary when empty), and the reasoning levels it offers, one of
+them the default. These settings are separate from chat's reasoning levels and
+stage routing.
+
 A profile's cost cap is bounded by `CHAT_RUN_COST_BUDGET_USD`: when both are
 positive, the lower value applies. Set the global value to the deployment-wide
 hard ceiling and use profiles for smaller per-choice limits. The Model Profiles

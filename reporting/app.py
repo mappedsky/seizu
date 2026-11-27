@@ -289,6 +289,7 @@ class _MCPMiddleware:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings.validate_persistence_settings()
+    settings.validate_sandbox_settings()
     await oauth_client.verify_issuer_consistency()
     await report_store.initialize()
     # Not inside the chat guard: the per-request HTTP spans need the tracer
@@ -377,6 +378,10 @@ def create_app() -> FastAPI:
     if settings.CHAT_ENABLED:
         app.include_router(chat_routes.router)
         app.include_router(chat_connections_routes.router)
+        if settings.QUERY_GENERATION_ENABLED:
+            from reporting.routes import query_generation as query_generation_routes
+
+            app.include_router(query_generation_routes.router)
         if settings.CHAT_SCHEDULES_ENABLED:
             from reporting.routes import chat_schedules as chat_schedules_routes
 
