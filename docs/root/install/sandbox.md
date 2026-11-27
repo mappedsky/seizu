@@ -235,22 +235,129 @@ storage if files must survive image upgrades.
    ```
 
    `PREFIX` is `SANDBOX_BEDROCK_S3_PREFIX` (default `seizu-sandbox/<SEIZU_DEPLOYMENT_ID>`).
-   Before relying on it, confirm from inside a sandbox that a sibling
-   conversation's prefix cannot be listed or read.
+   AgentCore sets `${aws:AgentCoreRuntimeSourceSid}` to the session's id, so a
+   sandbox's credentials reach its own prefix only: listing the bucket, `PREFIX/`
+   or another session's prefix is refused, and so is reading, writing or
+   deleting another session's objects. To check a deployment, list `PREFIX/`
+   from inside a sandbox (for example with boto3, which picks up the role's
+   credentials by itself); it should fail with `AccessDenied`.
 3. **Prepare the network.** Private subnets with no NAT gateway, a security group
    allowing HTTPS egress to VPC endpoints only, and endpoints for ECR (`ecr.api`,
    `ecr.dkr`), S3 (gateway endpoint, covering the image layers, the
    `acr-storage-*` session-storage buckets and, with `s3` storage, your bucket),
    and CloudWatch Logs.
 4. **Give Seizu AWS credentials** through the usual AWS mechanisms (an
-   instance or pod role, or environment variables):
-   - web and Temporal worker: `bedrock-agentcore:InvokeAgentRuntime`,
-     `bedrock-agentcore:StopRuntimeSession`, `bedrock-agentcore:ListAgentRuntimes`;
-   - Temporal worker, which creates and updates the runtime:
-     `bedrock-agentcore:CreateAgentRuntime`, `UpdateAgentRuntime`,
-     `GetAgentRuntime`, `TagResource`, and `iam:PassRole` on the execution role;
-   - with `s3` storage, both: `s3:ListBucket`, `s3:GetObject` and
-     `s3:DeleteObject` on the prefix, to delete and sweep sandboxes.
+   instance or pod role, or environment variables). Below, `RUNTIME` is the
+   runtime's name (`seizu_sandbox_<SEIZU_DEPLOYMENT_ID>` unless
+   `SANDBOX_BEDROCK_RUNTIME_NAME` is set); AgentCore appends a generated suffix
+   to it, hence the `-*`.
+
+   The web process and the Temporal worker both need:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": "bedrock-agentcore:ListAgentRuntimes",
+         "Resource": "*"
+       },
+       {
+         "Effect": "Allow",
+         "Action": ["bedrock-agentcore:InvokeAgentRuntime", "bedrock-agentcore:StopRuntimeSession"],
+         "Resource": [
+           "arn:aws:bedrock-agentcore:REGION:ACCOUNT:runtime/RUNTIME-*",
+           "arn:aws:bedrock-agentcore:REGION:ACCOUNT:runtime/RUNTIME-*/runtime-endpoint/*"
+         ]
+       }
+     ]
+   }
+   ```
+
+   With `s3` storage, both also need to list, read and delete under the prefix,
+   to delete and sweep sandboxes:
+
+   ```json
+   {
+     "Effect": "Allow",
+     "Action": "s3:ListBucket",
+     "Resource": "arn:aws:s3:::BUCKET",
+     "Condition": {"StringLike": {"s3:prefix": "PREFIX/*"}}
+   },
+   {
+     "Effect": "Allow",
+     "Action": ["s3:GetObject", "s3:DeleteObject"],
+     "Resource": "arn:aws:s3:::BUCKET/PREFIX/*"
+   }
+   ```
+
+   The Temporal worker creates and updates the runtime. Creating one also
+   creates its default endpoint, a workload identity and a service-linked role,
+   and AWS checks those before the runtime has an id, which is why some
+   resources below are wider than the runtime's own name:
+
+   ```json
+   {
+     "Effect": "Allow",
+     "Action": "bedrock-agentcore:CreateAgentRuntime",
+     "Resource": "*"
+   },
+   {
+     "Effect": "Allow",
+     "Action": ["bedrock-agentcore:CreateAgentRuntimeEndpoint", "bedrock-agentcore:TagResource"],
+     "Resource": "arn:aws:bedrock-agentcore:REGION:ACCOUNT:runtime/*"
+   },
+   {
+     "Effect": "Allow",
+     "Action": ["bedrock-agentcore:GetAgentRuntime", "bedrock-agentcore:UpdateAgentRuntime"],
+     "Resource": "arn:aws:bedrock-agentcore:REGION:ACCOUNT:runtime/RUNTIME-*"
+   },
+   {
+     "Effect": "Allow",
+     "Action": "bedrock-agentcore:CreateWorkloadIdentity",
+     "Resource": [
+       "arn:aws:bedrock-agentcore:REGION:ACCOUNT:workload-identity-directory/default",
+       "arn:aws:bedrock-agentcore:REGION:ACCOUNT:workload-identity-directory/default/workload-identity/RUNTIME-*"
+     ]
+   },
+   {
+     "Effect": "Allow",
+     "Action": "bedrock-agentcore:TagResource",
+     "Resource": [
+       "arn:aws:bedrock-agentcore:REGION:ACCOUNT:workload-identity-directory/default",
+       "arn:aws:bedrock-agentcore:REGION:ACCOUNT:workload-identity-directory/default/workload-identity/RUNTIME-*"
+     ],
+     "Condition": {"ForAllValues:StringEquals": {"aws:TagKeys": ["seizu:deployment"]}}
+   },
+   {
+     "Effect": "Allow",
+     "Action": "iam:PassRole",
+     "Resource": "EXECUTION_ROLE_ARN",
+     "Condition": {"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}}
+   },
+   {
+     "Effect": "Allow",
+     "Action": "iam:CreateServiceLinkedRole",
+     "Resource": "arn:aws:iam::ACCOUNT:role/aws-service-role/runtime-identity.bedrock-agentcore.amazonaws.com/AWSServiceRoleForBedrockAgentCoreRuntimeIdentity",
+     "Condition": {"StringEquals": {"iam:AWSServiceName": "runtime-identity.bedrock-agentcore.amazonaws.com"}}
+   }
+   ```
+
+   In VPC mode the worker also creates AgentCore's network service-linked role
+   the first time:
+
+   ```json
+   {
+     "Effect": "Allow",
+     "Action": "iam:CreateServiceLinkedRole",
+     "Resource": "arn:aws:iam::ACCOUNT:role/aws-service-role/network.bedrock-agentcore.amazonaws.com/AWSServiceRoleForBedrockAgentCoreNetwork",
+     "Condition": {"StringLike": {"iam:AWSServiceName": "network.bedrock-agentcore.amazonaws.com"}}
+   }
+   ```
+
+   The service-linked roles stay in the account after the runtime is deleted;
+   remove them in IAM once no AgentCore runtimes remain.
 5. **Configure Seizu:**
 
    ```
@@ -266,18 +373,117 @@ storage if files must survive image upgrades.
 
 On start-up the Temporal worker creates the runtime (named
 `seizu_sandbox_<SEIZU_DEPLOYMENT_ID>`), or updates it if a setting changed, and
-waits for it to become ready; this takes a few minutes the first time. Until
-then, sandbox requests fail with "sandbox runtime … does not exist yet" or "is
-CREATING". To manage the runtime yourself instead, set
-`SANDBOX_BEDROCK_MANAGE_RUNTIME=false` and create it under the name Seizu
-expects (or set `SANDBOX_BEDROCK_RUNTIME_NAME`), with the HTTP protocol, a
-session-storage or S3 mount at `/mnt/workspace`, and an idle timeout of at least
-`SANDBOX_SESSION_TIMEOUT_SECONDS`.
+waits for it to become ready, logging `Sandbox runtime ready` when it is. Both
+creating and updating take a few minutes. Until then, sandbox requests fail with
+"sandbox runtime … does not exist yet" or "is CREATING". To create the runtime
+yourself instead, see [Managing the runtime yourself](#managing-the-runtime-yourself).
+
+**To check it is in use**, ask the assistant to run `uname -m; readlink -f
+/home/user` in the sandbox. A Bedrock sandbox answers `aarch64` and
+`/mnt/workspace`.
 
 The local Docker Compose stack sets placeholder AWS credentials for its SQS
 emulator. To try this provider locally, override `AWS_ACCESS_KEY_ID`,
 `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` for the `seizu` and
-`seizu-temporal-worker` services.
+`seizu-temporal-worker` services in a Compose override file, and add
+`AWS_SESSION_TOKEN` there if the credentials are temporary. The containers read
+these when they are created: once temporary credentials expire, AWS calls fail
+with `ExpiredTokenException` until the two services are recreated with fresh
+ones.
+
+#### Managing the runtime yourself
+
+With `SANDBOX_BEDROCK_MANAGE_RUNTIME=false` you create the runtime with your own
+tooling (Terraform, the AWS CLI), and Seizu only uses it: it never creates,
+updates or deletes a runtime, so it needs none of the create and update
+permissions in step 4. You can also roll a new image out independently of
+Seizu ([below](#rolling-out-a-new-version)).
+
+The runtime needs:
+
+- the image from step 1 as its container, and the execution role from step 2;
+- the `HTTP` server protocol;
+- network mode `VPC` (step 3), or `PUBLIC` with `SANDBOX_ALLOW_INTERNET=true`;
+- a filesystem mount at `/mnt/workspace`: session storage for `session` storage,
+  or for `s3` an S3 bucket mount of `SANDBOX_BEDROCK_S3_BUCKET` with the prefix
+  `PREFIX/{runtimeSessionId}/`, written literally: AgentCore puts each
+  session's id in place of `{runtimeSessionId}`. `s3` storage also needs
+  platform version `V2`;
+- an idle session timeout of at least `SANDBOX_SESSION_TIMEOUT_SECONDS`;
+- `metadataConfiguration.requireMMDSV2` set to true (Seizu logs a warning if
+  it isn't).
+
+Seizu finds the runtime by `SANDBOX_BEDROCK_RUNTIME_ARN`, or by name if that is
+unset, and reads the version its endpoint (`SANDBOX_BEDROCK_QUALIFIER`) serves.
+It does so when the Temporal worker starts, and again every five minutes in
+each process. If that version mounts a different workspace from the one Seizu's
+storage settings describe, doesn't use HTTP, or has internet access while
+`SANDBOX_ALLOW_INTERNET` is false, sandboxes fail with "sandbox runtime …
+cannot serve sandboxes: …" and the reason, until the runtime is fixed. Without
+this check, deleting a conversation would leave its files in a prefix Seizu
+doesn't know about.
+
+Both Seizu processes then need the following, plus the S3 statements from step 4
+with `s3` storage. `RUNTIME_ID` is the runtime's id (its name plus AgentCore's
+suffix) and `QUALIFIER` the endpoint's name:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:GetAgentRuntime",
+        "bedrock-agentcore:GetAgentRuntimeEndpoint",
+        "bedrock-agentcore:InvokeAgentRuntime",
+        "bedrock-agentcore:StopRuntimeSession"
+      ],
+      "Resource": [
+        "arn:aws:bedrock-agentcore:REGION:ACCOUNT:runtime/RUNTIME_ID",
+        "arn:aws:bedrock-agentcore:REGION:ACCOUNT:runtime/RUNTIME_ID/runtime-endpoint/QUALIFIER"
+      ]
+    }
+  ]
+}
+```
+
+Without `SANDBOX_BEDROCK_RUNTIME_ARN`, they also need
+`bedrock-agentcore:ListAgentRuntimes` on `*` to find the runtime by name.
+
+**With Terraform**, the `hashicorp/aws` provider manages the runtime
+(`aws_bedrockagentcore_agent_runtime`) and its endpoints
+(`aws_bedrockagentcore_agent_runtime_endpoint`). As of `hashicorp/aws` 6.74.0
+and `hashicorp/awscc` 1.111.0, neither provider can set an S3 bucket mount or
+`requireMMDSV2`. So with Terraform, use `session` storage, and expect the MMDSv2
+warning. For `s3` storage, create the runtime another way (the AWS CLI or an
+SDK), or let Seizu manage it.
+
+##### Rolling out a new version
+
+Every update to a runtime creates a new version, and the old versions don't
+change. The `DEFAULT` endpoint always serves the latest version. An endpoint you
+create serves the version you set, so it can hold production on a version while
+you test the next one:
+
+1. Create an endpoint (say `live`) at the current version, and set
+   `SANDBOX_BEDROCK_QUALIFIER=live`.
+2. Update the runtime with the new image. That creates the next version, which
+   `DEFAULT` serves and `live` doesn't.
+3. Test it from a second Seizu deployment with `SANDBOX_BEDROCK_QUALIFIER=DEFAULT`
+   (or another endpoint at the new version), its own `SEIZU_DEPLOYMENT_ID`, and,
+   with `s3` storage, the same `SANDBOX_BEDROCK_S3_PREFIX` as production. Each
+   deployment deletes and sweeps only the sandboxes it created.
+4. Move `live` to the new version. Seizu doesn't need a restart: each session
+   runs the version its endpoint serves the next time it's invoked, and Seizu
+   checks the new version within five minutes. A version that fails the check is
+   still reached in the meantime, so check it in step 3 before moving `live`.
+
+With `s3` storage, files carry over from one version to the next, since every
+version must mount the same bucket and prefix. With `session` storage, AWS
+empties session storage when the runtime is updated; whether conversations
+served through an endpoint still at the old version keep their files until that
+endpoint moves hasn't been tested.
 
 ## Configuration
 
@@ -308,8 +514,9 @@ Amazon Bedrock AgentCore Runtime settings (`SANDBOX_PROVIDER=bedrock`):
 | `SANDBOX_BEDROCK_SECURITY_GROUPS` | `""` | Comma-separated security group ids. |
 | `SANDBOX_BEDROCK_REGION` | `""` | AWS region. Empty uses the default AWS configuration. |
 | `SANDBOX_BEDROCK_RUNTIME_NAME` | `""` | Runtime name. Empty means `seizu_sandbox_<SEIZU_DEPLOYMENT_ID>`. |
-| `SANDBOX_BEDROCK_QUALIFIER` | `DEFAULT` | Runtime endpoint to invoke. |
-| `SANDBOX_BEDROCK_MANAGE_RUNTIME` | `true` | Create and update the runtime from these settings. `false` only looks it up. |
+| `SANDBOX_BEDROCK_RUNTIME_ARN` | `""` | ARN of a runtime you manage. Seizu reads it directly instead of finding it by name, and needs no `ListAgentRuntimes`. Requires `SANDBOX_BEDROCK_MANAGE_RUNTIME=false`. |
+| `SANDBOX_BEDROCK_QUALIFIER` | `DEFAULT` | Runtime endpoint to invoke. `DEFAULT` serves the latest version; an endpoint you create serves the version you set. |
+| `SANDBOX_BEDROCK_MANAGE_RUNTIME` | `true` | Create and update the runtime from these settings. `false` only reads and checks it; see [Managing the runtime yourself](#managing-the-runtime-yourself). |
 | `SANDBOX_BEDROCK_STORAGE` | `session` | `session` or `s3`; see [Sandbox storage](#sandbox-storage). |
 | `SANDBOX_BEDROCK_S3_BUCKET` | `""` | Bucket for `s3` storage. |
 | `SANDBOX_BEDROCK_S3_PREFIX` | `""` | Key prefix for `s3` storage. Empty means `seizu-sandbox/<SEIZU_DEPLOYMENT_ID>`. |

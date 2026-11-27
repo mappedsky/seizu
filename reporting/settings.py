@@ -1,4 +1,5 @@
 import os
+import re
 from enum import StrEnum
 from importlib import resources
 
@@ -1406,15 +1407,25 @@ SANDBOX_BEDROCK_SECURITY_GROUPS = [v.strip() for v in list_env("SANDBOX_BEDROCK_
 # Name of the AgentCore runtime. Empty derives "seizu_sandbox_<deployment id>".
 # Letters, digits and underscores only, starting with a letter, at most 48.
 SANDBOX_BEDROCK_RUNTIME_NAME = str_env("SANDBOX_BEDROCK_RUNTIME_NAME", "")
+# ARN of a runtime an operator manages (SANDBOX_BEDROCK_MANAGE_RUNTIME=false).
+# Set, Seizu reads that runtime directly instead of finding it by name, so it
+# needs no bedrock-agentcore:ListAgentRuntimes, which cannot be scoped to one
+# runtime. Its region must be SANDBOX_BEDROCK_REGION's, when that is set.
+# Example: "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/seizu_sandbox_prod-a1B2c3D4e5"
+SANDBOX_BEDROCK_RUNTIME_ARN = str_env("SANDBOX_BEDROCK_RUNTIME_ARN", "").strip()
 # AWS region of the runtime. Empty uses the default AWS region configuration.
 SANDBOX_BEDROCK_REGION = str_env("SANDBOX_BEDROCK_REGION", "")
-# Runtime endpoint invoked. DEFAULT follows the runtime's latest version.
+# Runtime endpoint invoked. DEFAULT follows the runtime's latest version; an
+# endpoint an operator creates serves the version it is pinned to, so moving it
+# rolls a new image out without restarting Seizu.
 SANDBOX_BEDROCK_QUALIFIER = str_env("SANDBOX_BEDROCK_QUALIFIER", "DEFAULT")
 # Whether Seizu creates and updates the runtime from these settings. The
 # Temporal worker does it at startup; web processes only look the runtime up.
-# false: an operator manages the runtime (it must still be named
-# SANDBOX_BEDROCK_RUNTIME_NAME and implement the protocol), and Seizu never
-# calls the control plane except to read it.
+# false: an operator manages the runtime (found by SANDBOX_BEDROCK_RUNTIME_ARN,
+# else by SANDBOX_BEDROCK_RUNTIME_NAME), and Seizu only reads it: it checks
+# that the version SANDBOX_BEDROCK_QUALIFIER serves mounts the workspace these
+# storage settings describe, and refuses sandboxes until it does. Seizu then
+# needs no permission to create, update or delete runtimes.
 SANDBOX_BEDROCK_MANAGE_RUNTIME = bool_env("SANDBOX_BEDROCK_MANAGE_RUNTIME", True)
 # Where sandbox files persist between turns:
 # - "session": AgentCore managed session storage. 1 GB per conversation, erased
@@ -1440,6 +1451,9 @@ SANDBOX_BEDROCK_MAX_LIFETIME_SECONDS = int_env("SANDBOX_BEDROCK_MAX_LIFETIME_SEC
 
 _SANDBOX_PROVIDERS = frozenset({"e2b", "bedrock"})
 _SANDBOX_BEDROCK_STORAGE_MODES = frozenset({"session", "s3"})
+_SANDBOX_BEDROCK_RUNTIME_ARN_RE = re.compile(
+    r"^arn:aws(-[^:]+)?:bedrock-agentcore:(?P<region>[a-z0-9-]+):\d{12}:runtime/(?P<id>[A-Za-z][A-Za-z0-9_]{0,47}-[A-Za-z0-9]{10})$"
+)
 
 
 def sandbox_configuration_errors() -> list[str]:
@@ -1459,6 +1473,23 @@ def sandbox_configuration_errors() -> list[str]:
         errors.append(f"SANDBOX_BEDROCK_STORAGE must be one of: {', '.join(sorted(_SANDBOX_BEDROCK_STORAGE_MODES))}")
     if SANDBOX_BEDROCK_STORAGE == "s3" and not SANDBOX_BEDROCK_S3_BUCKET:
         errors.append("SANDBOX_BEDROCK_STORAGE=s3 requires SANDBOX_BEDROCK_S3_BUCKET")
+    if SANDBOX_BEDROCK_RUNTIME_ARN:
+        match = _SANDBOX_BEDROCK_RUNTIME_ARN_RE.match(SANDBOX_BEDROCK_RUNTIME_ARN)
+        if SANDBOX_BEDROCK_MANAGE_RUNTIME:
+            errors.append(
+                "SANDBOX_BEDROCK_RUNTIME_ARN names an operator-managed runtime; it requires "
+                "SANDBOX_BEDROCK_MANAGE_RUNTIME=false"
+            )
+        if match is None:
+            errors.append(
+                "SANDBOX_BEDROCK_RUNTIME_ARN must be an AgentCore runtime ARN "
+                "(arn:aws:bedrock-agentcore:<region>:<account>:runtime/<id>)"
+            )
+        elif SANDBOX_BEDROCK_REGION and match["region"] != SANDBOX_BEDROCK_REGION:
+            errors.append(
+                f"SANDBOX_BEDROCK_RUNTIME_ARN is in {match['region']}, but SANDBOX_BEDROCK_REGION is "
+                f"{SANDBOX_BEDROCK_REGION}"
+            )
     if SANDBOX_BEDROCK_MANAGE_RUNTIME:
         if not SANDBOX_BEDROCK_IMAGE:
             errors.append("SANDBOX_PROVIDER=bedrock requires SANDBOX_BEDROCK_IMAGE")

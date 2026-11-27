@@ -19,7 +19,8 @@ for every provider (SBX-006, SBX-007, SBX-015, SBX-021):
   for ``s3``), then stop the session.
 
 The runtime itself is provisioned by
-:mod:`reporting.services.sandbox_bedrock_runtime`; this module only finds it.
+:mod:`reporting.services.sandbox_bedrock_runtime`, or by an operator; this
+module only finds it (and, for an operator's runtime, has it checked).
 """
 
 import asyncio
@@ -189,6 +190,12 @@ def _error_code(exc: BaseException) -> str:
 # ---------------------------------------------------------------------------
 
 _runtime_arn: str | None = None
+_runtime_version = ""
+_runtime_checked_at = 0.0
+
+#: How long an operator-managed runtime's check is trusted. Its endpoint can be
+#: moved to another version at any time, so the check is repeated.
+_OPERATOR_RECHECK_SECONDS = 300.0
 
 
 def find_runtime() -> dict[str, Any] | None:
@@ -209,8 +216,15 @@ async def resolve_runtime_arn() -> str:
     (:func:`sandbox_bedrock_runtime.reconcile_runtime`). Until the runtime is
     READY every open fails with :class:`SandboxRuntimeUnavailable`, which callers
     already treat as "no sandbox". Only a READY answer is cached.
+
+    With ``SANDBOX_BEDROCK_MANAGE_RUNTIME=false`` the runtime is checked rather
+    than merely found (:func:`_resolve_operator_runtime_arn`).
     """
+    from reporting import settings
+
     global _runtime_arn
+    if not settings.SANDBOX_BEDROCK_MANAGE_RUNTIME:
+        return await _resolve_operator_runtime_arn()
     if _runtime_arn:
         return _runtime_arn
     runtime = await asyncio.to_thread(find_runtime)
@@ -226,9 +240,40 @@ async def resolve_runtime_arn() -> str:
     return _runtime_arn
 
 
+async def _resolve_operator_runtime_arn() -> str:
+    """The ARN of an operator-managed runtime whose live version passed its check.
+
+    The answer is re-checked every :data:`_OPERATOR_RECHECK_SECONDS`. A check
+    that finds the version unusable drops the cached answer, so sandboxes stop
+    until it is fixed; a check that cannot reach AWS keeps the last good answer.
+    """
+    from reporting.services import sandbox_bedrock_runtime
+
+    global _runtime_arn, _runtime_version, _runtime_checked_at
+    if _runtime_arn and time.monotonic() - _runtime_checked_at < _OPERATOR_RECHECK_SECONDS:
+        return _runtime_arn
+    try:
+        arn, version, warnings = await sandbox_bedrock_runtime.check_operator_runtime()
+    except SandboxRuntimeUnavailable:
+        _runtime_arn, _runtime_version = None, ""
+        raise
+    except Exception:
+        if _runtime_arn is None:
+            raise
+        logger.warning("could not re-check the sandbox runtime; keeping version %s", _runtime_version, exc_info=True)
+        _runtime_checked_at = time.monotonic()
+        return _runtime_arn
+    if version != _runtime_version:
+        logger.info("Sandbox runtime ready", extra={"runtime": arn, "runtime_version": version})
+        for warning in warnings:
+            logger.warning("sandbox runtime %s version %s: %s", arn, version, warning)
+    _runtime_arn, _runtime_version, _runtime_checked_at = arn, version, time.monotonic()
+    return _runtime_arn
+
+
 def _reset_runtime_cache() -> None:
-    global _runtime_arn
-    _runtime_arn = None
+    global _runtime_arn, _runtime_version, _runtime_checked_at
+    _runtime_arn, _runtime_version, _runtime_checked_at = None, "", 0.0
     _clients.clear()
 
 

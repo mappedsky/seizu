@@ -877,8 +877,14 @@ rename or symlink), which the sub-agent and direct tools are told about, and a
 plugin script whose executable bit did not survive runs through its shebang. In
 `s3` mode the sandbox's own role reaches the bucket, and its credentials are
 readable inside the VM, so the role must be scoped to the session's prefix with
-`aws:AgentCoreRuntimeSourceSid`. **That scoping is documented, not yet verified
-against a live runtime;** until it is, treat `s3` mode as single-tenant.
+`aws:AgentCoreRuntimeSourceSid`. Verified against a live runtime (2026-11-27,
+us-west-2, PUBLIC mode, the policy in the install guide): with two conversations'
+sandboxes running, code in one, using the role's credentials from the metadata
+service, could list and read its own prefix, but was refused listing the bucket,
+listing the deployment prefix and listing the other session's prefix, and was
+refused get, head, put and delete on the other session's objects, which were
+unchanged afterwards. So the variable resolves to the session id inside the VM,
+and `s3` mode is multi-tenant with that policy.
 
 **The role is the boundary SBX-009 relied on "holding no credentials" for.**
 AgentCore serves the execution role through the VM's metadata service to any
@@ -896,6 +902,25 @@ replaces; identical concurrent requests are applied once. Nothing is updated
 unless a managed field differs, because with session storage an update empties
 every sandbox. Web processes only look the runtime up, and cache it only once
 READY.
+
+**An operator's runtime is checked, not trusted.** `SANDBOX_BEDROCK_MANAGE_RUNTIME=false`
+exists so Seizu can run without permission to create runtimes or pass roles, and
+so a version can be tested on its own endpoint and then promoted by moving the
+endpoint, separately from Seizu (AgentCore versions are immutable, and `DEFAULT`
+alone follows the latest). Seizu then stops writing the configuration it
+depends on, but still depends on it: kill and the orphan sweep delete and list
+`<prefix>/<session>/`, so a version mounting any other prefix would make deletes
+look successful while leaving every file behind. Seizu therefore reads the
+version its endpoint serves (`check_operator_runtime`) and refuses sandboxes
+unless it mounts that workspace, speaks HTTP, and has no internet access nobody
+accepted, the same fail-closed network rule as a runtime Seizu manages. The
+check is repeated every five minutes, because an endpoint can be moved at any
+time. A failed AWS call keeps the last good answer: a transient error is not
+evidence that the version changed, and refusing on it would make throttling an
+outage. Only an MMDSv2 setting that is off is a warning rather than a refusal:
+as of `hashicorp/aws` 6.74.0 and `hashicorp/awscc` 1.111.0 neither Terraform
+provider can set it, nor an S3 bucket mount, so an operator using Terraform
+cannot satisfy it and gets `session` storage only.
 
 **Remediation stays on E2B.** It needs templates, per-command environments,
 streaming and one sandbox reaching another's port; `agent_config_error` refuses

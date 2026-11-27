@@ -14,7 +14,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in AgentCore session storage (`SANDBOX_BEDROCK_STORAGE=session`) or in an S3
   bucket you own (`s3`), which also survives image upgrades and is swept for
   abandoned sandboxes. The Temporal worker creates and updates the runtime from
-  the new `SANDBOX_BEDROCK_*` settings. CVE remediation still requires E2B. See
+  the new `SANDBOX_BEDROCK_*` settings, or, with
+  `SANDBOX_BEDROCK_MANAGE_RUNTIME=false`, uses a runtime you manage (for example
+  with Terraform), found by `SANDBOX_BEDROCK_RUNTIME_ARN` or name and invoked
+  through `SANDBOX_BEDROCK_QUALIFIER`, so a new version can be tested on its own
+  endpoint before production moves to it. Seizu checks that the version it is
+  served mounts the workspace it expects. CVE remediation still requires E2B. See
   `docs/root/install/sandbox.md#amazon-bedrock-agentcore-runtime`.
 - **Sandbox image protocol `seizu-sandbox/1`**, the contract a Bedrock sandbox
   image implements: a spec (`docs/root/dev/sandbox-image-protocol.md`), a JSON

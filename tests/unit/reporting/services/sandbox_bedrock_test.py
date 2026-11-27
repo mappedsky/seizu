@@ -30,6 +30,8 @@ def _settings(**overrides: Any) -> Any:
         "SANDBOX_BEDROCK_S3_BUCKET": "",
         "SANDBOX_BEDROCK_S3_PREFIX": "",
         "SEIZU_DEPLOYMENT_ID": "prod",
+        "SANDBOX_BEDROCK_MANAGE_RUNTIME": True,
+        "SANDBOX_BEDROCK_RUNTIME_ARN": "",
     }
     values.update(overrides)
     return patch.multiple("reporting.settings", **values)

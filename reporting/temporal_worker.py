@@ -146,7 +146,8 @@ async def _run_worker() -> None:
             await session_reaper_schedule.reconcile()
             reconcile_task = asyncio.create_task(_reconcile_loop())
             # Takes minutes when it changes anything, so beside the worker rather
-            # than before it; a no-op unless the bedrock sandbox is managed here.
+            # than before it; a no-op unless the bedrock sandbox is in use, and
+            # only a check of the runtime when an operator manages it.
             runtime_task = asyncio.create_task(sandbox_bedrock_runtime.reconcile_in_background())
             try:
                 await _shutdown_event.wait()

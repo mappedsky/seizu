@@ -7,6 +7,10 @@ deployed differs from what is configured. It runs in the Temporal worker at
 startup; web processes never write, they only look the runtime up
 (:func:`sandbox_bedrock.resolve_runtime_arn`).
 
+With ``SANDBOX_BEDROCK_MANAGE_RUNTIME=false`` an operator owns the runtime and
+Seizu only reads it: :func:`check_operator_runtime` verifies that the version
+the configured endpoint serves mounts the workspace Seizu deletes and reaps.
+
 Every Create/Update carries a ``clientToken`` derived from the configuration it
 applies and the version it replaces, so worker replicas starting together send
 identical requests that AgentCore applies once (SBX-021).
@@ -158,14 +162,17 @@ async def reconcile_runtime() -> dict[str, Any] | None:
     """Create or update the sandbox runtime to match settings; return it when READY.
 
     Does nothing (returns ``None``) unless the sandbox is enabled on the bedrock
-    provider with ``SANDBOX_BEDROCK_MANAGE_RUNTIME``.
+    provider. With ``SANDBOX_BEDROCK_MANAGE_RUNTIME=false`` it changes nothing
+    either: it checks the operator's runtime, so a problem is reported at
+    startup rather than at the first sandbox, and returns ``None``.
     """
     from reporting import settings
     from reporting.services.sandbox_backend import deployment_id
 
-    if not (
-        settings.SANDBOX_ENABLED and settings.SANDBOX_PROVIDER == "bedrock" and settings.SANDBOX_BEDROCK_MANAGE_RUNTIME
-    ):
+    if not (settings.SANDBOX_ENABLED and settings.SANDBOX_PROVIDER == "bedrock"):
+        return None
+    if not settings.SANDBOX_BEDROCK_MANAGE_RUNTIME:
+        await sandbox_bedrock.resolve_runtime_arn()
         return None
     name = sandbox_bedrock.runtime_name()
     desired = desired_configuration()
@@ -217,3 +224,110 @@ async def reconcile_in_background() -> None:
         raise
     except Exception:
         logger.exception("Sandbox runtime reconciliation failed; Bedrock sandboxes are unavailable until it succeeds")
+
+
+# ---------------------------------------------------------------------------
+# A runtime an operator manages (SANDBOX_BEDROCK_MANAGE_RUNTIME=false)
+# ---------------------------------------------------------------------------
+
+
+def _describe_mount(mount: dict[str, Any]) -> str:
+    if "s3BucketMount" in mount:
+        s3 = mount["s3BucketMount"] or {}
+        return f"s3://{s3.get('bucket', '')}/{s3.get('prefix', '')} at {s3.get('mountPath', '')}"
+    if "sessionStorage" in mount:
+        return f"session storage at {(mount['sessionStorage'] or {}).get('mountPath', '')}"
+    return ", ".join(sorted(mount)) or "nothing"
+
+
+def operator_runtime_findings(runtime: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """``(problems, warnings)`` for serving sandboxes from this runtime version.
+
+    A problem makes the version unusable as configured: the workspace it mounts
+    is not the one Seizu deletes and reaps, it does not speak HTTP, or it has
+    internet access nobody accepted. A warning is worth an operator's attention
+    but does not stop sandboxes.
+    """
+    from reporting import settings
+
+    problems: list[str] = []
+    protocol = (runtime.get("protocolConfiguration") or {}).get("serverProtocol", "")
+    if protocol != "HTTP":
+        problems.append(f"its server protocol is {protocol or 'unset'}, not HTTP")
+    wanted = _filesystem_configuration()
+    mounts = [dict(m) for m in runtime.get("filesystemConfigurations") or []]
+    if not any(_matches(wanted, mount) for mount in mounts):
+        found = "; ".join(_describe_mount(m) for m in mounts) or "nothing"
+        problems.append(
+            f"it must mount {_describe_mount(wanted)} (SANDBOX_BEDROCK_STORAGE={sandbox_bedrock.storage_mode()}), "
+            f"but mounts {found}"
+        )
+    network = (runtime.get("networkConfiguration") or {}).get("networkMode", "")
+    if network != "VPC" and not settings.SANDBOX_ALLOW_INTERNET:
+        problems.append(
+            f"it runs in {network or 'an unknown'} network mode, with internet access, and SANDBOX_ALLOW_INTERNET "
+            "is false"
+        )
+    warnings: list[str] = []
+    if not (runtime.get("metadataConfiguration") or {}).get("requireMMDSV2"):
+        warnings.append("it does not require MMDSv2 (metadataConfiguration.requireMMDSV2)")
+    return problems, warnings
+
+
+def _runtime_id(arn: str) -> str:
+    return arn.rsplit("/", 1)[-1]
+
+
+async def check_operator_runtime() -> tuple[str, str, list[str]]:
+    """``(runtime ARN, version, warnings)`` for the version Seizu's endpoint serves.
+
+    Reads, never writes: the runtime is found by ``SANDBOX_BEDROCK_RUNTIME_ARN``
+    (else by name), the endpoint ``SANDBOX_BEDROCK_QUALIFIER`` names gives the
+    live version, and that version must pass :func:`operator_runtime_findings`.
+    Anything that makes it unusable raises
+    :class:`sandbox_bedrock.SandboxRuntimeUnavailable`; a failed AWS call
+    propagates.
+    """
+    from reporting import settings
+
+    unavailable = sandbox_bedrock.SandboxRuntimeUnavailable
+    client = sandbox_bedrock.control_client()
+    qualifier = settings.SANDBOX_BEDROCK_QUALIFIER
+    if settings.SANDBOX_BEDROCK_RUNTIME_ARN:
+        label = settings.SANDBOX_BEDROCK_RUNTIME_ARN
+        runtime_id = _runtime_id(label)
+    else:
+        label = sandbox_bedrock.runtime_name()
+        summary = await asyncio.to_thread(sandbox_bedrock.find_runtime)
+        if summary is None:
+            raise unavailable(
+                f"sandbox runtime {label!r} does not exist; with SANDBOX_BEDROCK_MANAGE_RUNTIME=false it is created "
+                "outside Seizu"
+            )
+        runtime_id = str(summary["agentRuntimeId"])
+    try:
+        endpoint = await asyncio.to_thread(
+            client.get_agent_runtime_endpoint, agentRuntimeId=runtime_id, endpointName=qualifier
+        )
+    except Exception as exc:
+        if sandbox_bedrock._error_code(exc) == "ResourceNotFoundException":
+            raise unavailable(f"sandbox runtime {label!r} or its endpoint {qualifier!r} does not exist") from exc
+        raise
+    status = endpoint.get("status", "")
+    version = str(endpoint.get("liveVersion") or "")
+    # An endpoint being moved keeps serving its live version until the move
+    # completes.
+    if status not in {"READY", "UPDATING"} or not version:
+        raise unavailable(f"endpoint {qualifier!r} of sandbox runtime {label!r} is {status or 'not ready'}")
+    runtime = dict(
+        await asyncio.to_thread(client.get_agent_runtime, agentRuntimeId=runtime_id, agentRuntimeVersion=version)
+    )
+    if runtime.get("status") != "READY":
+        raise unavailable(f"sandbox runtime {label!r} version {version} is {runtime.get('status') or 'not ready'}")
+    problems, warnings = operator_runtime_findings(runtime)
+    if problems:
+        raise unavailable(
+            f"sandbox runtime {label!r} version {version} (endpoint {qualifier!r}) cannot serve sandboxes: "
+            + "; ".join(problems)
+        )
+    return str(runtime["agentRuntimeArn"]), version, warnings
