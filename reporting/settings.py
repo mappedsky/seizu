@@ -267,6 +267,24 @@ REPORT_QUERY_SIGNING_SECRET = str_env("REPORT_QUERY_SIGNING_SECRET", "")
 # (users will be forced to log in again).
 SESSION_TOKEN_ENCRYPTION_KEY = str_env("SESSION_TOKEN_ENCRYPTION_KEY", "")
 
+# AES-256-GCM keys that encrypt the token vault: each user's delegated OAuth
+# grants for external MCP gateways, stored in PostgreSQL. Must be a different
+# key from SESSION_TOKEN_ENCRYPTION_KEY, and must be given to both the web
+# service and the Temporal worker (STO-015).
+#
+# Format: id:base64key[,id:base64key...]. The first entry encrypts; every entry
+# decrypts. IDs are 1-64 characters of letters, digits, '.', '_' or '-'; each
+# key is 32 random bytes, base64-encoded, generated as for
+# SESSION_TOKEN_ENCRYPTION_KEY above. Example: 2026-11:<key>.
+#
+# Rotation: prepend a new key, keep the old ones until no stored grant uses
+# them (each row records its key ID, and a grant is re-encrypted with the
+# current key whenever it is rewritten), then drop the old entry. Removing a
+# key that grants still use makes those grants unreadable: their owners must
+# reconnect. Empty: the vault is unavailable, and anything that reads or
+# writes a grant fails with an error naming this setting.
+DELEGATED_TOKEN_ENCRYPTION_KEYS = str_env("DELEGATED_TOKEN_ENCRYPTION_KEYS", "")
+
 # Name of the session cookie that carries the encrypted IDP refresh token.
 SESSION_COOKIE_NAME = str_env("SESSION_COOKIE_NAME", "seizu_session")
 
@@ -1202,7 +1220,7 @@ CHAT_ELICITATION_TTL_SECONDS = max(1, min(86400, int_env("CHAT_ELICITATION_TTL_S
 CHAT_ELICITATION_MAX_FIELDS = max(1, min(32, int_env("CHAT_ELICITATION_MAX_FIELDS", 32)))
 # Entries may acquire M2M tokens through client_credentials or use a shared
 # token_env. user_authorization enables per-owner gateway status and recovery;
-# the gateway owns upstream grants (AGT-048).
+# the gateway owns upstream grants (AGT-059).
 _MCP_EXTERNAL_CONFIGURED_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
 MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED else []
 # How a portable plugin's logical MCP dependency (`mcp:<server>/<tool>`) binds to

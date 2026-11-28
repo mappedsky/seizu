@@ -7,8 +7,8 @@ with the user through the IDP and back to ``/api/v1/auth/callback``, where
 the backend verifies ``state`` matches the callback's query parameter and
 uses ``verifier`` to complete the PKCE exchange.
 
-The cookie is AES-GCM-encrypted with the same key used for the session
-cookie (``SESSION_TOKEN_ENCRYPTION_KEY``). It uses ``SameSite=Lax`` because
+The cookie is AES-GCM-encrypted with the session cookie's cipher
+(``encryption.session_cipher``, keyed by ``SESSION_TOKEN_ENCRYPTION_KEY``). It uses ``SameSite=Lax`` because
 it must be sent on the top-level cross-site redirect *back* from the IDP —
 ``Strict`` would suppress it on that hop.
 
@@ -21,18 +21,13 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import os
 import time
 from dataclasses import dataclass
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from reporting.services import encryption
 
-from reporting import settings
-
-_NONCE_BYTES = 12
-_GCM_TAG_BYTES = 16
-_KEY_BYTES = 32
+_NONCE_BYTES = encryption.NONCE_BYTES
+_GCM_TAG_BYTES = encryption.TAG_BYTES
 # AES-GCM associated data domain-separates this cookie from the session
 # cookie, which shares the same encryption key. A ciphertext minted for one
 # purpose fails authentication if presented as the other. Bump the version
@@ -56,19 +51,6 @@ class OAuthStatePayload:
     nonce: str
 
 
-def _get_key() -> bytes:
-    raw = settings.SESSION_TOKEN_ENCRYPTION_KEY
-    if not raw:
-        raise RuntimeError("SESSION_TOKEN_ENCRYPTION_KEY must be configured (32 random bytes, base64-encoded)")
-    try:
-        key = base64.b64decode(raw, validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise RuntimeError("SESSION_TOKEN_ENCRYPTION_KEY must be valid base64") from exc
-    if len(key) != _KEY_BYTES:
-        raise RuntimeError(f"SESSION_TOKEN_ENCRYPTION_KEY must decode to {_KEY_BYTES} bytes (got {len(key)})")
-    return key
-
-
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -78,7 +60,7 @@ def _b64url_decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + padding)
 
 
-def encrypt(payload: OAuthStatePayload) -> str:
+async def encrypt(payload: OAuthStatePayload) -> str:
     plaintext = json.dumps(
         {
             "state": payload.state,
@@ -89,24 +71,19 @@ def encrypt(payload: OAuthStatePayload) -> str:
         },
         separators=(",", ":"),
     ).encode("utf-8")
-    aesgcm = AESGCM(_get_key())
-    nonce = os.urandom(_NONCE_BYTES)
-    ciphertext = aesgcm.encrypt(nonce, plaintext, _AAD)
-    return _b64url_encode(nonce + ciphertext)
+    return _b64url_encode(await encryption.session_cipher().encrypt(plaintext, _AAD))
 
 
-def decrypt(cookie_value: str, *, now: int | None = None) -> OAuthStatePayload:
+async def decrypt(cookie_value: str, *, now: int | None = None) -> OAuthStatePayload:
     try:
         blob = _b64url_decode(cookie_value)
     except (ValueError, binascii.Error) as exc:
         raise OAuthStateCookieError("Malformed state cookie") from exc
     if len(blob) < _NONCE_BYTES + _GCM_TAG_BYTES:
         raise OAuthStateCookieError("State cookie too short")
-    gcm_nonce, ciphertext = blob[:_NONCE_BYTES], blob[_NONCE_BYTES:]
-    aesgcm = AESGCM(_get_key())
     try:
-        plaintext = aesgcm.decrypt(gcm_nonce, ciphertext, _AAD)
-    except InvalidTag as exc:
+        plaintext = await encryption.session_cipher().decrypt(blob, _AAD)
+    except encryption.DecryptionError as exc:
         raise OAuthStateCookieError("State cookie integrity check failed") from exc
 
     try:

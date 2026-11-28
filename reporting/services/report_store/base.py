@@ -173,6 +173,29 @@ class ReportStore(ABC):
         """Store an observation unless a newer one is already recorded."""
 
     @abstractmethod
+    async def get_delegated_token(self, user_id: str, proxy_name: str, resource: str) -> dict[str, Any] | None:
+        """Return one stored delegated grant row, ciphertext included, or None."""
+
+    @abstractmethod
+    async def list_delegated_tokens(self, user_id: str) -> list[dict[str, Any]]:
+        """Return this user's delegated grant rows without their ciphertext."""
+
+    @abstractmethod
+    async def put_delegated_token(self, record: dict[str, Any], *, expected_version: int | None) -> int | None:
+        """Write a delegated grant row and return its new version.
+
+        With ``expected_version`` None the row is inserted or overwritten. Otherwise
+        it is updated only if it still has that version, and None is returned when
+        it does not (or no longer exists), so a concurrent rewrite is never lost.
+        """
+
+    @abstractmethod
+    async def delete_delegated_tokens(
+        self, user_id: str, proxy_name: str | None = None, resource: str | None = None
+    ) -> int:
+        """Delete a user's delegated grant rows, narrowed by proxy and resource; return how many."""
+
+    @abstractmethod
     def generate_id(self) -> str:
         """Return a new UUIDv7 identifier."""
 

@@ -196,8 +196,8 @@ page instead of receiving the payload as content.
 Adopting `user_authorization` on an external MCP proxy is optional and new
 migrations `0012`/`0013` apply automatically. Read
 [external-mcp.md](external-mcp.md) and
-[AGT-048](../dev/decisions/chat-agent.md) before enabling it in production —
-end-to-end grant isolation is still being validated in
+[AGT-059](../dev/decisions/chat-agent.md) before enabling it in production —
+per-user access is moving to delegated OAuth, tracked in
 [#312](https://github.com/mappedsky/seizu/issues/312). Shared-token external
 access (`bearer`/`m2m_jwt` without `user_authorization`) is unaffected and not
 covered by that caveat.

@@ -34,7 +34,7 @@ def _payload(**overrides):
 
 async def test_encrypt_then_decrypt_roundtrips():
     payload = _payload()
-    out = decrypt(encrypt(payload))
+    out = await decrypt(await encrypt(payload))
     assert out == payload
     assert out.nonce == "nonce-abc"
 
@@ -43,30 +43,30 @@ async def test_state_cookie_cannot_be_decrypted_as_session_cookie():
     """AAD domain separation: a state cookie fails session-cookie auth even with the shared key."""
     from reporting.services import session_cookie
 
-    state_cookie = encrypt(_payload())
+    state_cookie = await encrypt(_payload())
     with pytest.raises(session_cookie.SessionCookieError, match="integrity check failed"):
-        session_cookie.decrypt(state_cookie)
+        await session_cookie.decrypt(state_cookie)
 
 
 async def test_decrypt_rejects_tampered_ciphertext():
-    cookie = encrypt(_payload())
+    cookie = await encrypt(_payload())
     raw = bytearray(base64.urlsafe_b64decode(cookie + "=" * (-len(cookie) % 4)))
     raw[-1] ^= 0x01
     tampered = base64.urlsafe_b64encode(bytes(raw)).rstrip(b"=").decode("ascii")
     with pytest.raises(OAuthStateCookieError, match="integrity check failed"):
-        decrypt(tampered)
+        await decrypt(tampered)
 
 
 async def test_decrypt_rejects_expired_state():
-    cookie = encrypt(_payload(exp=500))
+    cookie = await encrypt(_payload(exp=500))
     with pytest.raises(OAuthStateCookieError, match="expired"):
-        decrypt(cookie, now=1_000)
+        await decrypt(cookie, now=1_000)
 
 
 async def test_decrypt_rejects_blank_state_or_verifier():
-    cookie = encrypt(_payload(state="", verifier="v"))
+    cookie = await encrypt(_payload(state="", verifier="v"))
     with pytest.raises(OAuthStateCookieError, match="invalid state/verifier"):
-        decrypt(cookie)
+        await decrypt(cookie)
 
 
 async def test_is_safe_return_to_accepts_simple_path():

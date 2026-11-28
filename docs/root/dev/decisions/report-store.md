@@ -217,8 +217,9 @@ prevents a renamed endpoint or changed identity mapping from inheriting the old
 gateway's connected status. Timestamp-guarded upserts prevent delayed database
 writes from replacing a newer observation.
 
-No grant, service token, browser token, or raw gateway response is stored. The
-gateway owns authority (AGT-048); these rows only describe the last request.
+No grant, service token, browser token, or raw gateway response is stored in
+these rows; they only describe the last request. A user's delegated grant lives
+in the token vault (STO-015, AGT-059).
 Failure to persist a status is logged but cannot replay a successful tool call.
 
 URL elicitation recovery (migration `0013`) adds up to eight validated URLs,
@@ -252,3 +253,69 @@ some answers; independent cap checks let parallel workers exceed the UI bound.
 Separating responses from public projections prevents a reload or stream replay
 from disclosing them to model state. Clearing on claim narrows retention without
 treating an uncertain remote outcome as permission to retry.
+
+## STO-015 — Delegated grants are encrypted with their own key, behind a swappable cipher
+
+**Applies to:** `delegated_tokens`, migration `0017_delegated_tokens`,
+`reporting/services/token_vault.py`, `reporting/services/encryption.py`,
+`DELEGATED_TOKEN_ENCRYPTION_KEYS`
+
+**What a row holds.** One row per user, proxy and protected resource (AGT-059),
+holding the key ID, the ciphertext, a version and timestamps. The whole grant is
+one ciphertext, the token endpoint and client ID included. The ciphertext's
+associated data names the row's owner, proxy and resource. Writes after a
+refresh are conditional on the version the writer read. A row that no longer
+decrypts raises `VaultError` and is left in place.
+
+**Why the endpoint is encrypted:** a stored token endpoint in the clear lets
+anyone with write access to the database send the next refresh, carrying the
+refresh token and the client's secret, to an endpoint of their choosing.
+
+**Why the associated data names the row:** without it, a ciphertext copied onto
+another user's row decrypts as that user's grant.
+
+**Why conditional writes:** the gateway rotates the refresh token on every use,
+so an unconditional write from the losing worker would overwrite the winner's
+live token with a revoked one.
+
+**Why a row that won't decrypt is kept:** a removed key or a damaged row is an
+operator problem. Deleting the row would turn it into silent loss of the user's
+connection.
+
+**The key is not `SESSION_TOKEN_ENCRYPTION_KEY`.** The two could share one key,
+separated by associated data as the session and OAuth state cookies already
+are. Four operational differences rule it out:
+
+- **Rotation cost.** Rotating the session key signs everyone out, which is
+  cheap. Rotating a shared key would also make every stored grant unreadable,
+  forcing each user to reconnect every gateway resource, so in practice it
+  would never be rotated.
+- **Who holds it.** Only the web service receives the session key. The Temporal
+  worker needs the vault key, and sharing one would let it open and forge
+  browser sessions.
+- **Blast radius.** Cookie ciphertext sits in browsers and grants sit in the
+  database; with one key, one leak opens both.
+- **Versioning.** Cookies live for at most 18 hours, so a key swap is the whole
+  rotation story. Grants live for months, so each row names its key and several
+  keys decrypt at once, which is why the vault uses a keyring.
+
+**The cipher is an interface.** `Cipher` is asynchronous, and each purpose gets
+its cipher from a factory in `encryption.py`: `session_cipher`,
+`delegated_token_cipher`. The factory is the only place a provider is chosen,
+so an AWS KMS envelope cipher is added by returning it from a factory, with no
+caller changing. The cookies keep their headerless `nonce || ciphertext` format
+so cookies issued before the refactor still open. The keyring's format starts
+with a version byte and the key ID, and that header is authenticated with the
+associated data, so renaming the key ID cannot select a different key.
+
+For KMS, encryption context plays the role of associated data, and CloudTrail
+records it in plain text, so it may carry only opaque IDs, never an email. A
+headerless cookie cannot be told apart from a framed one by its first byte, so
+moving cookies to another provider needs a prefix at the cookie layer.
+
+**Don't:**
+- reuse the session key for the vault;
+- move the token endpoint or client ID out of the ciphertext;
+- drop the row binding from the associated data;
+- write a refreshed grant unconditionally;
+- delete a row because it failed to decrypt.

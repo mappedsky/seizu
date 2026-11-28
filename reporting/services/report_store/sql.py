@@ -103,6 +103,21 @@ class ExternalMCPConnectionRecord(SQLModel, table=True):  # type: ignore[call-ar
     elicitations_json: str | None = None
 
 
+class DelegatedTokenRecord(SQLModel, table=True):  # type: ignore[call-arg]
+    """One encrypted delegated grant per user, proxy and gateway resource (STO-015)."""
+
+    __tablename__ = "delegated_tokens"
+
+    user_id: str = Field(primary_key=True)
+    proxy_name: str = Field(primary_key=True)
+    resource: str = Field(primary_key=True)
+    key_id: str
+    ciphertext: str = Field(sa_column=Column(Text, nullable=False))
+    version: int
+    created_at: str
+    updated_at: str
+
+
 _engine: AsyncEngine | None = None
 
 # How many times an event-log append re-reads the highest sequence after losing
@@ -1037,6 +1052,67 @@ class SQLModelReportStore(ReportStore):
                 record.model_dump(),
             )
             await session.commit()
+
+    async def get_delegated_token(self, user_id: str, proxy_name: str, resource: str) -> dict[str, Any] | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(DelegatedTokenRecord, (user_id, proxy_name, resource))
+            return record.model_dump() if record is not None else None
+
+    async def list_delegated_tokens(self, user_id: str) -> list[dict[str, Any]]:
+        async with AsyncSession(_get_engine()) as session:
+            records = await session.scalars(
+                select(DelegatedTokenRecord)
+                .where(DelegatedTokenRecord.user_id == user_id)
+                .order_by(col(DelegatedTokenRecord.proxy_name), col(DelegatedTokenRecord.resource))
+            )
+            return [record.model_dump(exclude={"ciphertext"}) for record in records]
+
+    async def put_delegated_token(self, record: dict[str, Any], *, expected_version: int | None) -> int | None:
+        now = datetime.now(UTC).isoformat()
+        values = {
+            "user_id": record["user_id"],
+            "proxy_name": record["proxy_name"],
+            "resource": record["resource"],
+            "key_id": record["key_id"],
+            "ciphertext": record["ciphertext"],
+            "now": now,
+        }
+        if expected_version is None:
+            statement = text(
+                "INSERT INTO delegated_tokens "
+                "(user_id, proxy_name, resource, key_id, ciphertext, version, created_at, updated_at) "
+                "VALUES (:user_id, :proxy_name, :resource, :key_id, :ciphertext, 1, :now, :now) "
+                "ON CONFLICT (user_id, proxy_name, resource) DO UPDATE SET "
+                "key_id = excluded.key_id, ciphertext = excluded.ciphertext, "
+                "version = delegated_tokens.version + 1, updated_at = excluded.updated_at "
+                "RETURNING version"
+            )
+        else:
+            statement = text(
+                "UPDATE delegated_tokens SET key_id = :key_id, ciphertext = :ciphertext, "
+                "version = version + 1, updated_at = :now "
+                "WHERE user_id = :user_id AND proxy_name = :proxy_name AND resource = :resource "
+                "AND version = :expected_version "
+                "RETURNING version"
+            )
+            values["expected_version"] = expected_version
+        async with AsyncSession(_get_engine()) as session:
+            version = (await session.execute(statement, values)).scalar_one_or_none()
+            await session.commit()
+            return int(version) if version is not None else None
+
+    async def delete_delegated_tokens(
+        self, user_id: str, proxy_name: str | None = None, resource: str | None = None
+    ) -> int:
+        statement = delete(DelegatedTokenRecord).where(col(DelegatedTokenRecord.user_id) == user_id)
+        if proxy_name is not None:
+            statement = statement.where(col(DelegatedTokenRecord.proxy_name) == proxy_name)
+        if resource is not None:
+            statement = statement.where(col(DelegatedTokenRecord.resource) == resource)
+        async with AsyncSession(_get_engine()) as session:
+            result = await session.execute(statement)
+            await session.commit()
+            return int(getattr(result, "rowcount", 0) or 0)
 
     def generate_id(self) -> str:
         return generate_report_id()

@@ -2842,68 +2842,17 @@ sensitive than bounded action evidence, so accepting the latter must not imply
 accepting the former. A shared limit makes the amount exported an operator
 choice instead of a collection of code-site constants.
 
-## AGT-048 — Gateways own upstream user grants; service tokens renew automatically
+## AGT-048 — Gateways own upstream user grants; service tokens renew automatically — superseded by AGT-059
 
-**Applies to:** `external_mcp`, `external_mcp_tokens`, `chat_connections`,
-`ExternalMCPProxy.client_credentials` / `user_authorization`
-
-Per-user delegation and recovery are experimental pending the end-to-end
-validation in [#312](https://github.com/mappedsky/seizu/issues/312). ContextForge
-v1.0.9 transport tests passed, but bearer-plus-target-header requests retained
-the bearer owner's authority; trusted-header mode needed email identity mapping
-and exposed a server-scoped CSRF incompatibility. Transport success therefore
-does not establish per-user grant isolation. Shared-token external access is
-outside this experimental designation.
-
-Per-user external authority is an explicit gateway contract. By default Seizu
-supplies the stored run owner's durable OIDC `(issuer, subject)` pair, never its
-local user ID, over either M2M bearer authentication or trusted mesh
-authentication. A gateway may instead map a nonempty identity-provider claim
-such as email into a target header. The gateway maps that identity to its own
-upstream grant and must never substitute a shared credential when the grant is
-missing. Shared static API tokens remain supported through `bearer` plus
-`token_env`.
-
-**Why:** Temporal deliberately holds no browser bearer (AGT-008), and Seizu's
-OIDC refresh token is an encrypted browser cookie, not a worker-accessible vault.
-An existing gateway already owns consent, refresh, account linking, and upstream
-policy. Its user directory cannot identify a Seizu-local ID; the durable OIDC
-pair is the identity boundary (AUTH-001). Duplicating that store in Seizu would
-introduce another grant lifecycle without proving the upstream account belongs
-to the asserted user.
-
-M2M client credentials acquire and renew service tokens in process memory;
-existing `token_env` configurations remain compatible. A token acquisition is
-coalesced per configuration and a rejection invalidates only the rejected cached
-token. Calls are not replayed for renewal because a transport failure need not
-prove a tool had no effect. Mesh-authenticated deployments need no second bearer.
-
-**Why explicit error classification:** a service-account 401 is an administrator
-problem, not evidence that the target user needs consent. HTTP 401 is a service
-failure and 403 is a permission denial. The initial custom `X-Seizu-Auth-Error`
-contract is replaced by standard MCP URL elicitation: `elicitation/create` and
-the 2025-11-25 `-32042` error, plus 2026-07-28 `InputRequiredResult` requests.
-The SDK's capability builder is narrowed to URL-only because its callback API
-otherwise advertises form support that this client does not provide.
-
-Detached workers cancel legacy callback requests and do not continue modern
-input-required results. Neither response represents human consent. Recovery is
-manual on Chat Connections; no tool is automatically replayed and completion
-notifications cannot establish a grant or resume a finished run. URL elicitation
-can also request payments or other interactions, so its status is generically
-`interaction_required`, not an assertion that the user needs OAuth consent.
-
-Recovery URLs are bounded and restricted to the operator-configured account
-page's origin, revalidated on read, and never included in model diagnostics.
-The owner sees the gateway's plain-text explanation and target host before
-choosing whether to navigate. This permits nonce-bearing protocol URLs without
-making arbitrary server redirects trusted destinations. Gateways must validate
-browser identity independently and must not put credentials in URLs/messages.
-Legacy non-opted-in proxies keep their existing OAuth path.
-
-Connection observations survive worker restarts (STO-013), including failed
-discovery that hides a skill. Their owner-facing page is gated by `chat:use`, so
-a custom chat-only role can recover without acquiring toolset administration.
+**Superseded by:** AGT-059. Per-user external authority was an identity-assertion
+contract. Seizu sent the run owner's OIDC `(issuer, subject)`, or a mapped claim
+such as email, as target-user headers over an M2M bearer or trusted mesh
+authentication. The gateway mapped that identity to its own upstream grant, and
+Seizu stored no grant. Evaluation in
+[#312](https://github.com/mappedsky/seizu/issues/312) found that no open-source
+gateway implements that contract safely, so per-user access moved to delegated
+OAuth. This entry's service-token renewal, error classification and recovery
+rules carry forward unchanged into AGT-059.
 
 ## AGT-049 — External Streamable HTTP negotiates modern-first
 
@@ -2925,7 +2874,7 @@ version sets must not become attempts to negotiate a different protocol.
 
 We use the session API, not the high-level client's automatic input-required
 continuation driver, so negotiation cannot change the detached recovery and
-no-replay contract in AGT-048. The legacy override accommodates peers that reject
+no-replay contract in AGT-059. The legacy override accommodates peers that reject
 requests made before initialization without treating their errors as consent to
 downgrade automatically.
 
@@ -2958,7 +2907,7 @@ form from URL support, so the transport checks the per-request mode
 declaration explicitly.
 
 **Don't:** turn a form response into a permission grant or bypass flag, or
-replace upstream account authorization URL elicitation (AGT-048) with a form.
+replace upstream account authorization URL elicitation (AGT-059) with a form.
 
 ## AGT-051 — Keep HTTP connections alive between MCP requests
 
@@ -3146,7 +3095,7 @@ the turn, and resume with the original arguments and opaque continuation state
 after the owner answers. Legacy callbacks still cancel. Form capability is
 advertised only for an opted-in interactive top-level or orchestrated call;
 discovery, detached runs, and sandbox subagents keep it stripped. URL capability
-remains available for AGT-048 recovery, including when interactive elicitation
+remains available for AGT-059 recovery, including when interactive elicitation
 is disabled. Sampling and roots input requests are unsupported.
 
 **Why:** a Temporal activity has no inbound form channel (AGT-008), and a legacy
@@ -3179,7 +3128,7 @@ Resumed reads undergo normal verification, but are not retried.
 
 **Why:** answering a form is not an authorization grant. Verification may reject
 evidence without repeating a call that may already have had effects. This
-refines AGT-048 only for owner-initiated interactive continuations; detached runs
+refines AGT-059 only for owner-initiated interactive continuations; detached runs
 still never replay. A one-shot decline path needs no additional denial budget.
 
 A sandbox delegation that unexpectedly elicits records the request and returns.
@@ -3305,3 +3254,114 @@ and would put a model chat never calls into chat's pricing check
 (`initial_budget_ledger` derives the token ceiling from whether *every* spec
 is priced). Without profiles, `QUERY_GENERATION_MODEL` and
 `QUERY_GENERATION_REASONING_EFFORT` are the stage's environment defaults.
+
+## AGT-059 — Users delegate to Seizu through the gateway's OAuth; Seizu holds that grant
+
+**Applies to:** `token_vault`, `encryption`, `external_mcp`, `external_mcp_tokens`,
+`chat_connections`, `ExternalMCPProxy.client_credentials` / `user_authorization`
+
+Per-user external access uses delegated OAuth, following the MCP authorization
+specification. The gateway holds the external MCP servers and each user's
+upstream grants, and the user authorizes upstream accounts there. Seizu is an
+ordinary MCP OAuth client:
+
+1. It follows the gateway's 401 to its protected-resource metadata (RFC 9728)
+   and authorization-server metadata (RFC 8414).
+2. It runs authorization code + PKCE once per user and gateway resource, asking
+   for offline access.
+3. It stores the resulting grant in the token vault (STO-015).
+4. Every call carries that user's own access token, in interactive and detached
+   runs alike.
+
+The token may be issued by the gateway itself (Pomerium, ToolHive, Obot) or by
+the identity provider and validated by the gateway (ContextForge,
+agentgateway). Seizu's side is the same in both cases. Shared static API tokens
+remain supported through `bearer` plus `token_env`.
+
+Status: the vault exists. The OAuth client, its refresh and the connect flow do
+not yet ([#312](https://github.com/mappedsky/seizu/issues/312)). Until they
+land, `user_authorization` stays experimental and the identity-assertion modes
+(`header_delegation`, and `m2m_jwt` with target headers) behave as AGT-048
+described.
+
+**Why:** the identity-assertion contract asked the gateway to trust Seizu's word
+for who the user is. That is impersonation, and every open-source gateway
+evaluated either does not offer it or offers it unsafely:
+
+- **ContextForge (v1.0.9 tested, v1.1.2 source).** Bearer plus target header
+  kept the bearer owner's authority. Header trust is active only while caller
+  authentication is disabled. The header resolves as an email. Header-only
+  requests to `/servers/{id}/mcp` fail CSRF checks. Its JWT-trust work requires
+  that the minted subject equal the inbound user, "no act-as/delegation".
+- **Pomerium and ToolHive** act for a user only with that user's token, or with
+  a per-user service account, which Pomerium documents creating only in its
+  Enterprise and Zero editions.
+- **agentgateway** holds no upstream grants in its open-source build.
+
+Delegated OAuth inverts the trust. The user consents to the delegation, and the
+gateway verifies a token signed for that user. A compromise of Seizu then
+exposes the refresh tokens of users who connected, each revocable at the
+gateway or identity provider, instead of the ability to act as anyone. Pomerium
+also binds each refresh token to the client it was issued to and requires that
+client's secret to spend it, so the vault's contents alone are not enough.
+
+AGT-048 rejected a grant store because a copy of the gateway's grants would not
+prove the upstream account belongs to the asserted user. This one does: Seizu
+holds one grant per gateway resource, obtained by the user's own authorization,
+not copies of upstream grants. AGT-008 still holds, because workers read the
+vault and never hold a browser bearer.
+
+**Grant granularity follows the gateway.** In the Pomerium Core v0.34.2 spike,
+each MCP route advertised its own issuer and token endpoint, so Seizu holds a
+grant per route. ContextForge validates one identity-provider token for every
+virtual server, so a grant there covers the gateway. The vault therefore keys
+on the protected resource, not on the proxy. Pomerium also needs
+`mcp_dynamic_client_registration` for Seizu to register as a confidential
+client; its default, client ID metadata documents, is fetched only from public
+HTTPS.
+
+**Rotation:** gateways rotate the refresh token on every use. Of two workers
+refreshing together, one wins. The loser's write is refused by the vault's
+version check, and it reloads the winner's grant instead of reporting the grant
+revoked. `invalid_grant` means revoked only after that reload.
+
+**Carried forward from AGT-048.** M2M client credentials acquire and renew
+service tokens in process memory; existing `token_env` configurations remain
+compatible. A token acquisition is coalesced per configuration, and a rejection
+invalidates only the rejected cached token. Calls are not replayed for renewal,
+because a transport failure need not prove a tool had no effect.
+Mesh-authenticated deployments need no second bearer.
+
+A service-account 401 is an administrator problem, not evidence that the target
+user needs consent: HTTP 401 is a service failure and 403 a permission denial.
+Recovery uses standard MCP URL elicitation: `elicitation/create` and the
+2025-11-25 `-32042` error, plus 2026-07-28 `InputRequiredResult` requests. The
+SDK's capability builder is narrowed to URL-only, because its callback API
+otherwise advertises form support this client does not provide.
+
+Detached workers cancel legacy callback requests and do not continue modern
+input-required results; neither response represents human consent. Recovery is
+manual on Chat Connections. No tool is automatically replayed, and completion
+notifications cannot establish a grant or resume a finished run. URL
+elicitation can also request payments or other interactions, so its status is
+generically `interaction_required`, not an assertion that the user needs OAuth
+consent.
+
+Recovery URLs are bounded and restricted to the operator-configured account
+page's origin, revalidated on read, and never included in model diagnostics.
+The owner sees the gateway's plain-text explanation and target host before
+choosing whether to navigate. This permits nonce-bearing protocol URLs without
+making arbitrary server redirects trusted destinations. Gateways must validate
+browser identity independently and must not put credentials in URLs or
+messages. Connection observations survive worker restarts (STO-013), including
+a failed discovery that hides a skill. Their owner-facing page is gated by
+`chat:use`, so a custom chat-only role can recover without acquiring toolset
+administration.
+
+**Don't:**
+- send a user-identity header in place of that user's token;
+- fall back to a shared or service credential when a user's grant is missing or
+  revoked;
+- replay a tool call after recovery;
+- keep a grant anywhere but the vault, or let one reach logs, model context or
+  the sandbox.
