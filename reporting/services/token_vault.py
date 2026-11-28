@@ -10,11 +10,14 @@ Every ciphertext is bound by its associated data to the owner, proxy and
 resource of its row. A ciphertext copied onto another user's row fails to
 decrypt instead of being used as that user's grant.
 
-Rotation contract: ``load`` returns the row's version. A refresh writes the
-rotated grant back with ``replace(..., expected_version=...)``, which returns
-None when another writer replaced the grant first. That caller must reload and
-use the winner's grant, and must not treat its own failed refresh as a revoked
-grant until it has reloaded.
+Rotation contract: ``load`` returns the row's revision, a random value that
+changes on every write and never repeats, so a grant deleted and connected again
+cannot match a revision read before. A refresh first takes the grant's refresh
+claim (``claim_refresh``), which at most one process holds at a time, reloads,
+and writes the rotated grant back with ``replace(..., expected_revision=...)``.
+``replace`` returns None when another writer replaced the grant first. That
+caller must reload and use the winner's grant, and must not treat its own failed
+refresh as a revoked grant until it has reloaded.
 
 Grants are never written to logs or model context; ``list_grants`` returns
 metadata only.
@@ -25,6 +28,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import secrets
+import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -52,7 +57,7 @@ class DelegatedGrant:
 @dataclass(frozen=True)
 class StoredGrant:
     grant: DelegatedGrant
-    version: int
+    revision: str
     key_id: str
     updated_at: str
 
@@ -64,7 +69,6 @@ class GrantSummary:
     proxy_name: str
     resource: str
     key_id: str
-    version: int
     created_at: str
     updated_at: str
 
@@ -104,26 +108,46 @@ async def _record(user_id: str, proxy_name: str, resource: str, grant: Delegated
         "resource": resource,
         "key_id": cipher.key_id(sealed),
         "ciphertext": base64.b64encode(sealed).decode("ascii"),
+        "revision": secrets.token_urlsafe(16),
     }
 
 
-async def save(user_id: str, proxy_name: str, resource: str, grant: DelegatedGrant) -> int:
-    """Store a newly authorized grant, replacing any earlier one; return its version."""
-    version = await report_store.put_delegated_token(
-        await _record(user_id, proxy_name, resource, grant), expected_version=None
-    )
-    if version is None:
-        raise RuntimeError("an unconditional grant write reported no version")
-    return version
+async def save(user_id: str, proxy_name: str, resource: str, grant: DelegatedGrant) -> str:
+    """Store a newly authorized grant, replacing any earlier one; return its revision."""
+    record = await _record(user_id, proxy_name, resource, grant)
+    if not await report_store.put_delegated_token(record, expected_revision=None):
+        raise RuntimeError("an unconditional grant write was not applied")
+    return str(record["revision"])
 
 
 async def replace(
-    user_id: str, proxy_name: str, resource: str, grant: DelegatedGrant, *, expected_version: int
-) -> int | None:
-    """Replace a grant only if it is still at ``expected_version``; None means another writer won."""
-    return await report_store.put_delegated_token(
-        await _record(user_id, proxy_name, resource, grant), expected_version=expected_version
+    user_id: str, proxy_name: str, resource: str, grant: DelegatedGrant, *, expected_revision: str
+) -> str | None:
+    """Replace a grant only if it is still at ``expected_revision``; return the new revision, or None."""
+    record = await _record(user_id, proxy_name, resource, grant)
+    if not await report_store.put_delegated_token(record, expected_revision=expected_revision):
+        return None
+    return str(record["revision"])
+
+
+async def claim_refresh(user_id: str, proxy_name: str, resource: str, *, lease_seconds: int) -> str | None:
+    """Claim the right to refresh this grant for ``lease_seconds``; return the claim, or None.
+
+    None means another process holds a live claim, or the grant is gone. A claim
+    outlives a crashed holder only until its lease ends.
+    """
+    _require(user_id, proxy_name, resource)
+    claimant = secrets.token_urlsafe(16)
+    now = int(time.time())
+    claimed = await report_store.claim_delegated_token_refresh(
+        user_id, proxy_name, resource, claimant=claimant, expires_at=now + lease_seconds, now=now
     )
+    return claimant if claimed else None
+
+
+async def release_refresh(user_id: str, proxy_name: str, resource: str, claim: str) -> None:
+    """Release a claim from ``claim_refresh``; a claim taken over after its lease is left alone."""
+    await report_store.release_delegated_token_refresh(user_id, proxy_name, resource, claimant=claim)
 
 
 async def load(user_id: str, proxy_name: str, resource: str) -> StoredGrant | None:
@@ -143,7 +167,7 @@ async def load(user_id: str, proxy_name: str, resource: str) -> StoredGrant | No
         grant = _parse_grant(plaintext)
     except (binascii.Error, encryption.DecryptionError, ValueError, TypeError) as exc:
         raise VaultError(f"stored grant for proxy {proxy_name!r} cannot be read") from exc
-    return StoredGrant(grant=grant, version=int(row["version"]), key_id=row["key_id"], updated_at=row["updated_at"])
+    return StoredGrant(grant=grant, revision=str(row["revision"]), key_id=row["key_id"], updated_at=row["updated_at"])
 
 
 async def delete(user_id: str, proxy_name: str | None = None, resource: str | None = None) -> int:
@@ -162,7 +186,6 @@ async def list_grants(user_id: str) -> list[GrantSummary]:
             proxy_name=row["proxy_name"],
             resource=row["resource"],
             key_id=row["key_id"],
-            version=int(row["version"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

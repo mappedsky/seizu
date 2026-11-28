@@ -315,7 +315,8 @@ experimental. Shared-token external access is not covered by that designation.
 The vault encrypts each grant as one value, bound to its owner, proxy and
 resource, under `DELEGATED_TOKEN_ENCRYPTION_KEYS`: a keyring separate from
 `SESSION_TOKEN_ENCRYPTION_KEY`, given to both the web service and the Temporal
-worker. A refresh writes back conditionally on the row version it read. Ciphers
+worker. A refresh holds the grant's refresh claim (one process at a time) and
+writes back conditionally on the random revision it read. Ciphers
 come from per-purpose factories in `reporting/services/encryption.py`
 (`session_cipher`, `delegated_token_cipher`), the only place a provider such as
 KMS would be added ([`STO-015`](docs/root/dev/decisions/report-store.md)).

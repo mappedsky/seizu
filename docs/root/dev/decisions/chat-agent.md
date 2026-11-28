@@ -3320,10 +3320,12 @@ on the protected resource, not on the proxy. Pomerium also needs
 client; its default, client ID metadata documents, is fetched only from public
 HTTPS.
 
-**Rotation:** gateways rotate the refresh token on every use. Of two workers
-refreshing together, one wins. The loser's write is refused by the vault's
-version check, and it reloads the winner's grant instead of reporting the grant
-revoked. `invalid_grant` means revoked only after that reload.
+**Rotation:** gateways rotate the refresh token on every use, and some revoke
+the whole grant when a spent refresh token is presented again. So only one
+process refreshes a grant at a time, through the vault's refresh claim, and the
+write-back is still conditional on the revision read (STO-015). A writer that
+loses reloads the winner's grant instead of reporting the grant revoked.
+`invalid_grant` means revoked only after that reload.
 
 **Carried forward from AGT-048.** M2M client credentials acquire and renew
 service tokens in process memory; existing `token_env` configurations remain

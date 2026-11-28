@@ -21,6 +21,7 @@ from sqlalchemy import (
     text,
     update,
 )
+from sqlalchemy import select as sa_select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, col, select
@@ -113,7 +114,13 @@ class DelegatedTokenRecord(SQLModel, table=True):  # type: ignore[call-arg]
     resource: str = Field(primary_key=True)
     key_id: str
     ciphertext: str = Field(sa_column=Column(Text, nullable=False))
-    version: int
+    # Random per write, so a reconnected grant can never match a revision read
+    # from the one it replaced (STO-015).
+    revision: str
+    # Who is refreshing this grant, and until when (Unix seconds); both null when
+    # nobody is. Coordinates refreshes across processes (AGT-060).
+    refresh_claimant: str | None = None
+    refresh_claim_expires_at: int | None = None
     created_at: str
     updated_at: str
 
@@ -1059,47 +1066,90 @@ class SQLModelReportStore(ReportStore):
             return record.model_dump() if record is not None else None
 
     async def list_delegated_tokens(self, user_id: str) -> list[dict[str, Any]]:
+        # Metadata columns only: the ciphertext is never read to list grants.
+        columns = (
+            col(DelegatedTokenRecord.proxy_name),
+            col(DelegatedTokenRecord.resource),
+            col(DelegatedTokenRecord.key_id),
+            col(DelegatedTokenRecord.created_at),
+            col(DelegatedTokenRecord.updated_at),
+        )
         async with AsyncSession(_get_engine()) as session:
-            records = await session.scalars(
-                select(DelegatedTokenRecord)
-                .where(DelegatedTokenRecord.user_id == user_id)
+            rows = await session.execute(
+                sa_select(*columns)
+                .where(col(DelegatedTokenRecord.user_id) == user_id)
                 .order_by(col(DelegatedTokenRecord.proxy_name), col(DelegatedTokenRecord.resource))
             )
-            return [record.model_dump(exclude={"ciphertext"}) for record in records]
+            return [dict(row._mapping) for row in rows]
 
-    async def put_delegated_token(self, record: dict[str, Any], *, expected_version: int | None) -> int | None:
-        now = datetime.now(UTC).isoformat()
+    async def put_delegated_token(self, record: dict[str, Any], *, expected_revision: str | None) -> bool:
         values = {
             "user_id": record["user_id"],
             "proxy_name": record["proxy_name"],
             "resource": record["resource"],
             "key_id": record["key_id"],
             "ciphertext": record["ciphertext"],
-            "now": now,
+            "revision": record["revision"],
+            "now": datetime.now(UTC).isoformat(),
         }
-        if expected_version is None:
+        if expected_revision is None:
             statement = text(
                 "INSERT INTO delegated_tokens "
-                "(user_id, proxy_name, resource, key_id, ciphertext, version, created_at, updated_at) "
-                "VALUES (:user_id, :proxy_name, :resource, :key_id, :ciphertext, 1, :now, :now) "
+                "(user_id, proxy_name, resource, key_id, ciphertext, revision, created_at, updated_at) "
+                "VALUES (:user_id, :proxy_name, :resource, :key_id, :ciphertext, :revision, :now, :now) "
                 "ON CONFLICT (user_id, proxy_name, resource) DO UPDATE SET "
                 "key_id = excluded.key_id, ciphertext = excluded.ciphertext, "
-                "version = delegated_tokens.version + 1, updated_at = excluded.updated_at "
-                "RETURNING version"
+                "revision = excluded.revision, updated_at = excluded.updated_at "
+                "RETURNING revision"
             )
         else:
             statement = text(
                 "UPDATE delegated_tokens SET key_id = :key_id, ciphertext = :ciphertext, "
-                "version = version + 1, updated_at = :now "
+                "revision = :revision, updated_at = :now "
                 "WHERE user_id = :user_id AND proxy_name = :proxy_name AND resource = :resource "
-                "AND version = :expected_version "
-                "RETURNING version"
+                "AND revision = :expected_revision "
+                "RETURNING revision"
             )
-            values["expected_version"] = expected_version
+            values["expected_revision"] = expected_revision
         async with AsyncSession(_get_engine()) as session:
-            version = (await session.execute(statement, values)).scalar_one_or_none()
+            written = (await session.execute(statement, values)).scalar_one_or_none()
             await session.commit()
-            return int(version) if version is not None else None
+            return written is not None
+
+    async def claim_delegated_token_refresh(
+        self, user_id: str, proxy_name: str, resource: str, *, claimant: str, expires_at: int, now: int
+    ) -> bool:
+        statement = text(
+            "UPDATE delegated_tokens SET refresh_claimant = :claimant, refresh_claim_expires_at = :expires_at "
+            "WHERE user_id = :user_id AND proxy_name = :proxy_name AND resource = :resource "
+            "AND (refresh_claimant IS NULL OR refresh_claim_expires_at IS NULL OR refresh_claim_expires_at <= :now) "
+            "RETURNING refresh_claimant"
+        )
+        values = {
+            "user_id": user_id,
+            "proxy_name": proxy_name,
+            "resource": resource,
+            "claimant": claimant,
+            "expires_at": expires_at,
+            "now": now,
+        }
+        async with AsyncSession(_get_engine()) as session:
+            claimed = (await session.execute(statement, values)).scalar_one_or_none()
+            await session.commit()
+            return claimed is not None
+
+    async def release_delegated_token_refresh(
+        self, user_id: str, proxy_name: str, resource: str, *, claimant: str
+    ) -> None:
+        statement = text(
+            "UPDATE delegated_tokens SET refresh_claimant = NULL, refresh_claim_expires_at = NULL "
+            "WHERE user_id = :user_id AND proxy_name = :proxy_name AND resource = :resource "
+            "AND refresh_claimant = :claimant"
+        )
+        values = {"user_id": user_id, "proxy_name": proxy_name, "resource": resource, "claimant": claimant}
+        async with AsyncSession(_get_engine()) as session:
+            await session.execute(statement, values)
+            await session.commit()
 
     async def delete_delegated_tokens(
         self, user_id: str, proxy_name: str | None = None, resource: str | None = None

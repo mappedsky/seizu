@@ -261,11 +261,12 @@ treating an uncertain remote outcome as permission to retry.
 `DELEGATED_TOKEN_ENCRYPTION_KEYS`
 
 **What a row holds.** One row per user, proxy and protected resource (AGT-059),
-holding the key ID, the ciphertext, a version and timestamps. The whole grant is
-one ciphertext, the token endpoint and client ID included. The ciphertext's
-associated data names the row's owner, proxy and resource. Writes after a
-refresh are conditional on the version the writer read. A row that no longer
-decrypts raises `VaultError` and is left in place.
+holding the key ID, the ciphertext, a revision, a refresh claim and timestamps.
+The whole grant is one ciphertext, the token endpoint and client ID included.
+The ciphertext's associated data names the row's owner, proxy and resource.
+Writes after a refresh are conditional on the revision the writer read. A row
+that no longer decrypts raises `VaultError` and is left in place. Listing a
+user's grants selects only the metadata columns.
 
 **Why the endpoint is encrypted:** a stored token endpoint in the clear lets
 anyone with write access to the database send the next refresh, carrying the
@@ -277,6 +278,24 @@ another user's row decrypts as that user's grant.
 **Why conditional writes:** the gateway rotates the refresh token on every use,
 so an unconditional write from the losing worker would overwrite the winner's
 live token with a revoked one.
+
+**Why a random revision, not a counter:** a counter starts again at 1 when a
+grant is deleted and connected again. A worker that read version 1 of the old
+connection would then overwrite the new one with a token the user had revoked by
+disconnecting. Each write stores a fresh random revision, so no earlier read can
+match a later connection.
+
+**Why a refresh claim as well:** conditional writes stop a lost update, but not
+two processes spending the same refresh token. The losing process's
+`invalid_grant` can arrive before the winner has written anything, so its reload
+still finds the old grant and it reports the user disconnected. A gateway that
+detects refresh-token reuse may also revoke the winner's new token. The claim is
+a lease on the row (`refresh_claimant`, `refresh_claim_expires_at`), taken by a
+conditional update, so it works on every process that shares the database. It
+expires on its own, so a crashed holder delays the grant's next refresh by at
+most one lease and never blocks it. It is not a database lock held across the
+token request, which would pin a pooled connection for the length of a network
+call.
 
 **Why a row that won't decrypt is kept:** a removed key or a damaged row is an
 operator problem. Deleting the row would turn it into silent loss of the user's

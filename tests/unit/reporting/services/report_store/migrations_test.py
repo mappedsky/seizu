@@ -328,7 +328,9 @@ async def test_delegated_token_migration_upgrades_previous_head(tmp_path):
             "resource",
             "key_id",
             "ciphertext",
-            "version",
+            "revision",
+            "refresh_claimant",
+            "refresh_claim_expires_at",
             "created_at",
             "updated_at",
         }

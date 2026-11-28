@@ -22,7 +22,9 @@ def upgrade() -> None:
             sa.Column("resource", sa.String(), primary_key=True),
             sa.Column("key_id", sa.String(), nullable=False),
             sa.Column("ciphertext", sa.Text(), nullable=False),
-            sa.Column("version", sa.Integer(), nullable=False),
+            sa.Column("revision", sa.String(), nullable=False),
+            sa.Column("refresh_claimant", sa.String(), nullable=True),
+            sa.Column("refresh_claim_expires_at", sa.Integer(), nullable=True),
             sa.Column("created_at", sa.String(), nullable=False),
             sa.Column("updated_at", sa.String(), nullable=False),
         )
