@@ -202,3 +202,38 @@ async def test_the_vault_fails_closed_without_its_key(mocker):
     mocker.patch("reporting.settings.DELEGATED_TOKEN_ENCRYPTION_KEYS", "")
     with pytest.raises(RuntimeError, match="DELEGATED_TOKEN_ENCRYPTION_KEYS"):
         await token_vault.save("alice", "corp", GATEWAY, _grant())
+
+
+# ── client registrations ───────────────────────────────────────────────────
+
+ISSUER = "https://gateway.test"
+
+
+def _registration(client_id: str = "client-1", redirect: str = "https://seizu.test/callback"):
+    return token_vault.ClientRegistration(client_id=client_id, redirect_uri=redirect, client_secret="s3cret")
+
+
+async def test_client_registrations_round_trip_by_id_and_by_redirect(_store):
+    await token_vault.save_client(ISSUER, _registration())
+    assert await token_vault.load_client(ISSUER, "client-1") == _registration()
+    assert await token_vault.find_client(ISSUER, "https://seizu.test/callback") == _registration()
+    assert await token_vault.find_client(ISSUER, "https://elsewhere.test/callback") is None
+    assert await token_vault.load_client("https://other-issuer.test", "client-1") is None
+    row = await _store.get_oauth_client(ISSUER, "client-1")
+    assert b"s3cret" not in base64.b64decode(row["ciphertext"])
+
+
+async def test_a_registration_moved_to_another_issuer_does_not_decrypt(_store):
+    await token_vault.save_client(ISSUER, _registration())
+    row = await _store.get_oauth_client(ISSUER, "client-1")
+    await _store.put_oauth_client({**row, "issuer": "https://impostor.test"})
+    with pytest.raises(VaultError):
+        await token_vault.load_client("https://impostor.test", "client-1")
+
+
+async def test_a_registration_whose_row_was_repointed_is_refused(_store):
+    await token_vault.save_client(ISSUER, _registration())
+    row = await _store.get_oauth_client(ISSUER, "client-1")
+    await _store.put_oauth_client({**row, "redirect_uri": "https://attacker.test/callback"})
+    with pytest.raises(VaultError, match="does not match"):
+        await token_vault.load_client(ISSUER, "client-1")

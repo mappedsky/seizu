@@ -96,6 +96,18 @@ async def delete_delegated_tokens(user_id: str, proxy_name: str | None = None, r
     return await get_store().delete_delegated_tokens(user_id, proxy_name, resource)
 
 
+async def get_oauth_client(issuer: str, client_id: str) -> dict[str, Any] | None:
+    return await get_store().get_oauth_client(issuer, client_id)
+
+
+async def find_oauth_client(issuer: str, redirect_uri: str) -> dict[str, Any] | None:
+    return await get_store().find_oauth_client(issuer, redirect_uri)
+
+
+async def put_oauth_client(record: dict[str, Any]) -> None:
+    await get_store().put_oauth_client(record)
+
+
 def is_initialized() -> bool:
     """Whether the application store completed its startup migrations."""
     return _initialized

@@ -11,6 +11,19 @@ import {
 import { pageContentSx } from 'src/theme/layout';
 import { CHAT_RETURN_PARAM, chatReturnPath } from 'src/utils/chatPaths';
 
+// Why a connection attempt came back unsuccessful, keyed by the callback's
+// connect_error value.
+const connectErrors: Record<string, string> = {
+  denied: 'You declined the authorization, so nothing was connected.',
+  connect_expired:
+    'The connection attempt expired or was started in another browser. Try again.',
+  state_mismatch:
+    'That authorization did not match this browser’s connection attempt. Try again.',
+  no_refresh_token:
+    'The gateway did not grant offline access, so Seizu could not keep your connection.',
+  unavailable: 'The gateway is unavailable. Try again later.',
+};
+
 const labels: Record<ConnectionStatus, string> = {
   unknown: 'Not checked',
   connected: 'Connected',
@@ -32,8 +45,10 @@ export default function ChatConnections() {
   const permissions = usePermissionState();
   const allowed =
     enabled && !permissions.loading && permissions.hasPermission('chat:use');
-  const { connections, loading, error, checking, check } =
+  const { connections, loading, error, checking, check, connect, disconnect } =
     useChatConnections(allowed);
+  const connected = searchParams.get('connected');
+  const connectError = searchParams.get('connect_error');
 
   if (permissions.loading) return <ConstellationSpinner />;
   if (!allowed)
@@ -63,6 +78,17 @@ export default function ChatConnections() {
         latest check or request; individual tools may require additional
         permissions.
       </Typography>
+      {connected && !connectError && (
+        <Alert severity="success" sx={{ mb: 2 }}>
+          Connected {connected}. Check the connection to confirm access.
+        </Alert>
+      )}
+      {connectError && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {connectErrors[connectError] ??
+            'Connecting failed. Try again, or ask an administrator.'}
+        </Alert>
+      )}
       {error && (
         <Alert severity="error" sx={{ mb: 2 }}>
           {error}
@@ -79,7 +105,9 @@ export default function ChatConnections() {
             <Paper key={connection.proxy_name} sx={{ p: 3 }}>
               <Typography variant="h2">{connection.proxy_name}</Typography>
               <Typography sx={{ mt: 1 }}>
-                {labels[connection.status]}
+                {connection.connectable && !connection.has_grant
+                  ? 'Not connected'
+                  : labels[connection.status]}
               </Typography>
               <Typography color="text.secondary" variant="body2">
                 Last observed:{' '}
@@ -99,12 +127,27 @@ export default function ChatConnections() {
                   permissions.
                 </Alert>
               )}
-              {connection.status === 'authorization_required' && (
+              {connection.status === 'authorization_required' &&
+                !connection.connectable && (
+                  <Typography sx={{ mt: 2 }}>
+                    Reauthorize your account through the gateway, then check the
+                    connection.
+                  </Typography>
+                )}
+              {connection.connectable && !connection.has_grant && (
                 <Typography sx={{ mt: 2 }}>
-                  Reauthorize your account through the gateway, then check the
-                  connection.
+                  Connect your account so Seizu can use this gateway as you,
+                  including in scheduled runs.
                 </Typography>
               )}
+              {connection.connectable &&
+                connection.has_grant &&
+                connection.status === 'authorization_required' && (
+                  <Typography sx={{ mt: 2 }}>
+                    The gateway no longer accepts your connection, or one of its
+                    services needs your consent. Connect again.
+                  </Typography>
+                )}
               <Stack direction="row" spacing={2} sx={{ mt: 2 }}>
                 {connection.status === 'interaction_required' && (
                   <Stack spacing={1}>
@@ -158,14 +201,34 @@ export default function ChatConnections() {
                       Reauthorize
                     </Button>
                   )}
-                <Button
-                  disabled={checking !== null}
-                  onClick={() => void check(connection.proxy_name)}
-                >
-                  {checking === connection.proxy_name
-                    ? 'Checking…'
-                    : 'Check connection'}
-                </Button>
+                {connection.connectable && (
+                  <Button
+                    variant={connection.has_grant ? 'text' : 'contained'}
+                    disabled={checking !== null}
+                    onClick={() => void connect(connection.proxy_name)}
+                  >
+                    {connection.has_grant ? 'Reconnect' : 'Connect'}
+                  </Button>
+                )}
+                {(!connection.connectable || connection.has_grant) && (
+                  <Button
+                    disabled={checking !== null}
+                    onClick={() => void check(connection.proxy_name)}
+                  >
+                    {checking === connection.proxy_name
+                      ? 'Checking…'
+                      : 'Check connection'}
+                  </Button>
+                )}
+                {connection.connectable && connection.has_grant && (
+                  <Button
+                    color="error"
+                    disabled={checking !== null}
+                    onClick={() => void disconnect(connection.proxy_name)}
+                  >
+                    Disconnect
+                  </Button>
+                )}
               </Stack>
             </Paper>
           ))}

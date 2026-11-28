@@ -6,7 +6,8 @@ args = `arg="$(filter-out $@,$(MAKECMDGOALS))" && echo $${arg:-${1}}`
 # Automatically include --profile auth if auth is enabled in .env
 AUTH_PROFILE := $(shell grep -q 'DEVELOPMENT_ONLY_REQUIRE_AUTH=true' .env 2>/dev/null && echo '--profile auth' || echo '')
 # Automatically include --profile external-mcp when its local integration is enabled.
-EXTERNAL_MCP_PROFILE := $(shell grep -q '^MCP_EXTERNAL_ENABLED=true' .env 2>/dev/null && echo '--profile external-mcp' || echo '')
+# The local gateway signs users in through Authentik, so it brings the auth profile.
+EXTERNAL_MCP_PROFILE := $(shell grep -q '^MCP_EXTERNAL_ENABLED=true' .env 2>/dev/null && echo '--profile external-mcp --profile auth' || echo '')
 # Automatically include the local trace collector when enabled in .env.
 OTEL_PROFILE := $(shell grep -q '^OTEL_COLLECTOR_ENABLED=true' .env 2>/dev/null && echo '--profile tracing' || echo '')
 COMPOSE_PROFILES := $(AUTH_PROFILE) $(EXTERNAL_MCP_PROFILE) $(OTEL_PROFILE)
@@ -298,30 +299,17 @@ otel_disable:
 	@perl -pi -e 's|^TELEMETRY_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces\s*$$|TELEMETRY_OTLP_ENDPOINT=\n|' .env
 	@echo "Local tracing disabled in .env. Run 'make down && make up' to apply."
 
+# Puts every dev MCP server behind the local Pomerium gateway (user_oauth) and
+# writes the settings that needs into .env; see scripts/dev_external_mcp.py.
 .PHONY: external_mcp_enable
 external_mcp_enable:
-	@test -f .env || cp .env.example .env
-	@grep -q '^MCP_EXTERNAL_ENABLED=' .env 2>/dev/null \
-		&& perl -pi -e 's/^MCP_EXTERNAL_ENABLED=.*/MCP_EXTERNAL_ENABLED=true/' .env \
-		|| echo 'MCP_EXTERNAL_ENABLED=true' >> .env
-	@echo "External MCP enabled in .env. Run 'make down && make up' to apply."
+	@python3 scripts/dev_external_mcp.py enable
+	@echo "External MCP enabled. Run 'make down && make up', then connect each gateway on Chat Connections."
 
 .PHONY: external_mcp_disable
 external_mcp_disable:
-	@test -f .env || cp .env.example .env
-	@grep -q '^MCP_EXTERNAL_ENABLED=' .env 2>/dev/null \
-		&& perl -pi -e 's/^MCP_EXTERNAL_ENABLED=.*/MCP_EXTERNAL_ENABLED=false/' .env \
-		|| echo 'MCP_EXTERNAL_ENABLED=false' >> .env
+	@python3 scripts/dev_external_mcp.py disable
 	@echo "External MCP disabled in .env. Run 'make down && make up' to apply."
-
-# Only the external-mcp-oauth profile needs this; the default local wiring uses
-# the PAT adapter and has no per-user credential. Renews from the stored refresh
-# token when one is still valid, so a browser round trip is monthly, not hourly.
-.PHONY: external_mcp_login
-external_mcp_login:
-	@python3 scripts/external_mcp_login.py $(ARGS)
-	@docker compose up -d --force-recreate --no-deps seizu seizu-temporal-worker
-	@echo "External MCP token applied. Reload /app/toolsets to discover GitHub tools."
 
 .PHONY: apoc_enable
 apoc_enable:

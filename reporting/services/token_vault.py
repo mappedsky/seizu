@@ -18,6 +18,10 @@ grant until it has reloaded.
 
 Grants are never written to logs or model context; ``list_grants`` returns
 metadata only.
+
+The vault also keeps Seizu's own dynamic client registrations with gateway
+authorization servers (STO-016). A registration's secret is what spends every
+refresh token issued to that client, so it is encrypted like a grant.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from typing import Any
 from reporting.services import encryption, report_store
 
 _AAD_PREFIX = b"seizu-delegated-token-v1\x00"
+_CLIENT_AAD_PREFIX = b"seizu-oauth-client-v1\x00"
 
 
 class VaultError(RuntimeError):
@@ -47,6 +52,20 @@ class DelegatedGrant:
     access_token_expires_at: int | None = None
     scope: str | None = None
     issuer: str | None = None
+    revocation_endpoint: str | None = None
+    # The protected resource the grant was issued for (RFC 8707), resent on refresh.
+    resource: str | None = None
+
+
+@dataclass(frozen=True)
+class ClientRegistration:
+    """Seizu's client at one authorization server, as that server registered it."""
+
+    client_id: str
+    redirect_uri: str
+    client_secret: str | None = None
+    # "none" for a public client, which proves itself with PKCE alone.
+    token_endpoint_auth_method: str = "client_secret_basic"
 
 
 @dataclass(frozen=True)
@@ -168,3 +187,52 @@ async def list_grants(user_id: str) -> list[GrantSummary]:
         )
         for row in await report_store.list_delegated_tokens(user_id)
     ]
+
+
+def _client_associated_data(issuer: str, client_id: str) -> bytes:
+    return _CLIENT_AAD_PREFIX + json.dumps([issuer, client_id], separators=(",", ":")).encode()
+
+
+async def save_client(issuer: str, registration: ClientRegistration) -> None:
+    """Store a registration Seizu obtained from ``issuer``, replacing one with the same client ID."""
+    if not (issuer and registration.client_id and registration.redirect_uri):
+        raise ValueError("a client registration needs an issuer, a client ID and a redirect URI")
+    cipher = encryption.delegated_token_cipher()
+    sealed = await cipher.encrypt(
+        json.dumps(asdict(registration), separators=(",", ":")).encode(),
+        _client_associated_data(issuer, registration.client_id),
+    )
+    await report_store.put_oauth_client(
+        {
+            "issuer": issuer,
+            "client_id": registration.client_id,
+            "redirect_uri": registration.redirect_uri,
+            "key_id": cipher.key_id(sealed),
+            "ciphertext": base64.b64encode(sealed).decode("ascii"),
+        }
+    )
+
+
+async def _open_client(row: dict[str, Any] | None) -> ClientRegistration | None:
+    if row is None:
+        return None
+    cipher = encryption.delegated_token_cipher()
+    try:
+        sealed = base64.b64decode(row["ciphertext"], validate=True)
+        data = json.loads(await cipher.decrypt(sealed, _client_associated_data(row["issuer"], row["client_id"])))
+        registration = ClientRegistration(**data)
+    except (binascii.Error, encryption.DecryptionError, ValueError, TypeError) as exc:
+        raise VaultError(f"stored client registration for {row['issuer']!r} cannot be read") from exc
+    if registration.client_id != row["client_id"] or registration.redirect_uri != row["redirect_uri"]:
+        raise VaultError(f"stored client registration for {row['issuer']!r} does not match its row")
+    return registration
+
+
+async def load_client(issuer: str, client_id: str) -> ClientRegistration | None:
+    """Return the registration a grant's refresh needs, or None if it is gone."""
+    return await _open_client(await report_store.get_oauth_client(issuer, client_id))
+
+
+async def find_client(issuer: str, redirect_uri: str) -> ClientRegistration | None:
+    """Return the newest registration with ``issuer`` for ``redirect_uri``, or None."""
+    return await _open_client(await report_store.find_oauth_client(issuer, redirect_uri))

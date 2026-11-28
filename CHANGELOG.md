@@ -8,15 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-user OAuth for external MCP gateways (`auth_mode: "user_oauth"`).** Each
+  user connects a gateway once from Chat Connections (**Connect**,
+  **Reconnect**, **Disconnect**), and every request Seizu then makes for that
+  user, interactive or scheduled, carries the user's own access token. Seizu
+  discovers the gateway's authorization server from its 401, registers itself
+  dynamically or uses a pre-registered `oauth.client_id`, and keeps the user's
+  grant in the token vault, refreshing it as needed. New settings:
+  `MCP_EXTERNAL_CA_FILE` (an extra CA for gateways, added to the system store)
+  and `MCP_EXTERNAL_OAUTH_REDIRECT_URI`. Migration `0018` adds encrypted client
+  registrations. See `docs/root/install/external-mcp.md#per-user-oauth-user_oauth`.
 - **Token vault for delegated external MCP grants.** A new `delegated_tokens`
   table (migration `0017`, applied automatically) stores each user's OAuth grant
   for an external MCP gateway, encrypted with AES-256-GCM. It uses keys from the
   new `DELEGATED_TOKEN_ENCRYPTION_KEYS` setting (`id:base64key[,…]`, first entry
   current), which must differ from `SESSION_TOKEN_ENCRYPTION_KEY` and reach both
-  the web service and the Temporal worker. Nothing reads or writes the vault yet:
-  it is the storage for the delegated-OAuth client tracked in
-  [#312](https://github.com/mappedsky/seizu/issues/312), so the setting can stay
-  unset until that ships. The session and OAuth state cookies now encrypt
+  the web service and the Temporal worker. It is required only by `user_oauth`
+  proxies (below). The session and OAuth state cookies now encrypt
   through the same swappable cipher interface, with an unchanged wire format, so
   existing sessions stay valid. See
   [AGT-059](docs/root/dev/decisions/chat-agent.md) and
@@ -47,6 +55,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `exclude-newer-package` entry, to be removed once the window passes it.
 - **Agent Plugin scripts run through their shebang when the workspace does not
   keep the executable bit**, as on an S3-backed sandbox.
+- **Local development reaches every external MCP server through one gateway.**
+  The `external-mcp` Compose profile now runs Pomerium Core in front of the
+  GitHub, deps.dev, elicitation-tester and new whoami servers, and brings the
+  `auth` profile with it. `make external_mcp_enable` writes the matching
+  `user_oauth` proxy list, CA path and vault key into `.env`, keeping the old
+  file as `.env.bak`; connect each gateway on Chat Connections afterwards.
+
+### Removed
+
+- **The Obot OAuth proxy profile (`external-mcp-oauth`) and `make
+  external_mcp_login`.** Seizu's `user_oauth` connect flow replaces both.
 
 ## [5.7.1] - 2026-11-19
 

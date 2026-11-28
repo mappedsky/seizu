@@ -2164,6 +2164,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/chat/connections/{proxy_name}/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Connect
+         * @description Start authorizing Seizu at a user_oauth gateway; the browser must follow the returned URL.
+         */
+        post: operations["connect_api_v1_chat_connections__proxy_name__connect_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/chat/connections/{proxy_name}/grant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Disconnect
+         * @description Revoke and delete the user's grant for a user_oauth gateway.
+         */
+        delete: operations["disconnect_api_v1_chat_connections__proxy_name__grant_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/query/generate/options": {
         parameters: {
             query?: never;
@@ -2966,6 +3006,11 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
+        /** ExternalMCPAuthorizationStart */
+        ExternalMCPAuthorizationStart: {
+            /** Authorization Url */
+            authorization_url: string;
+        };
         /** ExternalMCPConnection */
         ExternalMCPConnection: {
             /** Proxy Name */
@@ -2984,6 +3029,16 @@ export interface components {
             reauthorize_url?: string | null;
             /** Elicitations */
             elicitations?: components["schemas"]["ExternalMCPElicitation"][];
+            /**
+             * Connectable
+             * @default false
+             */
+            connectable: boolean;
+            /**
+             * Has Grant
+             * @default false
+             */
+            has_grant: boolean;
         };
         /** ExternalMCPConnectionsResponse */
         ExternalMCPConnectionsResponse: {
@@ -9728,6 +9783,66 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ExternalMCPConnection"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    connect_api_v1_chat_connections__proxy_name__connect_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                proxy_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExternalMCPAuthorizationStart"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disconnect_api_v1_chat_connections__proxy_name__grant_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                proxy_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

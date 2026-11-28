@@ -1,6 +1,6 @@
 #!/bin/bash
 
-mkdir -p ./.compose/aws ./.compose/telegraf ./.compose/elasticmq ./.compose/neo4j ./.compose/seizu ./.compose/authentik/blueprints ./.compose/otel \
+mkdir -p ./.compose/aws ./.compose/telegraf ./.compose/elasticmq ./.compose/neo4j ./.compose/seizu ./.compose/authentik/blueprints ./.compose/otel ./.compose/external-mcp-gateway \
   ./.compose/cartography/analysis \
   ./.compose/cartography/reports/aibom \
   ./.compose/cartography/reports/docker-scout \

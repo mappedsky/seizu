@@ -3278,11 +3278,11 @@ the identity provider and validated by the gateway (ContextForge,
 agentgateway). Seizu's side is the same in both cases. Shared static API tokens
 remain supported through `bearer` plus `token_env`.
 
-Status: the vault exists. The OAuth client, its refresh and the connect flow do
-not yet ([#312](https://github.com/mappedsky/seizu/issues/312)). Until they
-land, `user_authorization` stays experimental and the identity-assertion modes
-(`header_delegation`, and `m2m_jwt` with target headers) behave as AGT-048
-described.
+This is `auth_mode: user_oauth`, built as AGT-060 describes. The
+identity-assertion modes (`header_delegation`, and `m2m_jwt` with target
+headers) remain for gateways that implement that contract, and per-user access
+stays experimental until the validation in
+[#312](https://github.com/mappedsky/seizu/issues/312) completes.
 
 **Why:** the identity-assertion contract asked the gateway to trust Seizu's word
 for who the user is. That is impersonation, and every open-source gateway
@@ -3365,3 +3365,71 @@ administration.
 - replay a tool call after recovery;
 - keep a grant anywhere but the vault, or let one reach logs, model context or
   the sandbox.
+
+## AGT-060 — The connect callback trusts only its own browser, and a refresh never overwrites a newer grant
+
+**Applies to:** `reporting/services/external_mcp_oauth.py`,
+`reporting/routes/chat_connections.py`, `external_mcp._session`
+
+**What happens when a user connects:** the connect request stores the OAuth
+state, PKCE verifier, user and gateway in an encrypted, path-scoped
+`seizu_mcp_connect` cookie. The callback completes only for the browser
+presenting that cookie, with a matching state.
+
+**Why:** server-side state keyed by `state` alone fails to a linking attack. An
+attacker starts a connection, sends the authorization URL to a victim, and the
+victim's authorization is stored under the attacker's Seizu user, who then acts
+as the victim at the gateway. Binding the response to the initiating browser is
+what refuses it. The cookie also needs no table and expires on its own.
+
+**Discovery is pinned to the proxy.** The protected-resource metadata, and the
+resource it names, must be on the configured proxy's origin. The
+authorization-server metadata must name exactly the issuer it was fetched for
+(RFC 8414 §3.3). Without these checks a gateway response could redirect Seizu's
+tokens and client secret to another host. The token endpoint is therefore
+stored inside the grant's ciphertext (STO-015), not looked up again on refresh.
+
+**A grant without a refresh token is refused at connect.** It would serve
+interactive turns for an hour and then fail every detached run. Refusing it says
+so at the point the user can still fix it.
+
+**Refresh:**
+- An access token within a minute of expiry is refreshed in a per-process lock.
+- The write is conditional on the version read. A loser reloads and uses the
+  winner's grant.
+- An `invalid_grant` counts as revoked only if the reload shows no newer grant.
+
+Against Pomerium v0.34.2, two refreshes of one token sent at once both
+succeeded. The version check kept exactly one, and the next call still worked.
+
+**A 401 with the user's token is `authorization_required`, never a service
+failure.** It drops the stored access token, so the next use refreshes, and the
+call is not retried (the no-replay rule in AGT-059). With `user_oauth` the
+token is the user's, so the refusal is theirs to fix by connecting again.
+
+**Basic client authentication sends the ID and secret unencoded.** RFC 6749
+§2.3.1 asks for form-encoding first. Pomerium answered "client secret mismatch"
+to an encoded secret containing `+` and `/`. A server that does decode leaves a
+value without `%` unchanged, so raw values work with both.
+
+**`MCP_EXTERNAL_CA_FILE` adds to the system trust store; it never replaces it.**
+`SSL_CERT_FILE` would replace the whole bundle for the process, so model APIs and
+everything else Seizu calls would stop verifying.
+
+**Pomerium and refresh-token rotation.** In the dev stack, two routes connected
+in one Pomerium sign-in each hold a copy of the identity provider's refresh
+token, which Pomerium refreshes to re-create the session. Authentik's default
+(`refresh_token_threshold: seconds=0`) replaced and revoked that token at the
+first route's refresh. The second route's refresh then failed with
+`invalid_grant`, every time. With the threshold at seven days (and a 365-day
+lifetime), both routes refreshed repeatedly. This is a property of Pomerium in
+front of any rotating identity provider, so the install guide tells operators to
+configure the provider rather than Seizu working around it.
+
+**Don't:**
+- complete a callback without the initiating cookie;
+- accept discovery metadata from another origin or issuer;
+- store a grant that has no refresh token;
+- overwrite a grant unconditionally after a refresh;
+- treat a user-token 401 as a service-credential failure, or retry the call
+  after one.

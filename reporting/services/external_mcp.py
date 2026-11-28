@@ -40,7 +40,7 @@ from reporting.schema.external_mcp import (
     ExternalMCPTransport,
 )
 from reporting.schema.mcp_config import ToolItem, ToolsetListItem
-from reporting.services import external_mcp_connections, external_mcp_tokens, telemetry
+from reporting.services import external_mcp_connections, external_mcp_oauth, external_mcp_tokens, telemetry
 from reporting.services.external_mcp_elicitation import (
     MAX_ELICITATIONS,
     ClientSession,
@@ -97,8 +97,13 @@ class ExternalMCPGatewayBlocked(ExternalMCPAuthenticationRequired):
         self.status = status
         self.elicitations = elicitations or []
         self.reauthorize_url = proxy.user_authorization.reauthorize_url if proxy.user_authorization else None
+        reauthorize = (
+            "Connect your account for this gateway on Chat Connections, then retry."
+            if proxy.auth_mode == ExternalMCPAuthMode.USER_OAUTH
+            else "Reauthorize your account at the gateway, then check the connection."
+        )
         guidance = {
-            "authorization_required": "Reauthorize your account at the gateway, then check the connection.",
+            "authorization_required": reauthorize,
             "interaction_required": "The gateway requires user interaction. Review it on Chat Connections, then retry.",
             "service_authentication_failed": "Ask an administrator to check Seizu's gateway service authentication.",
             "permission_denied": "The gateway denied access. Check the upstream account's permissions.",
@@ -294,6 +299,12 @@ def build_headers(
     proxy: ExternalMCPProxy, current_user: CurrentUser, *, acquired_token: str | None = None
 ) -> dict[str, str]:
     """Build a new header dictionary for exactly one user and operation."""
+    if proxy.auth_mode == ExternalMCPAuthMode.USER_OAUTH:
+        # The user's own access token is the whole identity: no target headers.
+        token = (acquired_token or "").strip()
+        if not token or "\r" in token or "\n" in token:
+            raise ExternalMCPGatewayBlocked(proxy, "authorization_required")
+        return {"Authorization": f"Bearer {token}"}
     headers: dict[str, str] = {}
     for source, header in proxy.header_mappings.items():
         value = _identity_value(source, current_user)
@@ -356,6 +367,7 @@ async def _transport(
             headers=headers,
             timeout=timeout,
             auth=auth,
+            verify=external_mcp_oauth.ssl_verification(),
             follow_redirects=False,
             event_hooks={"response": [capture_oauth_challenge]},
         )
@@ -375,6 +387,7 @@ async def _transport(
     async with httpx2.AsyncClient(
         headers=headers,
         timeout=timeout,
+        verify=external_mcp_oauth.ssl_verification(),
         follow_redirects=False,
         event_hooks={"response": [capture_oauth_challenge]},
     ) as http_client:
@@ -414,7 +427,18 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
         return status
 
     try:
-        if proxy.client_credentials:
+        if proxy.auth_mode == ExternalMCPAuthMode.USER_OAUTH:
+            try:
+                acquired_token = await external_mcp_oauth.access_token(proxy, current_user)
+            except external_mcp_oauth.GrantUnavailable:
+                raise ExternalMCPGatewayBlocked(proxy, "authorization_required") from None
+            except external_mcp_oauth.GatewayOAuthUnavailable:
+                raise ExternalMCPGatewayBlocked(proxy, "unavailable") from None
+            except RuntimeError as exc:
+                # A missing vault key or CA file: an administrator's problem, not the user's.
+                logger.error("External MCP proxy %s cannot use stored grants: %s", proxy.name, exc)
+                raise ExternalMCPGatewayBlocked(proxy, "service_authentication_failed") from None
+        elif proxy.client_credentials:
             try:
                 acquired_token = await external_mcp_tokens.service_token(proxy)
             except external_mcp_tokens.ServiceCredentialError:
@@ -456,7 +480,7 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
             if not isinstance(exc, Exception):
                 raise
             raise blocked from None
-        required = required_elicitations(exc) if proxy.user_authorization else None
+        required = required_elicitations(exc) if proxy.per_user else None
         if required is not None or interaction_requested:
             for params in required or []:
                 item = safe_elicitation(proxy, params)
@@ -473,11 +497,14 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
         challenge = oauth_challenges[-1] if oauth_challenges else _oauth_challenge(exc, proxy.name)
         if challenge is not None:
             invalidate_discovery_cache(current_user)
-            if challenge.status == "service_authentication_failed" or (
+            if proxy.auth_mode == ExternalMCPAuthMode.USER_OAUTH:
+                if acquired_token:
+                    await external_mcp_oauth.forget_access_token(proxy, current_user, acquired_token)
+            elif challenge.status == "service_authentication_failed" or (
                 challenge.status is None and proxy.auth_mode == ExternalMCPAuthMode.M2M_JWT
             ):
                 external_mcp_tokens.invalidate_service_token(proxy, acquired_token)
-            if proxy.user_authorization:
+            if proxy.per_user:
                 status = challenge.status or "service_authentication_failed"
                 await external_mcp_connections.observe(proxy, current_user, status)
                 raise ExternalMCPGatewayBlocked(proxy, status) from None
@@ -506,9 +533,16 @@ def _gateway_blocked(exc: BaseException) -> ExternalMCPGatewayBlocked | None:
 
 
 def _gateway_challenge_from_response(response: Any, proxy: ExternalMCPProxy) -> OAuthChallenge | None:
-    if proxy.user_authorization:
+    if proxy.per_user:
         if response.status_code == 401:
-            return OAuthChallenge(proxy.name, status="service_authentication_failed")
+            # With the user's own token, a refusal means they must connect (again);
+            # with service credentials, it is the service that was refused.
+            status: ConnectionStatus = (
+                "authorization_required"
+                if proxy.auth_mode == ExternalMCPAuthMode.USER_OAUTH
+                else "service_authentication_failed"
+            )
+            return OAuthChallenge(proxy.name, status=status)
         if response.status_code == 403:
             return OAuthChallenge(proxy.name, status="permission_denied")
         return None
@@ -644,7 +678,12 @@ def invalidate_discovery_cache(current_user: CurrentUser | None = None) -> None:
         if scope is not None:
             scope.clear()
         return
-    user_id = current_user.user.user_id
+    invalidate_user_discovery_cache(current_user.user.user_id)
+
+
+def invalidate_user_discovery_cache(user_id: str) -> None:
+    """Drop one user's cached discovery, by user ID, for callers without a ``CurrentUser``."""
+    scope = _discovery_scope.get()
     for key in [key for key in _discovery_ttl_cache if key[0] == user_id]:
         del _discovery_ttl_cache[key]
     if scope is not None:
@@ -911,7 +950,7 @@ async def _call_tool_once(
             for request in requests
         )
         if not (modern and chat_elicitations.enabled(proxy) and allowed):
-            if not proxy.user_authorization:
+            if not proxy.per_user:
                 raise ExternalMCPError("External MCP server requested unsupported user interaction")
             pending = []
             for request in requests:
