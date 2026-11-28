@@ -128,7 +128,7 @@ make generate_openapi   # export schema/openapi.json (no running server)
 make generate_client LANG=go
 make seed_dashboard [ARGS="--force|--dry-run|export"]
 make auth_enable / auth_disable
-make external_mcp_enable / external_mcp_disable / external_mcp_login
+make external_mcp_enable / external_mcp_disable   # dev MCP servers behind the local Pomerium gateway
 make build_cartography_worker     # build the cartography sync-worker image
 make lock_cartography_requirements # re-lock the sync worker's hash-pinned pip deps
 make cartography_contract_test    # verify registry flags against the pinned CLI
@@ -303,14 +303,22 @@ into `user_authorization`, with durable owner-scoped status at
 only when an enabled proxy opts in); mesh deployments use `header_delegation`
 without a bearer. Standard URL elicitation exposes bounded, owner-only recovery links;
 detached runs never accept consent or automatically replay the operation.
-The gateway owns upstream user grants (STO-013). Per-user access is moving to
-delegated OAuth: each user authorizes Seizu once through the gateway's MCP
-OAuth flow, and Seizu keeps that grant in the token vault
-(`reporting/services/token_vault.py`) for interactive and detached runs alike
+The gateway owns upstream user grants (STO-013). Per-user access is delegated
+OAuth: `auth_mode: user_oauth`
+(`reporting/services/external_mcp_oauth.py`). Each user connects a gateway once
+from Chat Connections (`POST /api/v1/chat/connections/{proxy}/connect`, then the
+browser-only `GET .../oauth/callback`), and every request then carries that
+user's own access token, in interactive and detached runs alike
 ([`AGT-059`](docs/root/dev/decisions/chat-agent.md), which supersedes AGT-048).
-The vault and its cipher exist; the OAuth client and connect flow are tracked
-in #312, and until they land per-user delegation and recovery stay
-experimental. Shared-token external access is not covered by that designation.
+The callback accepts only the browser carrying the `seizu_mcp_connect` cookie set
+by the connect request. A refresh writes back only at the version it read, a 401
+drops the stored access token and reports `authorization_required` without
+replay, and no failure ever falls back to another credential
+([`AGT-060`](docs/root/dev/decisions/chat-agent.md)). Dynamic client
+registrations are stored encrypted beside the grants
+([`STO-016`](docs/root/dev/decisions/report-store.md)). Validation across
+gateways continues in #312, and per-user delegation stays experimental until it
+completes. Shared-token external access is not covered by that designation.
 
 The vault encrypts each grant as one value, bound to its owner, proxy and
 resource, under `DELEGATED_TOKEN_ENCRYPTION_KEYS`: a keyring separate from
@@ -323,11 +331,15 @@ Streamable HTTP negotiates modern-first with legacy fallback; `protocol_mode:
 legacy` skips discovery. SSE always initializes (AGT-049).
 
 `MCP_EXTERNAL_ENABLED` gates both the agent capability and the optional local
-Compose profile (`make external_mcp_enable` / `make external_mcp_disable`). The
-local `external-mcp` profile wires Seizu straight to the PAT adapter — one
-service identity, read-only, no credential to expire; the obot OAuth proxy is
-the separate `external-mcp-oauth` profile, for exercising the RFC 9728 challenge
-path, and is the only thing `make external_mcp_login` is for.
+Compose profile (`make external_mcp_enable` / `make external_mcp_disable`). In
+dev every MCP server sits behind one gateway, Pomerium Core
+(`external-mcp-gateway`, config in `.config/dev/external-mcp-gateway/`), as a
+`user_oauth` proxy. The profile brings the `auth` profile, since the gateway
+signs users in through Authentik with its own client (AUTH-004). Its CA is
+generated into `.compose/external-mcp-gateway/`, constrained to
+`*.localhost.pomerium.io` with its key discarded, and trusted through
+`MCP_EXTERNAL_CA_FILE`; browsers accept its warning rather than trusting it. `make external_mcp_enable` writes the dev proxy list
+(`scripts/dev_external_mcp.py`) into `.env`.
 `MCP_EXTERNAL_PROXIES` is a JSON array of SSE or Streamable HTTP proxy
 definitions used by the chat agent. External tools are dynamically discovered,
 namespaced as `ext__<proxy>__<tool>`, and deliberately not re-exported from
@@ -354,8 +366,8 @@ surface as a structured authentication block, and M2M 401s have a distinct
 `ExternalMCPTokenExpired` exception before chat normalization. Interactive
 Temporal turns do not persist the browser bearer token, so use M2M plus target
 OIDC subject and issuer headers (or trusted header delegation) for
-detached/headless execution; never delegate Seizu's local user ID (AGT-048,
-superseded by AGT-059 once the delegated-OAuth client lands).
+detached/headless execution, or `user_oauth`, whose stored grant needs no
+browser token; never delegate Seizu's local user ID (AGT-059).
 Decisions: [`AGT-010`](docs/root/dev/decisions/chat-agent.md). Docs:
 `docs/root/install/external-mcp.md`.
 

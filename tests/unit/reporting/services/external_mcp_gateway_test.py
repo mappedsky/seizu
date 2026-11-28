@@ -253,3 +253,115 @@ async def test_rejected_m2m_invalidates_token_without_replaying_tool(mocker):
         await external_mcp.call_tool(config, "write", {}, user())
     assert calls == 1
     assert next(iter(external_mcp_tokens._credentials.values())).token == ""
+
+
+# ── user_oauth: the user's own token is the whole identity ─────────────────
+
+
+def oauth_proxy(**updates):
+    return ExternalMCPProxy.model_validate(
+        {
+            "name": "deps",
+            "url": "https://deps.gateway.test/mcp",
+            "transport": "streamable_http",
+            "auth_mode": "user_oauth",
+            **updates,
+        }
+    )
+
+
+@pytest.mark.parametrize("transport", ["sse", "streamable_http"])
+async def test_user_oauth_sends_only_the_users_token_and_drops_it_when_refused(mocker, transport):
+    real_client = httpx2.AsyncClient
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx2.Response(
+            401, headers={"WWW-Authenticate": 'Bearer resource_metadata="https://deps.gateway.test/m"'}
+        )
+
+    mocker.patch.object(
+        external_mcp.httpx2,
+        "AsyncClient",
+        side_effect=lambda **kwargs: real_client(transport=httpx2.MockTransport(handle), **kwargs),
+    )
+    mocker.patch.object(external_mcp.external_mcp_oauth, "access_token", return_value="alice-token")
+    forget = mocker.patch.object(external_mcp.external_mcp_oauth, "forget_access_token")
+    with pytest.raises(external_mcp.ExternalMCPGatewayBlocked) as caught:
+        await external_mcp.list_proxy_tools(oauth_proxy(transport=transport), user("alice"))
+    assert caught.value.status == "authorization_required"
+    assert "Connect your account" in str(caught.value)
+    assert requests[0].headers["authorization"] == "Bearer alice-token"
+    assert "x-target-user-id" not in requests[0].headers
+    forget.assert_awaited_once()
+    assert forget.await_args.args[2] == "alice-token"
+    observation = external_mcp_connections.report_store.record_external_mcp_connection.call_args.args[0]
+    assert observation["status"] == "authorization_required"
+
+
+@pytest.mark.parametrize(
+    ("raised", "status"),
+    [
+        (external_mcp.external_mcp_oauth.GrantUnavailable("no grant"), "authorization_required"),
+        (external_mcp.external_mcp_oauth.GatewayOAuthUnavailable("down"), "unavailable"),
+        (RuntimeError("DELEGATED_TOKEN_ENCRYPTION_KEYS must be configured"), "service_authentication_failed"),
+    ],
+)
+async def test_user_oauth_without_a_usable_grant_never_connects(mocker, raised, status):
+    transport = mocker.patch.object(external_mcp, "_transport")
+    mocker.patch.object(external_mcp.external_mcp_oauth, "access_token", side_effect=raised)
+    with pytest.raises(external_mcp.ExternalMCPGatewayBlocked) as caught:
+        await external_mcp.list_proxy_tools(oauth_proxy(), user("alice"))
+    assert caught.value.status == status
+    transport.assert_not_called()
+
+
+async def test_user_oauth_detached_owners_each_send_their_own_token(mocker):
+    headers_seen = []
+
+    @asynccontextmanager
+    async def transport(config, headers, challenges, statuses):
+        headers_seen.append(headers)
+        yield (None, None)
+
+    def session_factory(*args, **kwargs):
+        session = mocker.AsyncMock()
+        session.__aenter__.return_value = session
+        session.list_tools.return_value = ListToolsResult(tools=[Tool(name="read", input_schema={"type": "object"})])
+        return session
+
+    async def access_token(config, current):
+        return f"{current.user.user_id}-token"
+
+    mocker.patch.object(external_mcp, "_transport", transport)
+    mocker.patch.object(external_mcp, "ClientSession", side_effect=session_factory)
+    mocker.patch.object(external_mcp.external_mcp_oauth, "access_token", side_effect=access_token)
+    for owner in ["alice", "bob"]:
+        await external_mcp.discover_proxy_tools(oauth_proxy(), user(owner))
+    assert headers_seen == [{"Authorization": "Bearer alice-token"}, {"Authorization": "Bearer bob-token"}]
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"token_env": "SHARED_TOKEN"},
+        {"header_mappings": {"email": "X-Target-Email"}},
+        {"client_credentials": {"token_url": "https://idp.test/token", "client_id": "c", "client_secret_env": "S"}},
+    ],
+)
+def test_user_oauth_takes_no_service_credential_or_identity_header(updates):
+    with pytest.raises(ValueError):
+        oauth_proxy(**updates)
+
+
+def test_oauth_client_settings_need_user_oauth_and_a_client_id_for_a_secret():
+    with pytest.raises(ValueError, match="requires auth_mode user_oauth"):
+        proxy(oauth={"client_id": "c"})
+    with pytest.raises(ValueError, match="pre-registered client_id"):
+        oauth_proxy(oauth={"client_secret_env": "DEPS_SECRET"})
+    configured = oauth_proxy(
+        oauth={"client_id": "c", "client_secret_env": "DEPS_SECRET", "scope": "mcp offline_access"}
+    )
+    assert configured.per_user and configured.oauth.client_id == "c"
+    assert oauth_proxy(user_authorization={"reauthorize_url": "https://deps.gateway.test/accounts"}).per_user

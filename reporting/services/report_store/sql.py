@@ -118,6 +118,19 @@ class DelegatedTokenRecord(SQLModel, table=True):  # type: ignore[call-arg]
     updated_at: str
 
 
+class OAuthClientRecord(SQLModel, table=True):  # type: ignore[call-arg]
+    """One encrypted dynamic client registration per authorization server (STO-016)."""
+
+    __tablename__ = "oauth_clients"
+
+    issuer: str = Field(primary_key=True)
+    client_id: str = Field(primary_key=True)
+    redirect_uri: str
+    key_id: str
+    ciphertext: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str
+
+
 _engine: AsyncEngine | None = None
 
 # How many times an event-log append re-reads the highest sequence after losing
@@ -1113,6 +1126,37 @@ class SQLModelReportStore(ReportStore):
             result = await session.execute(statement)
             await session.commit()
             return int(getattr(result, "rowcount", 0) or 0)
+
+    async def get_oauth_client(self, issuer: str, client_id: str) -> dict[str, Any] | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(OAuthClientRecord, (issuer, client_id))
+            return record.model_dump() if record is not None else None
+
+    async def find_oauth_client(self, issuer: str, redirect_uri: str) -> dict[str, Any] | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = (
+                await session.scalars(
+                    select(OAuthClientRecord)
+                    .where(OAuthClientRecord.issuer == issuer, OAuthClientRecord.redirect_uri == redirect_uri)
+                    .order_by(col(OAuthClientRecord.created_at).desc())
+                    .limit(1)
+                )
+            ).first()
+            return record.model_dump() if record is not None else None
+
+    async def put_oauth_client(self, record: dict[str, Any]) -> None:
+        values = {**record, "created_at": datetime.now(UTC).isoformat()}
+        async with AsyncSession(_get_engine()) as session:
+            await session.execute(
+                text(
+                    "INSERT INTO oauth_clients (issuer, client_id, redirect_uri, key_id, ciphertext, created_at) "
+                    "VALUES (:issuer, :client_id, :redirect_uri, :key_id, :ciphertext, :created_at) "
+                    "ON CONFLICT (issuer, client_id) DO UPDATE SET redirect_uri = excluded.redirect_uri, "
+                    "key_id = excluded.key_id, ciphertext = excluded.ciphertext"
+                ),
+                values,
+            )
+            await session.commit()
 
     def generate_id(self) -> str:
         return generate_report_id()

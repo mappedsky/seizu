@@ -235,4 +235,96 @@ describe('Chat connections', () => {
       await screen.findByRole('link', { name: 'Back to chat' }),
     ).toHaveAttribute('href', '/app/chat');
   });
+
+  const oauthConnection = {
+    proxy_name: 'deps',
+    status: 'unknown',
+    observed_at: null,
+    error_code: null,
+    reauthorize_url: null,
+    elicitations: [],
+    connectable: true,
+    has_grant: false,
+  };
+
+  it('connects a user_oauth gateway by sending the browser to its authorization URL', async () => {
+    fetchMock.mockImplementation(async (url: string) => ({
+      ok: true,
+      json: async () =>
+        url.endsWith('/connect')
+          ? { authorization_url: 'https://deps.gateway.test/authorize?x=1' }
+          : { connections: [oauthConnection] },
+    }));
+    const assignMock = jest.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...originalLocation, assign: assignMock },
+    });
+    try {
+      renderPage();
+      expect(await screen.findByText('Not connected')).toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: 'Check connection' }),
+      ).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+      await waitFor(() =>
+        expect(assignMock).toHaveBeenCalledWith(
+          'https://deps.gateway.test/authorize?x=1',
+        ),
+      );
+      const [url, init] = fetchMock.mock.calls.find(([called]) =>
+        String(called).endsWith('/connect'),
+      );
+      expect(url).toBe('/api/v1/chat/connections/deps/connect');
+      expect(init.method).toBe('POST');
+      expect(init.headers).toMatchObject({
+        'X-Seizu-Csrf': '1',
+        Authorization: 'Bearer browser-token',
+      });
+    } finally {
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
+  });
+
+  it('disconnects a connected user_oauth gateway', async () => {
+    fetchMock.mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({
+        connections: [
+          { ...oauthConnection, status: 'connected', has_grant: true },
+        ],
+      }),
+    }));
+    renderPage();
+    expect(await screen.findByText('Connected')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Reconnect' }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    expect(await screen.findByText('Not connected')).toBeInTheDocument();
+    const [url, init] = fetchMock.mock.calls.find(([called]) =>
+      String(called).endsWith('/grant'),
+    );
+    expect(url).toBe('/api/v1/chat/connections/deps/grant');
+    expect(init.method).toBe('DELETE');
+    expect(init.headers).toMatchObject({ 'X-Seizu-Csrf': '1' });
+  });
+
+  it('reports the result of a connection attempt from the callback', async () => {
+    renderPage('browser-token', true, '/app/chat/connections?connected=deps');
+    expect(await screen.findByText(/Connected deps/)).toBeInTheDocument();
+    cleanup();
+    renderPage(
+      'browser-token',
+      true,
+      '/app/chat/connections?connect_error=no_refresh_token',
+    );
+    expect(
+      await screen.findByText(/did not grant offline access/),
+    ).toBeInTheDocument();
+  });
 });

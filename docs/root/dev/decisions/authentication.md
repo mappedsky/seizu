@@ -109,31 +109,62 @@ OIDC exchange is plaintext HTTP.
 `localhost` resolves to `::1` first inside the container, and an IPv4-only
 listener gets connection-refused for half the lookups.
 
-## AUTH-003 — Optional local services reuse Authentik without reusing Seizu's client
+## AUTH-003 — Optional local services reuse Authentik without reusing Seizu's client — superseded by AUTH-004
 
-**Applies to:** `.config/dev/authentik/blueprints/seizu.yaml`,
-`.config/dev/external-mcp-proxy/`, the `external-mcp` Compose profile
+**Superseded by:** AUTH-004. The local external MCP proxy was Obot, with its own
+confidential Authentik client, and `make external_mcp_login` stored a
+single-user proxy bearer in `.env`. Pomerium replaced Obot, and Seizu's own
+`user_oauth` client replaced the login script; the separate-client principle
+carries forward.
 
-The local external MCP OAuth proxy has its own confidential Authentik client,
-because Obot requires a client secret while Seizu and its CLI intentionally use
-a public PKCE/device client. Both applications use the same Authentik tenant,
-users, and browser SSO session. The proxy's supervised in-container loopback
-forwarder reaches Authentik as `localhost:9000`, matching AUTH-002; the GitHub
-PAT remains a separate credential used only on the proxy-to-GitHub MCP hop.
-For the single-user local profile, `make external_mcp_login` registers a
-per-login public PKCE client with Obot, completes authorization through that
-same Authentik application, and stores the resulting proxy bearer in the local
-`.env`; it never handles or replaces the GitHub PAT.
+## AUTH-004 — The local MCP gateway is Pomerium, with its own Authentik clients
 
-**Why not a Google development client:** it splits local authentication across
-two identity providers, makes the external-MCP path test a different login and
-session model from Seizu, and requires every developer to provision unrelated
-cloud OAuth credentials.
+**Applies to:** `.config/dev/external-mcp-gateway/`,
+`.config/dev/authentik/blueprints/external-mcp-gateway.yaml`, the `external-mcp`
+Compose profile
 
-**Why not reuse the `seizu` OAuth client:** changing that public client to
-confidential would break the CLI's device flow and the no-secret PKCE contract.
-A separate client is the standard OAuth boundary and still provides unified
-SSO because Authentik owns both applications.
+**What it is:** Pomerium Core fronts every dev MCP server.
 
-**Don't:** point the proxy at `authentik-server:9000`; Authentik derives its
-issuer from that host and creates the split-host identity described by AUTH-001.
+- **Its own Authentik clients.** It signs users in through
+  `seizu-external-mcp-gateway`, and the whoami route's upstream grant uses
+  `seizu-external-mcp-whoami`. Both are confidential clients separate from
+  Seizu's public PKCE/device client, in the same tenant, so sign-in is still one
+  SSO session.
+- **`localhost:9000` through a forwarder.** Like the backend (AUTH-002), the
+  gateway container reaches Authentik as `localhost:9000` through a supervised
+  socat forwarder. That is why its image copies Pomerium's distroless binary
+  onto Debian.
+- **Its own CA.** Pomerium v0.34.2 builds its MCP metadata URLs with a fixed
+  `https` scheme (`internal/mcp/handler_metadata.go`). With `insecure_server`
+  on `http://localhost:8450-8454` it still advertised
+  `https://localhost:8451` as issuer and endpoints, which Seizu rejects as
+  another origin and the browser cannot reach. So the gateway serves HTTPS from
+  a CA it generates. Seizu trusts that CA through `MCP_EXTERNAL_CA_FILE`.
+- **Browsers accept the warning; they never trust the CA.** A trusted root is a
+  standing risk on the developer's machine, beyond this project, and the browser
+  reaches the gateway only while connecting an account. So the docs ask users
+  to accept the certificate warning on those visits, and nothing installs the
+  CA into a browser or system store.
+- **A CA that vouches for nothing else.** Seizu does trust it, for external MCP
+  traffic. It is name-constrained to `localhost.pomerium.io` (IP addresses
+  excluded), and its key is generated outside the bind mount and deleted once
+  the server certificate is signed. OpenSSL and NSS both rejected an
+  out-of-scope certificate from a CA built this way. The cost: nothing can renew
+  the certificate, so it is replaced together with the CA near expiry.
+
+**Why Pomerium:** among the open-source gateways evaluated in #312, it is the
+one that acts as its own MCP OAuth server, with 365-day client-bound refresh
+tokens. It also stores per-user upstream grants by user ID and exposes
+per-route connection status. Running it locally means dev exercises the same
+`user_oauth` path as production.
+
+**Why the gateway client's refresh token is not rotated on every use:** every
+route a user connects in one sign-in carries a copy of it. Authentik's default
+revokes that copy at the first route's refresh and strands the rest (AGT-060).
+The blueprint therefore sets a 365-day lifetime and a seven-day renewal
+threshold.
+
+**Don't:**
+- point the gateway at `authentik-server:9000` (AUTH-001);
+- reuse Seizu's client for the gateway;
+- set the gateway client's `refresh_token_threshold` back to `seconds=0`.

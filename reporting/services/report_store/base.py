@@ -196,6 +196,18 @@ class ReportStore(ABC):
         """Delete a user's delegated grant rows, narrowed by proxy and resource; return how many."""
 
     @abstractmethod
+    async def get_oauth_client(self, issuer: str, client_id: str) -> dict[str, Any] | None:
+        """Return one stored client registration row, ciphertext included, or None."""
+
+    @abstractmethod
+    async def find_oauth_client(self, issuer: str, redirect_uri: str) -> dict[str, Any] | None:
+        """Return the newest registration for this issuer and redirect URI, or None."""
+
+    @abstractmethod
+    async def put_oauth_client(self, record: dict[str, Any]) -> None:
+        """Insert or replace a client registration row."""
+
+    @abstractmethod
     def generate_id(self) -> str:
         """Return a new UUIDv7 identifier."""
 

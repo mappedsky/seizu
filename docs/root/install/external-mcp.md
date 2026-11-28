@@ -113,10 +113,11 @@ Each object accepts:
 | `url` | Absolute `http` or `https` MCP proxy endpoint. Embedded credentials are rejected. |
 | `transport` | `sse` (the issue-compatible default) or `streamable_http` (recommended for new servers). |
 | `protocol_mode` | `auto` (default): Streamable HTTP tries modern discovery, with legacy handshake fallback. `legacy`: skip discovery and initialize directly. SSE always uses the legacy handshake. |
-| `auth_mode` | `bearer`, `header_delegation`, or `m2m_jwt`. |
+| `auth_mode` | `bearer`, `header_delegation`, `m2m_jwt`, or `user_oauth` (each user's own token; see Per-user OAuth below). |
 | `header_mappings` | Map a supported identity source to the HTTP header the proxy expects. |
 | `token_env` | Name of the environment variable holding the bearer/M2M credential. The secret is never placed in the JSON. |
 | `client_credentials` | Automatic service-token acquisition for `m2m_jwt`; mutually exclusive with `token_env`. See below. |
+| `oauth` | `user_oauth` only: a pre-registered client (`client_id`, `client_secret_env`) and `scope`. Omit it for dynamic registration. |
 | `user_authorization` | Experimental: opt into per-user gateway access and durable status; contains the gateway's browser-facing `reauthorize_url`. |
 | `require_confirmation` | Fallback when a tool's annotations do not give clear confirmation guidance; default `true`. |
 | `enabled` | Disable one entry without deleting it; default `true`. |
@@ -126,9 +127,10 @@ Supported header sources are `user_id`, `subject`, `issuer`, `email`,
 `display_name`, `preferred_username`, and `access_token`. `access_token` is only
 present when the caller supplied an ephemeral token in the current process. A
 Temporal turn reconstructs identity from the Seizu user record and deliberately
-does not persist the browser's bearer token, so detached interactive turns and
-headless runs should use `m2m_jwt` plus the durable OIDC `(issuer, subject)`
-identity pair (or trusted identity-header delegation) instead.
+does not persist the browser's bearer token. For per-user access in detached
+interactive turns and headless runs, use `user_oauth`, whose grant is stored for
+exactly that, or `m2m_jwt` plus the durable OIDC `(issuer, subject)` identity
+pair (or trusted identity-header delegation).
 
 `m2m_jwt` adds `Authorization: Bearer <service-token>` and defaults the target
 identity to `X-Target-User-ID: <subject>` and
@@ -234,6 +236,101 @@ retry automatically. A rejected cached token is discarded for the next operation
 Failed tool calls are not replayed for credential renewal; retry the request
 after resolving its connection failure.
 
+## Per-user OAuth (`user_oauth`)
+
+With `auth_mode: "user_oauth"`, each user connects the gateway once from **Chat
+Connections**, and every request Seizu makes for that user carries the user's
+own access token. This covers interactive and detached runs alike; nothing about
+the user's browser session is needed after connecting. The gateway holds the
+external MCP servers and each user's upstream grants. Seizu holds only the
+user's grant to the gateway, in its token vault.
+
+```text
+MCP_EXTERNAL_ENABLED=true
+MCP_EXTERNAL_PROXIES=[{"name":"deps","url":"https://deps.gateway.example/mcp","transport":"streamable_http","auth_mode":"user_oauth"}]
+DELEGATED_TOKEN_ENCRYPTION_KEYS=2026-11:<base64 32-byte key>
+SESSION_TOKEN_ENCRYPTION_KEY=<base64 32-byte key>
+```
+
+`user_oauth` takes no `token_env`, `client_credentials` or `header_mappings`:
+the user's token is the whole identity. `user_authorization` is optional and
+only supplies the origin that URL elicitation recovery links must use.
+
+**Connecting.** **Connect** on Chat Connections:
+
+1. Seizu sends an unauthenticated request to the proxy URL and follows its 401
+   to the gateway's protected-resource metadata (RFC 9728) and authorization
+   server metadata (RFC 8414).
+2. It finds or registers its client (below).
+3. It sends the browser to the authorization endpoint with PKCE (S256) and the
+   gateway as `resource`.
+4. The gateway redirects back to
+   `/api/v1/chat/connections/oauth/callback`. Seizu exchanges the code and
+   stores the grant.
+
+The callback is accepted only in the browser that started the connection. A
+short-lived, encrypted `seizu_mcp_connect` cookie, scoped to the callback path,
+carries the state, the PKCE verifier and the user. An authorization response
+opened in any other browser is refused.
+
+**Client registration.** Without an `oauth` block, Seizu registers itself
+dynamically (RFC 7591) as a confidential client, once per authorization server
+and redirect URI. The registration is stored encrypted in the vault and shared
+by every user. For a client registered out of band:
+
+```json
+{"name":"corp","url":"https://gateway.example/mcp","transport":"streamable_http","auth_mode":"user_oauth",
+ "oauth":{"client_id":"seizu","client_secret_env":"CORP_OAUTH_CLIENT_SECRET","scope":"mcp offline_access"}}
+```
+
+Omit `client_secret_env` for a public client, which relies on PKCE alone.
+`scope` is sent with the authorization request and with dynamic registration;
+an identity-provider-issued token usually needs `offline_access` here.
+
+**What the gateway must support:**
+- protected-resource metadata on the proxy's origin, naming its authorization
+  server;
+- authorization-server metadata whose `issuer` matches exactly;
+- the authorization-code grant with PKCE S256;
+- refresh tokens. A connection that is granted no refresh token is refused,
+  because it would stop working as soon as the access token expires;
+- dynamic client registration, or a pre-registered client.
+
+A revocation endpoint is optional; Seizu calls it on **Disconnect**.
+
+**Using the grant.** An access token within a minute of its expiry is refreshed
+first. Rotated refresh tokens are written back only if the stored grant has not
+changed since it was read, so two workers refreshing at once keep the newer
+grant. A 401 from the gateway drops the stored access token and reports
+**authorization required**; the user connects again, and the call is not
+retried. A missing, revoked or unreadable grant fails the same way and never
+falls back to another credential.
+
+**Settings.**
+
+| Setting | Meaning |
+| --- | --- |
+| `DELEGATED_TOKEN_ENCRYPTION_KEYS` | Vault keys, separate from the session key. Required by the web service and the Temporal worker. |
+| `SESSION_TOKEN_ENCRYPTION_KEY` | Encrypts the connect cookie, as it does the session cookie. |
+| `MCP_EXTERNAL_CA_FILE` | Extra CA trusted for proxies and their OAuth endpoints, on top of the system store. |
+| `MCP_EXTERNAL_OAUTH_REDIRECT_URI` | The callback's browser-facing URL, when it cannot be derived from the connect request (a proxy that rewrites `Host`, or a pre-registered client allowing one URI). |
+
+**Pomerium.** Each Pomerium MCP route is its own authorization server, so a user
+connects each route separately. Pomerium also needs
+`runtime_flags: {mcp_dynamic_client_registration: true}` for Seizu to register.
+
+Every route a user connects in one Pomerium sign-in holds a copy of the identity
+provider's refresh token, which Pomerium uses to re-create the session on
+refresh. An identity provider that replaces its refresh token on every use
+revokes that copy at the first route's refresh, and the user's other routes then
+fail with authorization required. Configure the identity provider to reuse a
+refresh token until it nears expiry. In Authentik that is the provider's
+**Refresh token threshold**, which must not be `seconds=0`.
+
+Pomerium also refuses an MCP request larger than its route's
+`mcp.server.max_request_bytes` (default 4 KiB) with a 413, so raise it on every
+route.
+
 ## Per-user gateway contract and recovery
 
 This contract is experimental. A successful connection check or tool call does
@@ -331,161 +428,103 @@ direct unauthenticated traffic and prevent external clients from supplying
 trusted target-user headers. The mesh manages certificate issuance and rotation;
 Seizu needs no additional bearer token.
 
-## Lightweight local development
+## Local development
 
-The optional Compose profile runs two upstream MCP servers, so a development
-stack has real tools to discover rather than a stub:
+Locally, every external MCP server sits behind one gateway, Pomerium Core, in the
+`external-mcp` Compose profile. Seizu reaches each through `user_oauth`
+(above), exactly as it would a production gateway. The gateway signs users in
+through the local Authentik, so the profile brings the `auth` profile with it
+even while Seizu's own authentication is off.
 
-- [`github/github-mcp-server`](https://github.com/github/github-mcp-server) in
-  Streamable HTTP mode, behind a network-internal Caddy adapter. It gives the
-  profile a real, annotation-bearing MCP implementation without requiring
-  developers to launch a separate upstream.
-- [`mappedsky/depsdevmcp`](https://github.com/mappedsky/depsdevmcp), a deps.dev
-  package-metadata server. It answers what a package version *declares* it
-  requires and what its resolved graph pulls in — neither of which the security
-  graph records, and neither of which the sandbox can fetch, since it has no
-  egress. Read-only and unauthenticated; only a package name and version leave
-  the network.
-- [`mappedsky/elicitationtestermcp`](https://github.com/mappedsky/elicitationtestermcp),
-  a catalogue of elicitation shapes for testing this client against. Most of them
-  are shapes a conforming client should **refuse**, so a refusal is the pass
-  condition rather than a failure; each scenario states which it is. It is a
-  manual-testing fixture and is not in the example `MCP_EXTERNAL_PROXIES` above.
+| Route | Upstream |
+| --- | --- |
+| `https://github.localhost.pomerium.io:8443/mcp` | [`github/github-mcp-server`](https://github.com/github/github-mcp-server), through a network-internal Caddy adapter that adds the development PAT |
+| `https://deps.localhost.pomerium.io:8443/mcp` | [`mappedsky/depsdevmcp`](https://github.com/mappedsky/depsdevmcp), deps.dev package metadata: what a package version *declares* it requires and what its resolved graph pulls in. Read-only and unauthenticated; only a package name and version leave the network. |
+| `https://whoami.localhost.pomerium.io:8443/` | `.config/dev/whoami-mcp`, which reports which per-user upstream grant authorized each call. Its upstream authorization server is Authentik, so connecting it also walks through the per-user upstream consent a third-party service would ask for. |
+| `https://elicit.localhost.pomerium.io:8443/mcp` and `/mcp/legacy` | [`mappedsky/elicitationtestermcp`](https://github.com/mappedsky/elicitationtestermcp), elicitation scenarios for manual testing (below) |
 
-  Wiring it takes two proxies, because one endpoint cannot serve both protocols:
-  `/mcp` carries input requests in the tool result, and `/mcp/legacy` negotiates
-  the older revision where the server sends elicitation requests during the call.
-  Both entries need `elicitation.form`/`elicitation.url` alongside
-  `MCP_EXTERNAL_ELICITATION_ENABLED`, and their `user_authorization.reauthorize_url`
-  has to match the tester's `-allowed-url`: every URL scenario is derived from
-  that one value, so a mismatch refuses all of them including the ones meant to
-  pass. `.env.example` carries a ready entry.
+`*.localhost.pomerium.io` resolves to `127.0.0.1` in public DNS, so the browser
+reaches the gateway on port 8443. Inside the stack the same names are network
+aliases on the gateway container, so Seizu sees the same issuer and resource
+URLs the browser does. Gateway state lives in its own Postgres database, so
+users stay connected across restarts.
 
-  The bundled `elicitation-testing` Agent Plugin declares both proxies' tools so
-  the scenarios are reachable with progressive disclosure on. It ships
-  **disabled**, since its skills are useless, and their dependencies unresolvable,
-  wherever the tester is not running.
+The gateway serves HTTPS from a local CA it generates at
+`.compose/external-mcp-gateway/ca.pem`; Seizu trusts it through
+`MCP_EXTERNAL_CA_FILE`. The CA can only vouch for `*.localhost.pomerium.io`,
+and its private key is discarded once the gateway's certificate is signed.
 
-The profile also runs
-[`obot-platform/mcp-oauth-proxy`](https://github.com/obot-platform/mcp-oauth-proxy)
-on `http://localhost:8081`, used only when
-[exercising the OAuth challenge path](#exercising-the-oauth-challenge-path).
+The browser reaches the gateway only while connecting an account. Expect a
+certificate warning then, on the `authenticate.` host and on each route's host,
+and accept it for that visit. Don't add the CA to a browser or system trust
+store.
 
-**By default Seizu talks to the Caddy adapter directly**, and every GitHub call
-is the development PAT's identity, read-only via `GITHUB_READ_ONLY=1`. There is
-no per-user token to obtain and nothing that expires. Be aware about what
-that is: a service account shared by every Seizu user, scoped by whatever the
-PAT can reach. Grant it only the repositories and permissions needed for
-testing.
+Because nothing can renew the certificate without the key, the gateway replaces
+the CA and certificate together at startup when the certificate is within 30
+days of expiry. Restart Seizu after a replacement.
+
+```bash
+make external_mcp_enable   # writes MCP_EXTERNAL_* and the vault key into .env
+make down && make up
+```
+
+`make external_mcp_enable` (`scripts/dev_external_mcp.py`) sets
+`MCP_EXTERNAL_ENABLED`, the development `MCP_EXTERNAL_PROXIES` and
+`MCP_EXTERNAL_CA_FILE`. It generates `DELEGATED_TOKEN_ENCRYPTION_KEYS` and
+`SESSION_TOKEN_ENCRYPTION_KEY` only if they are unset, and keeps the previous
+file as `.env.bak`. `make external_mcp_disable` sets `MCP_EXTERNAL_ENABLED=false`
+and keeps the rest.
+
+Then open **Chat Connections** and **Connect** each gateway. Sign in as an
+Authentik user, for example `seizu-editor` / `seizu`. The GitHub route also
+needs a development PAT:
 
 ```text
 DEV_GITHUB_MCP_TOKEN=<fine-grained-development-pat>
 DEV_GITHUB_MCP_READ_ONLY=1
 DEV_GITHUB_MCP_TOOLSETS=default
-
-MCP_EXTERNAL_ENABLED=true
-MCP_EXTERNAL_PROXIES=[{"name":"github","url":"http://external-mcp-github-auth:8080/mcp","upstream_urls":["https://mcp.github.test/mcp"],"transport":"streamable_http","auth_mode":"header_delegation"},{"name":"deps","url":"http://external-mcp-deps:8080/mcp","upstream_urls":["https://mcp.deps.test/mcp"],"transport":"streamable_http","auth_mode":"header_delegation","require_confirmation":false}]
-MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS=
 ```
 
-Configure **both** proxies. Three of the bundled development skills declare the
-deps.dev tools as dependencies — `github_security_investigations/repo_cve_reachability`,
-`cve_response/dependency_provenance`, and
-`portable_security_review/review_source_dependencies`. A skill whose declared
-tools are missing from a user's inventory drops out of that user's listing
-entirely rather than failing at call time, so omitting `deps` makes those three
-quietly disappear rather than error. The `upstream_urls` aliases match the
-logical endpoints the bundled `portable-security-review` plugin declares.
+The PAT is a service credential shared by every user, scoped by whatever it can
+reach, so grant it only what testing needs. `DEV_GITHUB_MCP_TOOLSETS` takes the
+GitHub server's comma-separated toolset names. Set `DEV_GITHUB_MCP_READ_ONLY=0`
+to expose mutating tools and exercise the annotation-based confirmation flow.
 
-```bash
-make external_mcp_enable
-make up
-```
+Connect **both** `github` and `deps`. Three of the bundled development skills
+declare the deps.dev tools as dependencies:
 
-`DEV_GITHUB_MCP_TOOLSETS` accepts the GitHub server's comma-separated toolset
-names; set `DEV_GITHUB_MCP_READ_ONLY=0` to expose mutating tools and exercise
-Seizu's annotation-based confirmation flow.
+- `github_security_investigations/repo_cve_reachability`
+- `cve_response/dependency_provenance`
+- `portable_security_review/review_source_dependencies`
 
-### Exercising the OAuth challenge path
-
-The obot proxy sits in the separate `external-mcp-oauth` profile, for when the
-thing under test is Seizu's OAuth handling — RFC 9728 discovery, the 401
-challenge, and recovery — rather than the tools behind it. It authenticates the
-*caller to the proxy* through the same local Authentik instance and users as
-Seizu; it confers no GitHub authority, because the Caddy adapter strips obot's
-forwarded identity headers and substitutes the PAT. Requiring it for ordinary
-local work therefore bought a short-lived credential and no per-user
-authorization, which is why it is not the default.
-
-The Authentik blueprint creates a dedicated confidential client and registers
-`http://localhost:8081/callback`, separate from Seizu's public PKCE/device
-client because obot requires a client secret. Add to `.env`:
-
-```text
-DEV_MCP_PROXY_OAUTH_CLIENT_ID=seizu-external-mcp-proxy
-DEV_MCP_PROXY_OAUTH_CLIENT_SECRET=seizu-external-mcp-proxy-dev-secret
-DEV_MCP_PROXY_OAUTH_AUTHORIZE_URL=http://localhost:9000/application/o/seizu-external-mcp-proxy
-DEV_MCP_PROXY_SCOPES=openid,email,profile
-DEV_MCP_PROXY_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
-
-MCP_EXTERNAL_PROXIES=[{"name":"github","url":"http://external-mcp-proxy:8080/mcp/github","transport":"streamable_http","auth_mode":"bearer","token_env":"MCP_EXTERNAL_PROXY_TOKEN"}]
-```
-
-Generate the encryption key with `openssl rand -base64 32`, then:
-
-```bash
-docker compose --profile auth --profile external-mcp --profile external-mcp-oauth up -d
-make external_mcp_login
-```
-
-`make external_mcp_login` dynamically registers a public PKCE client with the
-proxy, opens its Authentik authorization flow, and writes the issued credential
-to `.env` without displaying it. Authentik issues an access token valid for one
-hour and a refresh token valid for thirty days, so the script stores **both**
-(plus the registered client id) and renews silently on later runs — a browser
-round trip is needed roughly monthly, not hourly. Pass `--force` to authorize
-from scratch.
-
-This local profile tests bearer authentication, not the per-user gateway
-contract. A Temporal deployment needing per-user GitHub authority needs a
-gateway that explicitly supports service authentication plus target-user grant
-selection, as in the enterprise gateway example below. Changing an OAuth
-provider alone does not enable that contract.
-
-`make external_mcp_enable` persists `MCP_EXTERNAL_ENABLED=true` in `.env`;
-`make up` then selects the `external-mcp` Compose profile. Authentik is enabled
-independently, and the OAuth proxy requires the explicit profiles shown above.
-After the services are healthy,
-`make external_mcp_login` dynamically registers a public PKCE client with the
-local proxy, opens its Authentik authorization flow, writes the issued proxy
-bearer to `MCP_EXTERNAL_PROXY_TOKEN` without displaying it, and recreates Seizu
-and its Temporal worker. The proxy container uses a supervised loopback
-forwarder so its Authentik discovery and token exchange retain the browser's
-`localhost:9000` issuer (AUTH-002). To turn off the agent capability and its
-local proxy services, run `make external_mcp_disable`, then restart the stack
-with `make down && make up`. Proxy configuration and credentials are retained.
-This does not change the Authentik toggle.
-
-With `MCP_EXTERNAL_PROXY_TOKEN` empty, the catalog and chat exercise the
-401/RFC 9728 path and expose an `ext__github__seizu_authenticate` placeholder.
-Run `make external_mcp_login` to complete that OAuth flow and replace the
-placeholder with the GitHub server's repository and code tools. The resulting
-proxy bearer and shared development PAT are suitable only for a single-user
-local test. Multi-user deployments should use a
-gateway/M2M exchange or a proxy integration that maps a Seizu identity to its
-own per-user token vault.
+A skill whose declared tools are missing from a user's inventory drops out of
+that user's listing rather than failing at call time. The `upstream_urls`
+aliases match the logical endpoints the bundled `portable-security-review`
+plugin declares.
 
 Configured proxies also appear as read-only **External MCP** rows under
 `/app/toolsets`. Opening one performs the same per-user discovery used by chat.
-Before the proxy bearer is configured, the tools view contains
-`ext__<proxy>__seizu_authenticate`; after authentication it contains the
-remote server's namespaced tools and input parameters. This catalog does not
-re-export external tools from Seizu's own MCP endpoint.
+Until a user connects, discovery reports authorization required for them.
 
-To proxy a different Streamable HTTP MCP server, set
-`DEV_MCP_PROXY_UPSTREAM_URL` to its internal or host-reachable URL. Such an
-upstream is responsible for understanding Obot's forwarded identity headers;
-the GitHub-specific PAT adapter is used only by the default URL.
+### Elicitation tester
+
+The tester is a catalogue of elicitation shapes for testing this client. Most
+are shapes a conforming client should **refuse**, so a refusal is the pass
+condition; each scenario states which it is. It is not in the default proxy
+list. Wiring it takes two proxies, because one endpoint cannot serve both
+protocols: `/mcp` carries input requests in the tool result, and `/mcp/legacy`
+negotiates the older revision where the server sends elicitation requests during
+the call.
+
+Both entries need `elicitation.form`/`elicitation.url` alongside
+`MCP_EXTERNAL_ELICITATION_ENABLED`. Their `user_authorization.reauthorize_url`
+must match the tester's `-allowed-url`: every URL scenario is derived from that
+one value, so a mismatch refuses all of them, including the ones meant to pass.
+`.env.example` carries ready entries.
+
+The bundled `elicitation-testing` Agent Plugin declares both proxies' tools. It
+ships **disabled**, because its skills cannot run wherever the tester is not
+configured.
 
 ## Enterprise gateway example
 

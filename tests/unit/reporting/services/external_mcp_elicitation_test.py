@@ -242,6 +242,7 @@ async def test_owner_scoping_expiry_and_revalidation(mocker):
     read = mocker.patch.object(
         external_mcp_connections.report_store, "list_external_mcp_connections", return_value=[row]
     )
+    mocker.patch.object(external_mcp_connections.report_store, "list_delegated_tokens", return_value=[])
     assert len((await external_mcp_connections.list_connections([config], user()))[0].elicitations) == 1
     read.assert_awaited_once_with("owner")
     row["observed_at"] = (datetime.now(UTC) - timedelta(hours=2)).isoformat()

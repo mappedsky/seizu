@@ -23,6 +23,9 @@ export interface ChatConnection {
     url: string;
     message: string;
   }[];
+  // True for gateways the user connects from Seizu itself (user_oauth).
+  connectable?: boolean;
+  has_grant?: boolean;
 }
 
 const NO_CONNECTIONS: ChatConnection[] = [];
@@ -133,11 +136,71 @@ export function useChatConnections(enabled: boolean) {
     }
   };
 
+  const authHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = { 'X-Seizu-Csrf': '1' };
+    if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+    return headers;
+  };
+
+  // Leaves the page for the gateway's sign-in; the gateway sends the browser
+  // back to Chat Connections with ?connected= or ?connect_error=.
+  const connect = async (name: string) => {
+    if (!enabled || (auth_required && !accessToken)) return;
+    amend((previous) => ({ ...previous, checking: name, error: null }));
+    try {
+      const response = await fetch(
+        `/api/v1/chat/connections/${encodeURIComponent(name)}/connect`,
+        { method: 'POST', headers: authHeaders() },
+      );
+      if (!response.ok) throw new Error('Could not start connecting.');
+      const { authorization_url } = await response.json();
+      window.location.assign(authorization_url);
+    } catch {
+      amend((previous) => ({
+        ...previous,
+        error: 'Could not start connecting. Try again later.',
+        checking: null,
+      }));
+    }
+  };
+
+  const disconnect = async (name: string) => {
+    const controller = active.current;
+    if (!enabled || !controller || (auth_required && !accessToken)) return;
+    amend((previous) => ({ ...previous, checking: name, error: null }));
+    try {
+      const response = await fetch(
+        `/api/v1/chat/connections/${encodeURIComponent(name)}/grant`,
+        { method: 'DELETE', headers: authHeaders(), signal: controller.signal },
+      );
+      if (!response.ok) throw new Error('Could not disconnect.');
+      if (!controller.signal.aborted)
+        amend((previous) => ({
+          ...previous,
+          connections: previous.connections.map((item) =>
+            item.proxy_name === name
+              ? { ...item, has_grant: false, status: 'authorization_required' }
+              : item,
+          ),
+          checking: null,
+        }));
+    } catch {
+      if (!controller.signal.aborted)
+        amend((previous) => ({
+          ...previous,
+          error: 'Could not disconnect.',
+          checking: null,
+        }));
+    }
+  };
+
   return {
     connections: current ? current.connections : NO_CONNECTIONS,
     loading: current === null,
     error: current ? current.error : null,
     checking: current ? current.checking : null,
     check,
+    connect,
+    disconnect,
   };
 }

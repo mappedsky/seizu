@@ -1,4 +1,4 @@
-# Pomerium Core for the delegated-OAuth spike (see README.md beside this file).
+# Pomerium Core, the local external MCP gateway (docs/root/install/external-mcp.md).
 #
 # The upstream image is distroless, so the binary is copied onto Debian to gain
 # a shell, socat (the localhost:9000 forwarder, AUTH-002) and openssl (the
@@ -11,7 +11,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=pomerium /bin/pomerium /bin/pomerium
 COPY --from=pomerium /pomerium/LICENSE /pomerium/LICENSE
-COPY --chmod=755 .config/dev/pomerium-spike/entrypoint.sh /entrypoint.sh
+COPY --chmod=755 .config/dev/external-mcp-gateway/entrypoint.sh /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/bin/pomerium", "--config", "/pomerium/config.yaml"]

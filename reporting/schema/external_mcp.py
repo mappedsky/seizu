@@ -18,6 +18,9 @@ class ExternalMCPAuthMode(StrEnum):
     BEARER = "bearer"
     HEADER_DELEGATION = "header_delegation"
     M2M_JWT = "m2m_jwt"
+    # Each user authorizes Seizu through the gateway's MCP OAuth flow, and every
+    # request carries that user's own access token (AGT-059).
+    USER_OAUTH = "user_oauth"
 
 
 class ExternalMCPHeaderSource(StrEnum):
@@ -69,6 +72,36 @@ class ExternalMCPClientCredentials(BaseModel):
         return value
 
 
+class ExternalMCPOAuthClient(BaseModel):
+    """How Seizu identifies itself to a ``user_oauth`` gateway's authorization server.
+
+    Without ``client_id`` Seizu registers itself dynamically (RFC 7591) and
+    keeps the registration encrypted (STO-016). With it, the client was
+    registered out of band; ``client_secret_env`` names its secret, and omitting
+    it makes Seizu a public client that relies on PKCE alone.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_id: str | None = Field(default=None, min_length=1)
+    client_secret_env: str | None = None
+    scope: str | None = None
+    token_endpoint_auth_method: Literal["client_secret_basic", "client_secret_post"] = "client_secret_basic"
+
+    @field_validator("client_secret_env")
+    @classmethod
+    def valid_secret_env(cls, value: str | None) -> str | None:
+        if value is not None and not _ENV_RE.fullmatch(value):
+            raise ValueError("must be an uppercase environment-variable name")
+        return value
+
+    @model_validator(mode="after")
+    def secret_needs_client(self) -> "ExternalMCPOAuthClient":
+        if self.client_secret_env and not self.client_id:
+            raise ValueError("client_secret_env is only meaningful with a pre-registered client_id")
+        return self
+
+
 class ExternalMCPUserAuthorization(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -101,6 +134,15 @@ class ExternalMCPConnection(BaseModel):
     error_code: ConnectionStatus | None = None
     reauthorize_url: str | None = None
     elicitations: list[ExternalMCPElicitation] = Field(default_factory=list)
+    # True for user_oauth gateways, which the user connects from Seizu itself.
+    connectable: bool = False
+    # Whether Seizu holds this user's grant for the gateway; says nothing about
+    # whether the gateway still accepts it, which only ``status`` reports.
+    has_grant: bool = False
+
+
+class ExternalMCPAuthorizationStart(BaseModel):
+    authorization_url: str
 
 
 class ExternalMCPConnectionsResponse(BaseModel):
@@ -134,6 +176,7 @@ class ExternalMCPProxy(BaseModel):
     header_mappings: dict[ExternalMCPHeaderSource, str] = Field(default_factory=dict)
     token_env: str | None = None
     client_credentials: ExternalMCPClientCredentials | None = None
+    oauth: ExternalMCPOAuthClient | None = None
     user_authorization: ExternalMCPUserAuthorization | None = None
     elicitation: ExternalMCPElicitationOptions = Field(default_factory=ExternalMCPElicitationOptions)
     require_confirmation: bool = True
@@ -187,8 +230,21 @@ class ExternalMCPProxy(BaseModel):
             seen.add(folded)
         return value
 
+    @property
+    def per_user(self) -> bool:
+        """Whether access is each user's own, so it has a Chat Connections status."""
+        return self.user_authorization is not None or self.auth_mode == ExternalMCPAuthMode.USER_OAUTH
+
     @model_validator(mode="after")
     def auth_requirements(self) -> "ExternalMCPProxy":
+        if self.auth_mode == ExternalMCPAuthMode.USER_OAUTH:
+            if self.token_env or self.client_credentials:
+                raise ValueError("user_oauth sends the user's own token and takes no service credential")
+            if self.header_mappings:
+                raise ValueError("user_oauth identifies the user by their token, so it takes no header mappings")
+            return self
+        if self.oauth is not None:
+            raise ValueError("oauth configures a user_oauth client and requires auth_mode user_oauth")
         mapped = set(self.header_mappings)
         mapped_headers = {header.casefold() for header in self.header_mappings.values()}
         if self.auth_mode == ExternalMCPAuthMode.BEARER and not self.token_env:

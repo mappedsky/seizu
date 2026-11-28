@@ -1,30 +1,57 @@
-# Authentik blueprint for the Pomerium delegated-OAuth spike
-# (.config/dev/pomerium-spike/README.md). Two confidential clients, kept apart
-# from Seizu's own so the spike cannot change Seizu's login:
+# Authentik blueprint for the local external MCP gateway (Pomerium Core,
+# .config/dev/external-mcp-gateway). Two confidential clients, kept apart from
+# Seizu's own public client so the gateway cannot change Seizu's login (AUTH-004):
 #
-#   pomerium-spike           Pomerium's own sign-in (its IdP).
-#   pomerium-spike-upstream  The authorization server Pomerium uses on behalf
-#                            of each user for the whoami upstream.
+#   seizu-external-mcp-gateway  Pomerium's own sign-in (its identity provider).
+#   seizu-external-mcp-whoami   The authorization server Pomerium uses on each
+#                               user's behalf for the whoami route's upstream.
 #
-# Access tokens are short so a single sitting exercises refresh on both legs.
+# Access tokens are short so ordinary use exercises refresh on both legs.
 version: 1
 metadata:
-  name: Seizu Pomerium spike
+  name: Seizu local external MCP gateway
   labels:
     blueprints.goauthentik.io/instantiate: "true"
 entries:
+  # Clients this gateway replaced: the Obot proxy's and the Pomerium spike's.
+  # Applications go before the providers they reference.
+  - model: authentik_core.application
+    state: absent
+    identifiers:
+      slug: seizu-external-mcp-proxy
+  - model: authentik_core.application
+    state: absent
+    identifiers:
+      slug: pomerium-spike
+  - model: authentik_core.application
+    state: absent
+    identifiers:
+      slug: pomerium-spike-upstream
+  - model: authentik_providers_oauth2.oauth2provider
+    state: absent
+    identifiers:
+      name: seizu-external-mcp-proxy
+  - model: authentik_providers_oauth2.oauth2provider
+    state: absent
+    identifiers:
+      name: pomerium-spike
+  - model: authentik_providers_oauth2.oauth2provider
+    state: absent
+    identifiers:
+      name: pomerium-spike-upstream
+
   - model: authentik_providers_oauth2.oauth2provider
     state: present
     identifiers:
-      name: pomerium-spike
+      name: seizu-external-mcp-gateway
     attrs:
-      name: pomerium-spike
+      name: seizu-external-mcp-gateway
       client_type: confidential
-      client_id: pomerium-spike
-      client_secret: pomerium-spike-dev-secret
+      client_id: seizu-external-mcp-gateway
+      client_secret: seizu-external-mcp-gateway-dev-secret
       authorization_flow: !Find
         - authentik_flows.flow
-        - [slug, default-provider-authorization-explicit-consent]
+        - [slug, default-provider-authorization-implicit-consent]
       invalidation_flow: !Find
         - authentik_flows.flow
         - [slug, default-provider-invalidation-flow]
@@ -32,7 +59,12 @@ entries:
         - url: https://authenticate.localhost.pomerium.io:8443/oauth2/callback
           matching_mode: strict
       access_token_validity: minutes=5
-      refresh_token_validity: days=30
+      # Every route a user connects in one Pomerium sign-in carries a copy of
+      # this refresh token, so it must not be replaced on each use: the default
+      # threshold (seconds=0) revokes it at the first route's refresh and strands
+      # the others. Renewed only in its last week (AGT-060).
+      refresh_token_validity: days=365
+      refresh_token_threshold: days=7
       signing_key: !Find
         - authentik_crypto.certificatekeypair
         - [name, "authentik Self-signed Certificate"]
@@ -54,33 +86,33 @@ entries:
   - model: authentik_core.application
     state: present
     identifiers:
-      slug: pomerium-spike
+      slug: seizu-external-mcp-gateway
     attrs:
-      name: Pomerium spike
-      slug: pomerium-spike
+      name: Seizu external MCP gateway
+      slug: seizu-external-mcp-gateway
       provider: !Find
         - authentik_providers_oauth2.oauth2provider
-        - [name, pomerium-spike]
+        - [name, seizu-external-mcp-gateway]
       policy_engine_mode: any
 
   - model: authentik_providers_oauth2.oauth2provider
     state: present
     identifiers:
-      name: pomerium-spike-upstream
+      name: seizu-external-mcp-whoami
     attrs:
-      name: pomerium-spike-upstream
+      name: seizu-external-mcp-whoami
       client_type: confidential
-      client_id: pomerium-spike-upstream
-      client_secret: pomerium-spike-upstream-dev-secret
+      client_id: seizu-external-mcp-whoami
+      client_secret: seizu-external-mcp-whoami-dev-secret
       authorization_flow: !Find
         - authentik_flows.flow
         - [slug, default-provider-authorization-explicit-consent]
       invalidation_flow: !Find
         - authentik_flows.flow
         - [slug, default-provider-invalidation-flow]
-      # Pomerium's upstream callback lives on each MCP route's own host.
+      # Pomerium's upstream callback lives on the route's own host.
       redirect_uris:
-        - url: 'https://whoami-[ab]\.localhost\.pomerium\.io(:8443)?/\.pomerium/mcp/client/oauth/callback'
+        - url: 'https://whoami\.localhost\.pomerium\.io(:8443)?/\.pomerium/mcp/client/oauth/callback'
           matching_mode: regex
       access_token_validity: minutes=2
       refresh_token_validity: days=30
@@ -105,11 +137,11 @@ entries:
   - model: authentik_core.application
     state: present
     identifiers:
-      slug: pomerium-spike-upstream
+      slug: seizu-external-mcp-whoami
     attrs:
-      name: Pomerium spike upstream
-      slug: pomerium-spike-upstream
+      name: Seizu whoami MCP upstream
+      slug: seizu-external-mcp-whoami
       provider: !Find
         - authentik_providers_oauth2.oauth2provider
-        - [name, pomerium-spike-upstream]
+        - [name, seizu-external-mcp-whoami]
       policy_engine_mode: any

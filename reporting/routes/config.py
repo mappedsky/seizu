@@ -42,7 +42,7 @@ async def get_config() -> dict:
             # Only gateways a user can connect for themselves have a status page
             # to show, so the UI stays hidden when none is configured.
             "chat_connections": settings.CHAT_ENABLED
-            and any(proxy.enabled and proxy.user_authorization for proxy in settings.MCP_EXTERNAL_PROXIES),
+            and any(proxy.enabled and proxy.per_user for proxy in settings.MCP_EXTERNAL_PROXIES),
         },
         "config": {},
     }

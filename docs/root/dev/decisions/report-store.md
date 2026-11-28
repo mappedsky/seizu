@@ -319,3 +319,33 @@ moving cookies to another provider needs a prefix at the cookie layer.
 - drop the row binding from the associated data;
 - write a refreshed grant unconditionally;
 - delete a row because it failed to decrypt.
+
+## STO-016 — Seizu's dynamic client registrations are stored encrypted, one per issuer and redirect URI
+
+**Applies to:** `oauth_clients`, migration `0018_oauth_clients`,
+`token_vault.save_client` / `load_client` / `find_client`
+
+**What a row holds.** One row per authorization server and client ID, carrying
+the redirect URI it was registered for. The secret, the authentication method
+and the redirect URI are one ciphertext under the vault keyring, with associated
+data naming the issuer and client ID. A registration whose decrypted contents
+disagree with its row is refused.
+
+**Why reuse one registration:** Pomerium binds every refresh token it issues to
+the client that received it. A registration per user, or per connection, would
+grow without bound at the gateway, and losing any one would strand exactly the
+grants issued to it. One registration per issuer and redirect URI serves every
+user.
+
+**Why the secret is encrypted:** the client secret is what spends every refresh
+token issued to that client, so it is as sensitive as all of those grants
+together.
+
+**Why a repointed row is refused:** without the content check, someone able to
+change a row's redirect URI could have the next connection's authorization
+response sent to an address of their choosing.
+
+**Don't:**
+- register per user or per connection;
+- store the client secret in the clear;
+- drop the check that a registration's contents match its row.

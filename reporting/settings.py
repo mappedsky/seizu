@@ -1219,8 +1219,9 @@ CHAT_ELICITATION_TTL_SECONDS = max(1, min(86400, int_env("CHAT_ELICITATION_TTL_S
 # Maximum form fields, clamped to 1–32.
 CHAT_ELICITATION_MAX_FIELDS = max(1, min(32, int_env("CHAT_ELICITATION_MAX_FIELDS", 32)))
 # Entries may acquire M2M tokens through client_credentials or use a shared
-# token_env. user_authorization enables per-owner gateway status and recovery;
-# the gateway owns upstream grants (AGT-059).
+# token_env. auth_mode user_oauth sends each user's own token, connected from
+# Chat Connections; it and user_authorization enable per-owner gateway status
+# and recovery. The gateway owns upstream grants (AGT-059).
 _MCP_EXTERNAL_CONFIGURED_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
 MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED else []
 # How a portable plugin's logical MCP dependency (`mcp:<server>/<tool>`) binds to
@@ -1244,6 +1245,20 @@ MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE = _external_plugin_url_match_mode_from_env()
 # both are visible, so 0 = off is the default. Cleared for a user whenever an
 # upstream refuses their identity.
 MCP_EXTERNAL_DISCOVERY_TTL_SECONDS = int_env("MCP_EXTERNAL_DISCOVERY_TTL_SECONDS", 0)
+
+# PEM file of additional certificate authorities trusted for external MCP
+# proxies and their OAuth endpoints, on top of the system trust store (which
+# stays trusted). For gateways with a private CA, such as the local Pomerium
+# dev gateway. Empty: the system trust store only. A missing or unreadable file
+# fails every external MCP connection with an error naming this setting.
+MCP_EXTERNAL_CA_FILE = str_env("MCP_EXTERNAL_CA_FILE", "")
+
+# Redirect URI for user_oauth connections, the browser-facing address of
+# /api/v1/chat/connections/oauth/callback. Set it when Seizu is behind a proxy
+# that rewrites the Host header, or when a pre-registered client allows only
+# one URI. Empty: derived from each connect request's own URL, which is what
+# local development needs. A dynamic registration is made per redirect URI.
+MCP_EXTERNAL_OAUTH_REDIRECT_URI = str_env("MCP_EXTERNAL_OAUTH_REDIRECT_URI", "")
 
 # Fully namespaced external tools that always require confirmation, regardless
 # of remote MCP annotations or a proxy's fallback policy.

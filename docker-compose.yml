@@ -245,41 +245,8 @@ services:
       start_period: 10s
     networks:
       database:
-  # Optional external MCP OAuth proxy. Start with the auth, external-mcp and
-  # external-mcp-oauth profiles; proxy users share Seizu's local Authentik IDP.
-  # Optional: exercises Seizu's OAuth-challenge handling (RFC 9728 discovery and
-  # 401 recovery) against a proxy that really requires it. Not part of the
-  # default profile — it authenticates the *caller to the proxy* and contributes
-  # no GitHub authority, so requiring it for ordinary local use bought a
-  # short-lived token that expires mid-run for no gain. Start it explicitly:
-  #   docker compose --profile auth --profile external-mcp --profile external-mcp-oauth up
-  external-mcp-proxy:
-    build:
-      context: .
-      dockerfile: .config/dev/external-mcp-proxy/Dockerfile
-    profiles:
-      - external-mcp-oauth
-    depends_on:
-      - external-mcp-github-auth
-    environment:
-      - OAUTH_CLIENT_ID=${DEV_MCP_PROXY_OAUTH_CLIENT_ID:-seizu-external-mcp-proxy}
-      - OAUTH_CLIENT_SECRET=${DEV_MCP_PROXY_OAUTH_CLIENT_SECRET:-seizu-external-mcp-proxy-dev-secret}
-      - OAUTH_AUTHORIZE_URL=${DEV_MCP_PROXY_OAUTH_AUTHORIZE_URL:-http://localhost:9000/application/o/seizu-external-mcp-proxy}
-      - SCOPES_SUPPORTED=${DEV_MCP_PROXY_SCOPES:-openid,email,profile}
-      - MCP_SERVER_URL=${DEV_MCP_PROXY_UPSTREAM_URL:-http://external-mcp-github-auth:8080}
-      - ENCRYPTION_KEY=${DEV_MCP_PROXY_ENCRYPTION_KEY:-}
-      - HOST=0.0.0.0
-      # Authentik derives its issuer and discovery endpoints from the request
-      # host. The wrapper's supervised loopback forwarder keeps this identical
-      # to the browser-facing localhost:9000 authority (AUTH-002).
-      - DEV_OIDC_LOOPBACK_TARGET=authentik-server:9000
-    ports:
-      - 8081:8080
-    networks:
-      database:
-      auth:
-  # Obot owns the inbound Authorization header. This internal-only adapter
-  # supplies the separate development PAT expected by GitHub's HTTP MCP server.
+  # The gateway authenticates the user; this internal-only adapter supplies the
+  # separate development PAT expected by GitHub's HTTP MCP server.
   external-mcp-github-auth:
     image: caddy:2-alpine
     profiles:
@@ -342,46 +309,80 @@ services:
       - GITHUB_TOOLSETS=${DEV_GITHUB_MCP_TOOLSETS:-default}
     networks:
       database:
-  # ── Pomerium delegated-OAuth spike ───────────────────────────────────────
-  # Throwaway evaluation of Pomerium Core as the external MCP gateway; see
-  # .config/dev/pomerium-spike/README.md. Needs the auth profile:
-  #   docker compose --profile auth --profile pomerium-spike up -d --build
-  pomerium-spike:
+  # ── Local external MCP gateway (Pomerium Core) ──────────────────────────
+  # The single way dev reaches external MCP servers: each is a route behind
+  # Pomerium, and Seizu calls it with the connected user's own access token
+  # (auth_mode user_oauth). Signs users in through Authentik, so the Makefile
+  # adds the auth profile alongside this one. See
+  # docs/root/install/external-mcp.md#local-development.
+  postgres-create-external-mcp-gateway-db:
+    image: postgres:18-alpine
+    profiles:
+      - external-mcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${SQL_DATABASE_USER:-seizu}
+      PGPASSWORD: ${SQL_DATABASE_PASSWORD:-seizu}
+    command:
+      - sh
+      - -ec
+      - |
+        psql --dbname=postgres --set=owner="$${PGUSER}" <<'SQL'
+        SELECT format('CREATE DATABASE %I OWNER %I', 'seizu-external-mcp-gateway', :'owner')
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'seizu-external-mcp-gateway')
+        \gexec
+        SQL
+    networks:
+      database:
+  external-mcp-gateway:
     build:
       context: .
-      dockerfile: .config/dev/pomerium-spike/Dockerfile
+      dockerfile: .config/dev/external-mcp-gateway/Dockerfile
     profiles:
-      - pomerium-spike
+      - external-mcp
     depends_on:
-      - pomerium-spike-whoami
+      postgres-create-external-mcp-gateway-db:
+        condition: service_completed_successfully
+      external-mcp-whoami:
+        condition: service_started
+    restart: unless-stopped
     environment:
       - DEV_OIDC_LOOPBACK_TARGET=authentik-server:9000
+      - DATABROKER_STORAGE_CONNECTION_STRING=postgres://${SQL_DATABASE_USER:-seizu}:${SQL_DATABASE_PASSWORD:-seizu}@postgres:5432/seizu-external-mcp-gateway?sslmode=disable
     volumes:
-      - ./.config/dev/pomerium-spike/config.yaml:/pomerium/config.yaml:ro
-      - ./.compose/pomerium-spike:/certs
+      - ./.config/dev/external-mcp-gateway/config.yaml:/pomerium/config.yaml:ro
+      - ./.compose/external-mcp-gateway:/certs
     ports:
       - "8443:8443"
     networks:
       auth:
-        # Containers reach the routes under the names the browser uses, so
-        # an in-stack client sees the same issuer and resource URLs.
+      database:
+        # Seizu reaches every route under the name the browser uses, so the
+        # issuer, resource and redirect URLs it sees are the browser's too.
         aliases:
           - authenticate.localhost.pomerium.io
-          - whoami-a.localhost.pomerium.io
-          - whoami-b.localhost.pomerium.io
-  pomerium-spike-whoami:
+          - deps.localhost.pomerium.io
+          - github.localhost.pomerium.io
+          - elicit.localhost.pomerium.io
+          - whoami.localhost.pomerium.io
+  # An MCP upstream that reports which per-user grant authorized each call.
+  external-mcp-whoami:
     image: python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89
     profiles:
-      - pomerium-spike
+      - external-mcp
     command: ["python", "-I", "/app/whoami_mcp.py"]
     environment:
-      - WHOAMI_PORTS=8080,8081
+      - WHOAMI_PORTS=8080
       - WHOAMI_USERINFO_URL=http://authentik-server:9000/application/o/userinfo/
       - WHOAMI_USERINFO_HOST=localhost:9000
     volumes:
-      - ./.config/dev/pomerium-spike/whoami_mcp.py:/app/whoami_mcp.py:ro
+      - ./.config/dev/whoami-mcp/whoami_mcp.py:/app/whoami_mcp.py:ro
     networks:
       auth:
+      database:
   seizu-temporal-worker:
     image: ghcr.io/mappedsky/seizu
     restart: on-failure
@@ -535,6 +536,8 @@ services:
       - MCP_EXTERNAL_PROXIES
       # Token vault keys (id:base64key[,...]); separate from the session key.
       - DELEGATED_TOKEN_ENCRYPTION_KEYS
+      - MCP_EXTERNAL_CA_FILE
+      - MCP_EXTERNAL_OAUTH_REDIRECT_URI
       - MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE
       - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS
       - MCP_EXTERNAL_RATE_LIMIT_RETRIES
@@ -850,6 +853,8 @@ services:
       - MCP_EXTERNAL_PROXIES
       # Token vault keys (id:base64key[,...]); separate from the session key.
       - DELEGATED_TOKEN_ENCRYPTION_KEYS
+      - MCP_EXTERNAL_CA_FILE
+      - MCP_EXTERNAL_OAUTH_REDIRECT_URI
       - MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE
       - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS
       - MCP_EXTERNAL_RATE_LIMIT_RETRIES

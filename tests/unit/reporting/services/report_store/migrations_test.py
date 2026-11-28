@@ -32,6 +32,7 @@ async def test_migrations_run_on_a_fresh_database(tmp_path):
             "external_mcp_connections",
             "chat_elicitations",
             "delegated_tokens",
+            "oauth_clients",
         } <= tables
 
         report_columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("reports")})
@@ -334,6 +335,22 @@ async def test_delegated_token_migration_upgrades_previous_head(tmp_path):
         }
         primary_key = await _inspect(engine, lambda i: i.get_pk_constraint("delegated_tokens")["constrained_columns"])
         assert set(primary_key) == {"user_id", "proxy_name", "resource"}
+        await run_schema_migrations(engine)
+    finally:
+        await engine.dispose()
+
+
+async def test_oauth_client_migration_upgrades_previous_head(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'oauth-clients-upgrade.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
+            await conn.execute(sa.text("INSERT INTO alembic_version VALUES ('0017_delegated_tokens')"))
+        await run_schema_migrations(engine)
+        columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("oauth_clients")})
+        assert columns == {"issuer", "client_id", "redirect_uri", "key_id", "ciphertext", "created_at"}
+        primary_key = await _inspect(engine, lambda i: i.get_pk_constraint("oauth_clients")["constrained_columns"])
+        assert set(primary_key) == {"issuer", "client_id"}
         await run_schema_migrations(engine)
     finally:
         await engine.dispose()
