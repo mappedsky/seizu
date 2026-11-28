@@ -1,0 +1,66 @@
+# Pomerium Core configuration for the delegated-OAuth spike. Dev-only secrets.
+#
+# Two MCP server routes front the same whoami upstream (ports 8080 and 8081),
+# so the spike can see whether one downstream grant covers both routes and
+# whether upstream consent is per route. Both routes use Authentik as the
+# upstream authorization server, through a client separate from Pomerium's own.
+address: :8443
+authenticate_service_url: https://authenticate.localhost.pomerium.io:8443
+
+certificate_file: /certs/server.pem
+certificate_key_file: /certs/server-key.pem
+
+shared_secret: 7ts8H6A/JAIderQJZviPloVciVu6UZ45072BxZPonN8=
+cookie_secret: wJTxv+IFxtEaaNlWdgdm4gcGG4ZoCm6mUXVuEFvprA0=
+
+# Reached through the in-container localhost:9000 forwarder, so the issuer is
+# the one the browser sees.
+idp_provider: oidc
+idp_provider_url: http://localhost:9000/application/o/pomerium-spike/
+idp_client_id: pomerium-spike
+idp_client_secret: pomerium-spike-dev-secret
+idp_scopes: [openid, email, profile, offline_access]
+
+# Seizu would register as a confidential client. Client ID metadata documents
+# (the default) must be served over public HTTPS, which a local spike has not.
+runtime_flags:
+  mcp_dynamic_client_registration: true
+
+log_level: info
+
+routes:
+  - name: Spike whoami A
+    description: Reports which upstream grant authorized each call (route A)
+    from: https://whoami-a.localhost.pomerium.io:8443
+    to: http://pomerium-spike-whoami:8080
+    mcp:
+      server:
+        upstream_oauth2:
+          client_id: pomerium-spike-upstream
+          client_secret: pomerium-spike-upstream-dev-secret
+          scopes: [openid, email, profile, offline_access]
+          endpoint:
+            auth_url: http://localhost:9000/application/o/authorize/
+            token_url: http://localhost:9000/application/o/token/
+    policy:
+      - allow:
+          and:
+            - authenticated_user: true
+
+  - name: Spike whoami B
+    description: Reports which upstream grant authorized each call (route B)
+    from: https://whoami-b.localhost.pomerium.io:8443
+    to: http://pomerium-spike-whoami:8081
+    mcp:
+      server:
+        upstream_oauth2:
+          client_id: pomerium-spike-upstream
+          client_secret: pomerium-spike-upstream-dev-secret
+          scopes: [openid, email, profile, offline_access]
+          endpoint:
+            auth_url: http://localhost:9000/application/o/authorize/
+            token_url: http://localhost:9000/application/o/token/
+    policy:
+      - allow:
+          and:
+            - authenticated_user: true

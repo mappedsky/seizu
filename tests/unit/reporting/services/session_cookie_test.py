@@ -26,73 +26,73 @@ def _payload(refresh_token: str = "rt-abc", iat: int = 1_000, abs_exp: int = 10*
 
 async def test_encrypt_then_decrypt_roundtrips():
     payload = _payload(refresh_token="rt-xyz", iat=42, abs_exp=10**12)
-    cookie = encrypt(payload)
-    out = decrypt(cookie)
+    cookie = await encrypt(payload)
+    out = await decrypt(cookie)
     assert out == payload
 
 
 async def test_encrypt_then_decrypt_roundtrips_with_id_token():
     payload = SessionPayload(refresh_token="rt-xyz", iat=42, abs_exp=10**12, id_token="id-token")
-    cookie = encrypt(payload)
-    out = decrypt(cookie)
+    cookie = await encrypt(payload)
+    out = await decrypt(cookie)
     assert out == payload
 
 
 async def test_encrypt_produces_distinct_ciphertexts_for_same_payload():
     # Random nonce → cookies differ even for the same payload.
     payload = _payload()
-    assert encrypt(payload) != encrypt(payload)
+    assert await encrypt(payload) != await encrypt(payload)
 
 
 async def test_session_cookie_cannot_be_decrypted_as_state_cookie():
     """AAD domain separation: a session cookie fails state-cookie auth even with the shared key."""
     from reporting.services import oauth_state_cookie
 
-    session = encrypt(_payload())
+    session = await encrypt(_payload())
     with pytest.raises(oauth_state_cookie.OAuthStateCookieError, match="integrity check failed"):
-        oauth_state_cookie.decrypt(session)
+        await oauth_state_cookie.decrypt(session)
 
 
 async def test_decrypt_rejects_malformed_base64():
     with pytest.raises(SessionCookieError, match="Malformed session cookie"):
-        decrypt("not!base64!@#")
+        await decrypt("not!base64!@#")
 
 
 async def test_decrypt_rejects_too_short_blob():
     too_short = base64.urlsafe_b64encode(b"abc").rstrip(b"=").decode("ascii")
     with pytest.raises(SessionCookieError, match="too short"):
-        decrypt(too_short)
+        await decrypt(too_short)
 
 
 async def test_decrypt_rejects_tampered_ciphertext():
-    cookie = encrypt(_payload())
+    cookie = await encrypt(_payload())
     # Flip a byte in the ciphertext portion (after the nonce).
     raw = bytearray(base64.urlsafe_b64decode(cookie + "=" * (-len(cookie) % 4)))
     raw[-1] ^= 0x01
     tampered = base64.urlsafe_b64encode(bytes(raw)).rstrip(b"=").decode("ascii")
     with pytest.raises(SessionCookieError, match="integrity check failed"):
-        decrypt(tampered)
+        await decrypt(tampered)
 
 
 async def test_decrypt_rejects_wrong_key(mocker):
-    cookie = encrypt(_payload())
+    cookie = await encrypt(_payload())
     mocker.patch(
         "reporting.settings.SESSION_TOKEN_ENCRYPTION_KEY",
         base64.b64encode(os.urandom(32)).decode("ascii"),
     )
     with pytest.raises(SessionCookieError, match="integrity check failed"):
-        decrypt(cookie)
+        await decrypt(cookie)
 
 
 async def test_decrypt_rejects_expired_abs_exp():
-    cookie = encrypt(_payload(abs_exp=500))
+    cookie = await encrypt(_payload(abs_exp=500))
     with pytest.raises(SessionCookieError, match="absolute expiry"):
-        decrypt(cookie, now=1_000)
+        await decrypt(cookie, now=1_000)
 
 
 async def test_decrypt_accepts_at_or_before_abs_exp():
-    cookie = encrypt(_payload(abs_exp=1_000))
-    payload = decrypt(cookie, now=999)
+    cookie = await encrypt(_payload(abs_exp=1_000))
+    payload = await decrypt(cookie, now=999)
     assert payload.abs_exp == 1_000
 
 
@@ -104,7 +104,7 @@ async def test_unconfigured_key_raises():
     s.SESSION_TOKEN_ENCRYPTION_KEY = ""
     try:
         with pytest.raises(RuntimeError, match="must be configured"):
-            encrypt(_payload())
+            await encrypt(_payload())
     finally:
         s.SESSION_TOKEN_ENCRYPTION_KEY = original
 
@@ -112,7 +112,7 @@ async def test_unconfigured_key_raises():
 async def test_invalid_base64_key_raises(mocker):
     mocker.patch("reporting.settings.SESSION_TOKEN_ENCRYPTION_KEY", "not valid base64!@#")
     with pytest.raises(RuntimeError, match="valid base64"):
-        encrypt(_payload())
+        await encrypt(_payload())
 
 
 async def test_wrong_length_key_raises(mocker):
@@ -121,7 +121,7 @@ async def test_wrong_length_key_raises(mocker):
         base64.b64encode(b"too-short").decode("ascii"),
     )
     with pytest.raises(RuntimeError, match="32 bytes"):
-        encrypt(_payload())
+        await encrypt(_payload())
 
 
 async def test_compute_cookie_max_age_uses_rolling_window_when_far_from_abs_exp(mocker):

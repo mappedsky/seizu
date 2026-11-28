@@ -25,7 +25,14 @@ async def test_migrations_run_on_a_fresh_database(tmp_path):
         await run_schema_migrations(engine)
 
         tables = await _inspect(engine, lambda i: set(i.get_table_names()))
-        assert {"spaces", "subspaces", "reports", "external_mcp_connections", "chat_elicitations"} <= tables
+        assert {
+            "spaces",
+            "subspaces",
+            "reports",
+            "external_mcp_connections",
+            "chat_elicitations",
+            "delegated_tokens",
+        } <= tables
 
         report_columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("reports")})
         assert {"space_id", "subspace_id"} <= report_columns
@@ -303,5 +310,32 @@ async def test_reasoning_migration_adds_session_selection_without_rewriting_prof
             )
         assert current == old_config
         assert version == old_config
+    finally:
+        await engine.dispose()
+
+
+async def test_delegated_token_migration_upgrades_previous_head(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'delegated-tokens-upgrade.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)"))
+            await conn.execute(sa.text("INSERT INTO alembic_version VALUES ('0016_query_history_prompt')"))
+        await run_schema_migrations(engine)
+        columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("delegated_tokens")})
+        assert columns == {
+            "user_id",
+            "proxy_name",
+            "resource",
+            "key_id",
+            "ciphertext",
+            "revision",
+            "refresh_claimant",
+            "refresh_claim_expires_at",
+            "created_at",
+            "updated_at",
+        }
+        primary_key = await _inspect(engine, lambda i: i.get_pk_constraint("delegated_tokens")["constrained_columns"])
+        assert set(primary_key) == {"user_id", "proxy_name", "resource"}
+        await run_schema_migrations(engine)
     finally:
         await engine.dispose()

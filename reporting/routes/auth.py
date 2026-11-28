@@ -81,11 +81,11 @@ def _build_callback_url(request: Request) -> str:
 _AUTH_COOKIE_PATH = "/api/v1/auth"
 
 
-def _set_session_cookie(response: Response, payload: session_cookie.SessionPayload) -> None:
+async def _set_session_cookie(response: Response, payload: session_cookie.SessionPayload) -> None:
     max_age = session_cookie.compute_cookie_max_age(payload.abs_exp)
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
-        value=session_cookie.encrypt(payload),
+        value=await session_cookie.encrypt(payload),
         max_age=max_age,
         httponly=True,
         secure=settings.TALISMAN_FORCE_HTTPS,
@@ -104,10 +104,10 @@ def _clear_session_cookie(response: Response) -> None:
     )
 
 
-def _set_state_cookie(response: Response, payload: oauth_state_cookie.OAuthStatePayload) -> None:
+async def _set_state_cookie(response: Response, payload: oauth_state_cookie.OAuthStatePayload) -> None:
     response.set_cookie(
         key=oauth_state_cookie.STATE_COOKIE_NAME,
-        value=oauth_state_cookie.encrypt(payload),
+        value=await oauth_state_cookie.encrypt(payload),
         max_age=oauth_state_cookie.STATE_COOKIE_MAX_AGE_SECONDS,
         httponly=True,
         secure=settings.TALISMAN_FORCE_HTTPS,
@@ -175,7 +175,7 @@ async def auth_login(
         exp=int(time.time()) + oauth_state_cookie.STATE_COOKIE_MAX_AGE_SECONDS,
         nonce=nonce,
     )
-    _set_state_cookie(response, state_payload)
+    await _set_state_cookie(response, state_payload)
 
     authorize_url = await oauth_client.build_authorize_url(
         authorization_endpoint=metadata.authorization_endpoint,
@@ -219,7 +219,7 @@ async def auth_callback(
         return _callback_error_response("Missing OAuth state cookie")
 
     try:
-        state_payload = oauth_state_cookie.decrypt(seizu_oauth_state)
+        state_payload = await oauth_state_cookie.decrypt(seizu_oauth_state)
     except oauth_state_cookie.OAuthStateCookieError as exc:
         logger.warning("Invalid state cookie on callback: %s", exc)
         return _callback_error_response("Invalid OAuth state")
@@ -271,7 +271,7 @@ async def auth_callback(
     )
 
     response = RedirectResponse(url=state_payload.return_to, status_code=status.HTTP_302_FOUND)
-    _set_session_cookie(response, session_payload)
+    await _set_session_cookie(response, session_payload)
     _clear_state_cookie(response)
     return response
 
@@ -311,7 +311,7 @@ async def auth_refresh(
         return _unauthenticated_response("No session", clear_cookie=False)
 
     try:
-        session_payload = session_cookie.decrypt(seizu_session)
+        session_payload = await session_cookie.decrypt(seizu_session)
     except session_cookie.SessionCookieError as exc:
         logger.info("Invalid session cookie on refresh: %s", exc)
         return _unauthenticated_response("Invalid session", clear_cookie=True)
@@ -337,7 +337,7 @@ async def auth_refresh(
         abs_exp=new_abs_exp,
         id_token=token_response.id_token or session_payload.id_token,
     )
-    _set_session_cookie(response, new_payload)
+    await _set_session_cookie(response, new_payload)
 
     return RefreshResponse(
         access_token=token_response.access_token,
@@ -361,7 +361,7 @@ async def auth_logout(
     seizu_session = request.cookies.get(settings.SESSION_COOKIE_NAME)
     if seizu_session:
         try:
-            session_payload = session_cookie.decrypt(seizu_session)
+            session_payload = await session_cookie.decrypt(seizu_session)
             refresh_token = session_payload.refresh_token
             id_token = session_payload.id_token
         except session_cookie.SessionCookieError:

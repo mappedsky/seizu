@@ -303,9 +303,23 @@ into `user_authorization`, with durable owner-scoped status at
 only when an enabled proxy opts in); mesh deployments use `header_delegation`
 without a bearer. Standard URL elicitation exposes bounded, owner-only recovery links;
 detached runs never accept consent or automatically replay the operation.
-The gateway owns upstream user grants (AGT-048, STO-013).
-Per-user delegation and recovery are experimental; validation is tracked in #312
-(AGT-048). Shared-token external access is not covered by that designation.
+The gateway owns upstream user grants (STO-013). Per-user access is moving to
+delegated OAuth: each user authorizes Seizu once through the gateway's MCP
+OAuth flow, and Seizu keeps that grant in the token vault
+(`reporting/services/token_vault.py`) for interactive and detached runs alike
+([`AGT-059`](docs/root/dev/decisions/chat-agent.md), which supersedes AGT-048).
+The vault and its cipher exist; the OAuth client and connect flow are tracked
+in #312, and until they land per-user delegation and recovery stay
+experimental. Shared-token external access is not covered by that designation.
+
+The vault encrypts each grant as one value, bound to its owner, proxy and
+resource, under `DELEGATED_TOKEN_ENCRYPTION_KEYS`: a keyring separate from
+`SESSION_TOKEN_ENCRYPTION_KEY`, given to both the web service and the Temporal
+worker. A refresh holds the grant's refresh claim (one process at a time) and
+writes back conditionally on the random revision it read. Ciphers
+come from per-purpose factories in `reporting/services/encryption.py`
+(`session_cipher`, `delegated_token_cipher`), the only place a provider such as
+KMS would be added ([`STO-015`](docs/root/dev/decisions/report-store.md)).
 Streamable HTTP negotiates modern-first with legacy fallback; `protocol_mode:
 legacy` skips discovery. SSE always initializes (AGT-049).
 
@@ -341,7 +355,8 @@ surface as a structured authentication block, and M2M 401s have a distinct
 `ExternalMCPTokenExpired` exception before chat normalization. Interactive
 Temporal turns do not persist the browser bearer token, so use M2M plus target
 OIDC subject and issuer headers (or trusted header delegation) for
-detached/headless execution; never delegate Seizu's local user ID (AGT-048).
+detached/headless execution; never delegate Seizu's local user ID (AGT-048,
+superseded by AGT-059 once the delegated-OAuth client lands).
 Decisions: [`AGT-010`](docs/root/dev/decisions/chat-agent.md). Docs:
 `docs/root/install/external-mcp.md`.
 

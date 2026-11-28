@@ -173,6 +173,44 @@ class ReportStore(ABC):
         """Store an observation unless a newer one is already recorded."""
 
     @abstractmethod
+    async def get_delegated_token(self, user_id: str, proxy_name: str, resource: str) -> dict[str, Any] | None:
+        """Return one stored delegated grant row, ciphertext included, or None."""
+
+    @abstractmethod
+    async def list_delegated_tokens(self, user_id: str) -> list[dict[str, Any]]:
+        """Return this user's grant metadata (proxy, resource, key ID, timestamps), never ciphertext."""
+
+    @abstractmethod
+    async def put_delegated_token(self, record: dict[str, Any], *, expected_revision: str | None) -> bool:
+        """Write a delegated grant row carrying ``record["revision"]``; return whether it was written.
+
+        With ``expected_revision`` None the row is inserted or overwritten. Otherwise
+        it is updated only if it still has that revision, and False is returned when
+        it does not (or no longer exists), so a concurrent rewrite is never lost.
+        """
+
+    @abstractmethod
+    async def claim_delegated_token_refresh(
+        self, user_id: str, proxy_name: str, resource: str, *, claimant: str, expires_at: int, now: int
+    ) -> bool:
+        """Claim the right to refresh one grant until ``expires_at``; False while another claim is live.
+
+        An expired claim can be taken over. A missing row cannot be claimed.
+        """
+
+    @abstractmethod
+    async def release_delegated_token_refresh(
+        self, user_id: str, proxy_name: str, resource: str, *, claimant: str
+    ) -> None:
+        """Release a refresh claim, only if ``claimant`` still holds it."""
+
+    @abstractmethod
+    async def delete_delegated_tokens(
+        self, user_id: str, proxy_name: str | None = None, resource: str | None = None
+    ) -> int:
+        """Delete a user's delegated grant rows, narrowed by proxy and resource; return how many."""
+
+    @abstractmethod
     def generate_id(self) -> str:
         """Return a new UUIDv7 identifier."""
 

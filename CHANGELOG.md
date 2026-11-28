@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Token vault for delegated external MCP grants.** A new `delegated_tokens`
+  table (migration `0017`, applied automatically) stores each user's OAuth grant
+  for an external MCP gateway, encrypted with AES-256-GCM. It uses keys from the
+  new `DELEGATED_TOKEN_ENCRYPTION_KEYS` setting (`id:base64key[,…]`, first entry
+  current), which must differ from `SESSION_TOKEN_ENCRYPTION_KEY` and reach both
+  the web service and the Temporal worker. Nothing reads or writes the vault yet:
+  it is the storage for the delegated-OAuth client tracked in
+  [#312](https://github.com/mappedsky/seizu/issues/312), so the setting can stay
+  unset until that ships. The session and OAuth state cookies now encrypt
+  through the same swappable cipher interface, with an unchanged wire format, so
+  existing sessions stay valid. See
+  [AGT-059](docs/root/dev/decisions/chat-agent.md) and
+  [STO-015](docs/root/dev/decisions/report-store.md).
 - **Amazon Bedrock AgentCore Runtime as a sandbox provider.** Set
   `SANDBOX_PROVIDER=bedrock` to run each conversation's chat sandbox as an
   AgentCore Runtime session in your own AWS account. Files persist between turns

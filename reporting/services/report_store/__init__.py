@@ -80,6 +80,34 @@ async def record_external_mcp_connection(observation: dict[str, Any]) -> None:
     await get_store().record_external_mcp_connection(observation)
 
 
+async def get_delegated_token(user_id: str, proxy_name: str, resource: str) -> dict[str, Any] | None:
+    return await get_store().get_delegated_token(user_id, proxy_name, resource)
+
+
+async def list_delegated_tokens(user_id: str) -> list[dict[str, Any]]:
+    return await get_store().list_delegated_tokens(user_id)
+
+
+async def put_delegated_token(record: dict[str, Any], *, expected_revision: str | None) -> bool:
+    return await get_store().put_delegated_token(record, expected_revision=expected_revision)
+
+
+async def claim_delegated_token_refresh(
+    user_id: str, proxy_name: str, resource: str, *, claimant: str, expires_at: int, now: int
+) -> bool:
+    return await get_store().claim_delegated_token_refresh(
+        user_id, proxy_name, resource, claimant=claimant, expires_at=expires_at, now=now
+    )
+
+
+async def release_delegated_token_refresh(user_id: str, proxy_name: str, resource: str, *, claimant: str) -> None:
+    await get_store().release_delegated_token_refresh(user_id, proxy_name, resource, claimant=claimant)
+
+
+async def delete_delegated_tokens(user_id: str, proxy_name: str | None = None, resource: str | None = None) -> int:
+    return await get_store().delete_delegated_tokens(user_id, proxy_name, resource)
+
+
 def is_initialized() -> bool:
     """Whether the application store completed its startup migrations."""
     return _initialized

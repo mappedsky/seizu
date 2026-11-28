@@ -23,18 +23,14 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import os
 import time
 from dataclasses import dataclass
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from reporting import settings
+from reporting.services import encryption
 
-_KEY_BYTES = 32
-_NONCE_BYTES = 12
-_GCM_TAG_BYTES = 16
+_NONCE_BYTES = encryption.NONCE_BYTES
+_GCM_TAG_BYTES = encryption.TAG_BYTES
 # AES-GCM associated data domain-separates this cookie from the OAuth state
 # cookie, which shares the same encryption key. A ciphertext minted for one
 # purpose fails authentication if presented as the other. Bump the version
@@ -54,19 +50,6 @@ class SessionPayload:
     id_token: str | None = None
 
 
-def _get_key() -> bytes:
-    raw = settings.SESSION_TOKEN_ENCRYPTION_KEY
-    if not raw:
-        raise RuntimeError("SESSION_TOKEN_ENCRYPTION_KEY must be configured (32 random bytes, base64-encoded)")
-    try:
-        key = base64.b64decode(raw, validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise RuntimeError("SESSION_TOKEN_ENCRYPTION_KEY must be valid base64") from exc
-    if len(key) != _KEY_BYTES:
-        raise RuntimeError(f"SESSION_TOKEN_ENCRYPTION_KEY must decode to {_KEY_BYTES} bytes (got {len(key)})")
-    return key
-
-
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -76,7 +59,7 @@ def _b64url_decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + padding)
 
 
-def encrypt(payload: SessionPayload) -> str:
+async def encrypt(payload: SessionPayload) -> str:
     """Encrypt a SessionPayload into the cookie wire value."""
     plaintext = json.dumps(
         {
@@ -87,13 +70,10 @@ def encrypt(payload: SessionPayload) -> str:
         },
         separators=(",", ":"),
     ).encode("utf-8")
-    aesgcm = AESGCM(_get_key())
-    nonce = os.urandom(_NONCE_BYTES)
-    ciphertext = aesgcm.encrypt(nonce, plaintext, _AAD)
-    return _b64url_encode(nonce + ciphertext)
+    return _b64url_encode(await encryption.session_cipher().encrypt(plaintext, _AAD))
 
 
-def decrypt(cookie_value: str, *, now: int | None = None) -> SessionPayload:
+async def decrypt(cookie_value: str, *, now: int | None = None) -> SessionPayload:
     """Decrypt and validate a cookie wire value.
 
     Raises SessionCookieError if the cookie is malformed, fails AEAD
@@ -108,11 +88,9 @@ def decrypt(cookie_value: str, *, now: int | None = None) -> SessionPayload:
         raise SessionCookieError("Malformed session cookie") from exc
     if len(blob) < _NONCE_BYTES + _GCM_TAG_BYTES:
         raise SessionCookieError("Session cookie too short")
-    nonce, ciphertext = blob[:_NONCE_BYTES], blob[_NONCE_BYTES:]
-    aesgcm = AESGCM(_get_key())
     try:
-        plaintext = aesgcm.decrypt(nonce, ciphertext, _AAD)
-    except InvalidTag as exc:
+        plaintext = await encryption.session_cipher().decrypt(blob, _AAD)
+    except encryption.DecryptionError as exc:
         raise SessionCookieError("Session cookie integrity check failed") from exc
 
     try:

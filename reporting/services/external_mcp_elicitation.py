@@ -1,4 +1,4 @@
-"""Negotiation, elicitation capabilities and bounded URL recovery (AGT-048/049/055)."""
+"""Negotiation, elicitation capabilities and bounded URL recovery (AGT-049/055/059)."""
 
 from collections.abc import Callable
 from typing import Any
