@@ -342,6 +342,46 @@ services:
       - GITHUB_TOOLSETS=${DEV_GITHUB_MCP_TOOLSETS:-default}
     networks:
       database:
+  # ── Pomerium delegated-OAuth spike ───────────────────────────────────────
+  # Throwaway evaluation of Pomerium Core as the external MCP gateway; see
+  # .config/dev/pomerium-spike/README.md. Needs the auth profile:
+  #   docker compose --profile auth --profile pomerium-spike up -d --build
+  pomerium-spike:
+    build:
+      context: .
+      dockerfile: .config/dev/pomerium-spike/Dockerfile
+    profiles:
+      - pomerium-spike
+    depends_on:
+      - pomerium-spike-whoami
+    environment:
+      - DEV_OIDC_LOOPBACK_TARGET=authentik-server:9000
+    volumes:
+      - ./.config/dev/pomerium-spike/config.yaml:/pomerium/config.yaml:ro
+      - ./.compose/pomerium-spike:/certs
+    ports:
+      - "8443:8443"
+    networks:
+      auth:
+        # Containers reach the routes under the names the browser uses, so
+        # an in-stack client sees the same issuer and resource URLs.
+        aliases:
+          - authenticate.localhost.pomerium.io
+          - whoami-a.localhost.pomerium.io
+          - whoami-b.localhost.pomerium.io
+  pomerium-spike-whoami:
+    image: python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89
+    profiles:
+      - pomerium-spike
+    command: ["python", "-I", "/app/whoami_mcp.py"]
+    environment:
+      - WHOAMI_PORTS=8080,8081
+      - WHOAMI_USERINFO_URL=http://authentik-server:9000/application/o/userinfo/
+      - WHOAMI_USERINFO_HOST=localhost:9000
+    volumes:
+      - ./.config/dev/pomerium-spike/whoami_mcp.py:/app/whoami_mcp.py:ro
+    networks:
+      auth:
   seizu-temporal-worker:
     image: ghcr.io/mappedsky/seizu
     restart: on-failure
